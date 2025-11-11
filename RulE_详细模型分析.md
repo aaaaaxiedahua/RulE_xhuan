@@ -986,3 +986,236 @@ RulE模型通过以下方式实现知识图谱推理：
 - 高效的图传播算法实现规则落地
 - 灵活的两阶段训练策略
 - 可解释的推理过程（通过规则落地）
+
+---
+
+## 训练流程三个阶段详解
+
+在 `src/main.py` 中，训练流程通过三个注释标记清晰地划分为三个阶段：
+
+### 阶段1: `# For pre-training` (第133-156行)
+
+**目的**: 预训练实体、关系和规则的嵌入
+
+**主要操作**:
+```python
+# For pre-training
+
+pre_trainer = PreTrainer(
+    graph=graph,
+    model=RulE_model,
+    valid_set=valid_set,
+    test_set=test_set,
+    ruleset=ruleset,
+    expectation=True,
+    device = device,
+    num_worker=args.cpu_num
+)
+
+# 如果取消注释这两行,会加载之前的预训练checkpoint继续训练
+# checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
+# RulE_model.load_state_dict(checkpoint['model'])
+
+# 如果取消注释这两行,会在训练前评估初始模型(通常不需要)
+# valid_mrr = pre_trainer.evaluate('valid', expectation=True)
+# test_mrr = pre_trainer.evaluate('test', expectation=True)
+
+# 如果取消注释这一行,会执行预训练(首次训练时需要)
+# pre_trainer.train(args)
+```
+
+**训练内容**:
+- 使用 RotatE 联合训练实体嵌入、关系嵌入和规则嵌入
+- 优化三元组损失 $\mathcal{L}_{fact}$ 和规则损失 $\mathcal{L}_{rule}$
+- 训练步数: `max_steps` (通常为30000步)
+
+**输出文件**:
+- `checkpoint` - 最佳预训练模型参数
+- `entity_embedding.npy` - 实体嵌入
+- `relation_embedding.npy` - 关系嵌入
+- `rule_embedding.npy` - 规则嵌入
+
+**使用场景**:
+- **首次训练**: 取消注释第155行 `pre_trainer.train(args)`,执行完整预训练
+- **继续预训练**: 取消注释第148-149行加载checkpoint + 第155行继续训练
+- **跳过预训练**: 全部注释(已有预训练模型时),直接进入阶段2
+
+---
+
+### 阶段2: `# load rule embedding and KGE embedding` (第162-171行)
+
+**目的**: 加载预训练好的嵌入,评估预训练效果,准备进入grounding阶段
+
+**主要操作**:
+```python
+# load rule embedding and KGE embedding
+
+# 加载预训练的最佳模型
+checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
+RulE_model.load_state_dict(checkpoint['model'])
+
+logging.info('Test the results of pre-training')
+
+# 评估预训练模型的性能
+valid_mrr = pre_trainer.evaluate('valid', expectation=True)
+test_mrr = pre_trainer.evaluate('test', expectation=True)
+```
+
+**功能说明**:
+- 从 `checkpoint` 文件加载预训练阶段学到的所有参数
+- 在验证集和测试集上评估预训练模型的质量
+- 输出评估指标: MRR, Hits@1/3/10, MR
+
+**为什么需要这个阶段**:
+1. **验证预训练质量**: 确保预训练达到预期效果
+2. **加载最佳模型**: 预训练期间保存的是验证集上最好的模型,而不是最后一步的模型
+3. **准备frozen参数**: 接下来grounding阶段会冻结这些参数
+
+**与阶段1的区别**:
+- **阶段1 (第148-149行)**: 在预训练**之前**加载checkpoint,用于继续未完成的预训练
+- **阶段2 (第164-165行)**: 在预训练**之后**加载checkpoint,用于获取最佳预训练结果
+
+---
+
+### 阶段3: `# RulE_model.add_param()` (第173-194行)
+
+**目的**: Grounding训练 - 学习如何聚合规则落地结果
+
+**主要操作**:
+```python
+# RulE_model.add_param()
+# ↑ 这是历史遗留注释,原本用于添加grounding参数
+# 现在这些参数在模型初始化时就创建了,所以这行被注释掉
+
+# 如果有之前的grounding checkpoint,加载它(继续grounding训练)
+checkpoint = torch.load(os.path.join(args.save_path, 'grounding.pt'))
+RulE_model.load_state_dict(checkpoint['model'])
+
+# 创建Grounding训练器
+ground_trainer = GroundTrainer(
+    model=RulE_model,
+    args = args,
+    train_set=train_set,
+    valid_set=valid_set,
+    test_set=test_set,
+    test_kge_set = test_kge_set,
+    device=device,
+    num_worker=args.cpu_num
+)
+
+# 可选: grounding训练前的评估(通常不需要)
+# valid_mrr = ground_trainer.evaluate('valid', expectation=True)
+# test_mrr = ground_trainer.evaluate('test', expectation=True)
+
+# 执行grounding训练
+ground_trainer.train(args)
+```
+
+**训练内容**:
+- **冻结参数**: entity_embedding, relation_embedding, rule_emb (不再更新)
+- **训练参数**: mlp_feature, score_model (MLP聚合网络)
+- **训练方法**:
+  - 规则落地: 通过图传播在KG上实例化规则
+  - 特征聚合: 使用MLP聚合规则落地的计数
+  - 损失函数: 交叉熵损失 + 标签平滑
+- **训练轮数**: `num_iters` (通常为20轮)
+
+**输出文件**:
+- `grounding.pt` - Grounding阶段模型参数
+- `g_rule_embedding.npy` - Grounding后的规则MLP特征
+
+**关于 `add_param()` 注释**:
+- 这是早期版本的遗留代码标记
+- 原本用于在grounding前动态添加MLP参数
+- 现在这些参数在 `model.py` 的 `__init__` 中就已创建,不需要额外添加
+- 保留这个注释是为了标记"从这里开始进入grounding阶段"
+
+---
+
+### 三个阶段的对比总结
+
+| 阶段 | 注释标记 | 主要操作 | 可训练参数 | 输出 | 典型配置 |
+|------|---------|---------|-----------|------|---------|
+| **阶段1** | `# For pre-training` | 联合训练嵌入 | entity_emb<br>relation_emb<br>rule_emb | checkpoint<br>xxx_emb.npy | 首次训练时取消注释155行 |
+| **阶段2** | `# load rule embedding...` | 加载并评估预训练模型 | 无(仅评估) | 评估指标 | 始终执行(第164-171行) |
+| **阶段3** | `# RulE_model.add_param()` | Grounding训练 | mlp_feature<br>score_model<br>(冻结其他) | grounding.pt<br>g_rule_emb.npy | 始终执行(第178-194行) |
+
+---
+
+### 典型训练场景
+
+#### 场景1: 首次完整训练
+
+```python
+# 阶段1: 取消注释预训练
+pre_trainer.train(args)  # 第155行
+
+# 阶段2: 加载并评估(保持默认)
+checkpoint = torch.load(...)  # 第164-165行
+pre_trainer.evaluate(...)     # 第170-171行
+
+# 阶段3: Grounding训练(保持默认)
+ground_trainer.train(args)    # 第194行
+```
+
+#### 场景2: 已有预训练,只训练grounding
+
+```python
+# 阶段1: 全部注释(跳过预训练)
+# pre_trainer.train(args)
+
+# 阶段2: 加载预训练模型(保持默认)
+checkpoint = torch.load(...)
+pre_trainer.evaluate(...)
+
+# 阶段3: Grounding训练(保持默认)
+ground_trainer.train(args)
+```
+
+#### 场景3: 继续未完成的grounding训练
+
+```python
+# 阶段1: 全部注释(跳过预训练)
+
+# 阶段2: 加载预训练模型(保持默认)
+
+# 阶段3: 取消注释加载grounding checkpoint
+checkpoint = torch.load('grounding.pt')  # 第175-176行
+RulE_model.load_state_dict(...)
+ground_trainer.train(args)
+# 注意: 仍会从第1轮训练到第20轮,会重复已完成的轮次
+```
+
+---
+
+### 代码执行流程图
+
+```
+main.py 执行流程:
+│
+├─【阶段1准备】第133-146行
+│  └─ 创建 PreTrainer(仅创建对象,不训练)
+│
+├─【阶段1可选】第148-156行 (全部被注释)
+│  ├─ 第148-149行: 加载之前的checkpoint (用于继续预训练)
+│  ├─ 第152-153行: 训练前评估(通常不需要)
+│  └─ 第155行: 执行预训练 ← 首次训练时需要取消注释
+│
+├─【阶段2必须】第162-171行 ✅
+│  ├─ 第164-165行: 加载预训练最佳模型
+│  └─ 第170-171行: 评估预训练效果
+│      └─ 输出: MRR=0.802 (你日志中看到的)
+│
+└─【阶段3必须】第173-194行 ✅
+   ├─ 第175-176行: 可选加载grounding checkpoint
+   ├─ 第178-187行: 创建 GroundTrainer
+   ├─ 第189-190行: 可选grounding前评估
+   └─ 第194行: 执行grounding训练(20轮)
+```
+
+---
+
+这三个阶段清晰地体现了RulE的设计理念:
+1. **先学习语义** (预训练) - 理解实体、关系、规则的含义
+2. **验证语义质量** (评估) - 确保学到了有用的表示
+3. **学习推理** (grounding) - 在固定语义的基础上学习如何使用规则进行推理
