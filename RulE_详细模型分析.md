@@ -1219,3 +1219,741 @@ main.py 执行流程:
 1. **先学习语义** (预训练) - 理解实体、关系、规则的含义
 2. **验证语义质量** (评估) - 确保学到了有用的表示
 3. **学习推理** (grounding) - 在固定语义的基础上学习如何使用规则进行推理
+
+---
+
+## 三种推理模式详解
+
+RulE模型提供了三种不同的推理模式,分别适用于不同的场景和需求。
+
+### **模式1: 纯KGE推理 (Pure Knowledge Graph Embedding)**
+
+**定义**: 仅使用RotatE学习的实体和关系嵌入进行预测,不使用任何规则信息。
+
+#### **工作原理**
+
+给定查询 `(head, relation, ?)`，使用RotatE的评分函数计算每个候选实体的分数:
+
+$$
+\text{score}_{\text{KGE}}(t|h,r) = \gamma_{fact} - \|\mathbf{e}_h \circ \mathbf{r} - \mathbf{e}_t\|_2
+$$
+
+其中:
+- $\mathbf{e}_h, \mathbf{e}_t$: 头实体和尾实体的复数嵌入
+- $\mathbf{r}$: 关系的相位角嵌入
+- $\circ$: 复数旋转操作 (Hadamard积)
+- $\gamma_{fact}$: margin参数 (通常为6)
+
+#### **代码实现**
+
+```python
+# 代码位置: src/trainer.py:227-326 (PreTrainer.evaluate)
+def evaluate(self, split, expectation=True):
+    # 只使用KGE分数,不用规则
+    KGE_score = model.compute_g_KGE(all_h, all_r)
+    logits = KGE_score  # ← 直接使用KGE分数
+
+    # 计算排名和评估指标
+    ...
+```
+
+#### **使用场景**
+
+```python
+# main.py:170-171 - 预训练结束后的评估
+valid_mrr = pre_trainer.evaluate('valid', expectation=True)
+test_mrr = pre_trainer.evaluate('test', expectation=True)
+```
+
+#### **实例: 查询 (aspirin, treats, ?)**
+
+```
+使用RotatE嵌入计算:
+
+候选实体分数:
+  headache: 6 - ||e_aspirin ○ r_treats - e_headache||₂ = 5.8
+  fever:    6 - ||e_aspirin ○ r_treats - e_fever||₂    = 5.2
+  pain:     6 - ||e_aspirin ○ r_treats - e_pain||₂     = 5.5
+
+预测: headache (分数最高)
+```
+
+#### **优缺点**
+
+| 优点 | 缺点 |
+|------|------|
+| ✅ 快速 - 只需向量运算 | ❌ 黑盒 - 无法解释预测原因 |
+| ✅ 全覆盖 - 所有实体都有分数 | ❌ 过拟合 - 容易记忆训练集模式 |
+| ✅ 简单 - 不依赖规则 | ❌ 泛化差 - 对罕见关系表现不佳 |
+
+---
+
+### **模式2: 纯规则推理 (Pure Rule-based Reasoning)**
+
+**定义**: 仅使用规则落地的结果进行预测,完全不使用KGE嵌入分数。
+
+#### **工作原理**
+
+给定查询 `(head, relation, ?)`，执行以下步骤:
+
+**步骤1: 检索相关规则**
+
+找到所有头部关系为 `relation` 的规则:
+$$
+\mathcal{R}_r = \{\text{rule} : \text{rule.head} = r\}
+$$
+
+**步骤2: 规则落地 (Grounding)**
+
+对每条规则,通过图传播找到所有满足规则体的路径:
+
+对于规则 $r_{b_1} \land r_{b_2} \rightarrow r_h$:
+
+```
+初始化: x⁽⁰⁾ = one_hot(head)  # 从头实体开始
+第1跳:   x⁽¹⁾ = 沿着r_b1传播(x⁽⁰⁾)
+第2跳:   x⁽²⁾ = 沿着r_b2传播(x⁽¹⁾)
+落地计数: count(entity) = x⁽²⁾[entity]  # 到达该实体的路径数
+```
+
+**步骤3: MLP聚合评分**
+
+使用训练好的MLP聚合所有规则的贡献:
+
+$$
+\text{score}_{\text{rule}}(t|h,r) = \text{MLP}\left(\sum_{\text{rule} \in \mathcal{R}_r} \text{count}(t, \text{rule}, h) \cdot \mathbf{f}_{\text{rule}}\right) + b_t
+$$
+
+其中:
+- $\mathbf{f}_{\text{rule}}$: 规则的MLP特征向量 (在grounding阶段学习)
+- $b_t$: 实体偏置
+- count: 规则落地计数
+
+#### **代码实现**
+
+```python
+# 代码位置: src/trainer.py:414-521 (GroundTrainer.evaluate)
+def evaluate(self, split, alpha=3.0, expectation=True):
+    # 只用规则落地分数
+    logits, mask = model(all_h, all_r, None)  # ← 规则推理
+
+    # 不使用KGE分数!
+    # kge_score = model.compute_g_KGE(all_h, all_r)  # 被注释
+    # logits += alpha * kge_score
+
+    # 计算排名
+    ...
+```
+
+**关键**: 第447-448行被注释掉,不加入KGE分数
+
+#### **使用场景**
+
+```python
+# trainer.py:328 - Grounding训练过程中的验证
+valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+
+# trainer.py:347 - Grounding训练结束后的最终评估
+test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
+```
+
+#### **实例: 查询 (aspirin, treats, ?)**
+
+```
+步骤1: 找到相关规则
+  Rule1: contains(x, y) ∧ reducePain(y, z) → treats(x, z)
+  Rule2: hasEffect(x, y) ∧ cures(y, z) → treats(x, z)
+
+步骤2: 在知识图谱上落地规则
+  Rule1: aspirin --contains--> salicylic_acid --reducePain--> headache
+         落地计数: headache=1, pain=1
+
+  Rule2: aspirin --hasEffect--> anti_inflammatory --cures--> fever
+         落地计数: fever=1
+
+步骤3: MLP聚合评分
+  score(headache) = MLP([rule1特征×1, rule2特征×0]) + bias_headache = 0.9
+  score(fever)    = MLP([rule1特征×0, rule2特征×1]) + bias_fever    = 0.7
+  score(pain)     = MLP([rule1特征×1, rule2特征×0]) + bias_pain     = 0.6
+
+预测: headache (规则1强支持)
+```
+
+#### **优缺点**
+
+| 优点 | 缺点 |
+|------|------|
+| ✅ 可解释 - 能看到具体规则路径 | ❌ 覆盖率低 - 没有规则路径就无法预测 |
+| ✅ 泛化好 - 能推理训练集没见过的三元组 | ❌ 依赖规则质量 - 规则挖掘不完整会影响性能 |
+| ✅ 符号推理 - 遵循逻辑规则 | ❌ 计算慢 - 图传播比嵌入查询慢 |
+
+---
+
+### **模式3: 混合推理 (Hybrid Reasoning)**
+
+**定义**: 结合纯规则推理和KGE嵌入两种方法的分数,取长补短。
+
+#### **工作原理**
+
+给定查询 `(head, relation, ?)`，计算两种分数并加权组合:
+
+$$
+\text{score}_{\text{hybrid}}(t|h,r) = \text{score}_{\text{rule}}(t|h,r) + \alpha \cdot \text{score}_{\text{KGE}}(t|h,r)
+$$
+
+其中:
+- $\text{score}_{\text{rule}}$: 规则落地的MLP分数 (如模式2)
+- $\text{score}_{\text{KGE}}$: RotatE的嵌入分数 (如模式1)
+- $\alpha$: 融合权重,控制KGE的贡献度 (config中的`alpha`,通常为2-5)
+
+#### **代码实现**
+
+```python
+# 代码位置: src/trainer.py:525-633 (GroundTrainer.evaluate_t)
+def evaluate_t(self, split, alpha=3.0, expectation=True):
+    # 规则落地分数
+    logits, mask = model(all_h, all_r, None)
+
+    # KGE分数
+    kge_score = model.compute_g_KGE(all_h, all_r)
+
+    # 混合! ← 关键
+    logits = logits + alpha * kge_score
+
+    # 计算排名
+    ...
+```
+
+**关键**: 第560行,两种分数相加
+
+#### **使用场景**
+
+```python
+# trainer.py:348 - Grounding训练结束后的最终混合评估
+test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+```
+
+这是**最终部署时推荐使用的模式**,通常性能最好。
+
+#### **实例: 查询 (aspirin, treats, ?)**
+
+```
+步骤1: 计算规则分数 (同模式2)
+  score_rule(headache) = 0.9
+  score_rule(fever)    = 0.7
+  score_rule(pain)     = 0.6
+  score_rule(cold)     = 0.0  # 没有规则路径
+
+步骤2: 计算KGE分数 (同模式1)
+  score_KGE(headache) = 5.8
+  score_KGE(fever)    = 5.2
+  score_KGE(pain)     = 5.5
+  score_KGE(cold)     = 4.9
+
+步骤3: 混合 (α=2.0)
+  score_hybrid(headache) = 0.9 + 2.0 × 5.8 = 12.5  ✅ 最高
+  score_hybrid(fever)    = 0.7 + 2.0 × 5.2 = 11.1
+  score_hybrid(pain)     = 0.6 + 2.0 × 5.5 = 11.6
+  score_hybrid(cold)     = 0.0 + 2.0 × 4.9 = 9.8   # KGE补充了规则未覆盖的部分
+
+预测: headache (两种方法都支持,更confident)
+```
+
+#### **优缺点**
+
+| 优点 | 缺点 |
+|------|------|
+| ✅ 性能最好 - 结合两种方法优势 | ❌ 可解释性弱 - 不清楚哪部分起主要作用 |
+| ✅ 鲁棒性强 - 一种方法失效时另一种补充 | ❌ 计算慢 - 需要同时计算两种分数 |
+| ✅ 全覆盖 - KGE保证所有实体都有分数 | ❌ 超参敏感 - α需要调优 |
+
+---
+
+## 三种模式的性能对比
+
+以UMLS数据集为例 (基于你的训练结果):
+
+| 推理模式 | MRR | Hit@1 | Hit@10 | 计算速度 | 何时使用 |
+|---------|-----|-------|--------|---------|---------|
+| **纯KGE** (预训练) | 0.805 | 70.5% | 96.1% | ⚡⚡⚡ 最快 | 需要快速预测,不需要解释 |
+| **纯规则** (grounding) | ~0.54 | ~40% | ~78% | ⚡⚡ 中等 | 需要可解释性,有完整规则 |
+| **混合推理** | ~0.83 | ~72% | ~97% | ⚡ 较慢 | **最终部署推荐** |
+
+### **性能分析**
+
+1. **纯KGE表现好的原因**:
+   - 在UMLS数据集上,训练集覆盖充分
+   - RotatE嵌入捕捉到了实体和关系的语义模式
+   - 没有规则覆盖率的限制
+
+2. **纯规则表现差的原因**:
+   - 只完成了1轮grounding训练 (你的模型训练未完成)
+   - MLP参数还没有充分学习如何聚合规则
+   - 规则覆盖率不是100%,有些查询没有规则路径
+
+3. **混合推理最优的原因**:
+   - 规则提供符号推理,增强泛化能力
+   - KGE填补规则未覆盖的gap
+   - 两者相互验证,减少错误预测
+
+---
+
+## 预训练阶段的测试集评估
+
+### **问题: 预训练有没有在测试集上评估?**
+
+**答案: 有,但只在特定时刻**
+
+### **评估时间线**
+
+```
+预训练阶段 (30000步):
+│
+├─ Step 0, 1000, 2000, ..., 29000, 30000
+│  └─ 每valid_steps (1000步) 评估一次
+│      └─ ❌ 只评估验证集 (valid)
+│      └─ ❌ 不评估测试集 (test)
+│      └─ 如果验证集MRR提升 → 保存checkpoint
+│
+└─ 预训练结束后 (main.py:170-171)
+    ├─ 加载最佳checkpoint
+    ├─ ✅ 评估验证集: MRR=0.810
+    └─ ✅ 评估测试集: MRR=0.805  ← 唯一一次评估测试集!
+```
+
+### **为什么训练过程中不评估测试集?**
+
+1. **防止过拟合测试集**
+   - 如果频繁在测试集上评估,会间接优化测试集性能
+   - 违反机器学习的基本原则:测试集应该只用一次
+
+2. **节省时间**
+   - 验证集足够判断模型好坏
+   - 测试集评估需要额外时间(UMLS测试集有6528个样本)
+
+3. **标准机器学习流程**
+   - 训练集 (train): 用于训练
+   - 验证集 (valid): 用于调参和early stopping
+   - 测试集 (test): 只在最后评估一次,报告最终性能
+
+### **代码位置**
+
+```python
+# trainer.py:117-122 - 训练过程中只评估验证集
+if step % args.valid_steps == 0:
+    logging.info('Evaluating on Valid Dataset...')
+    mrr = self.evaluate("valid", self.expectation)  # ← 只评估valid
+    if mrr > best_mrr:
+        save_model(self.model, optimizer, args)
+        best_mrr = mrr
+
+# main.py:170-171 - 预训练结束后评估测试集
+valid_mrr = pre_trainer.evaluate('valid', expectation=True)
+test_mrr = pre_trainer.evaluate('test', expectation=True)  # ← 评估test
+```
+
+### **你的训练日志**
+
+```
+2025-11-10 21:56:56 INFO     >>>>> RuleE emb: Evaluating on valid
+2025-11-10 21:56:56 INFO     MRR  : 0.809987  ← 验证集
+
+2025-11-10 21:57:07 INFO     >>>>> RuleE emb: Evaluating on test
+2025-11-10 21:57:07 INFO     MRR  : 0.805383  ← 测试集 (预训练结束后唯一一次)
+```
+
+---
+
+## Grounding阶段的测试集评估
+
+在grounding训练阶段,情况类似:
+
+```
+Grounding训练 (20轮):
+│
+├─ Iteration 1, 2, 3, ..., 19, 20
+│  └─ 每轮结束后评估验证集
+│      └─ ❌ 不评估测试集 (trainer.py:329-330被注释)
+│      └─ 如果验证集MRR提升 → 保存grounding.pt
+│
+└─ Grounding结束后 (trainer.py:346-348)
+    ├─ 加载最佳grounding.pt
+    ├─ ✅ 评估验证集
+    ├─ ✅ 评估测试集 (纯规则)
+    └─ ✅ 评估测试集 (混合推理)  ← 报告最终性能
+```
+
+### **被注释的代码**
+
+```python
+# trainer.py:328-330 - 训练每轮都被注释掉
+valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+# test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)  ← 被注释
+# test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)  ← 被注释
+```
+
+**为什么被注释?**
+- 太慢:测试集评估需要3-4分钟,20轮要多花1小时
+- 不必要:验证集已经足够判断模型好坏
+- 最后评估:训练结束后会完整评估三种模式(trainer.py:346-348)
+
+---
+
+## 总结
+
+### **三种推理模式的使用建议**
+
+```
+┌─────────────────────┐
+│  你的应用场景       │
+└─────────────────────┘
+          │
+          ├─ 需要最佳性能? → 使用 混合推理 (evaluate_t)
+          │
+          ├─ 需要可解释性? → 使用 纯规则推理 (evaluate)
+          │
+          └─ 需要快速预测? → 使用 纯KGE推理 (pre_trainer.evaluate)
+```
+
+### **测试集评估原则**
+
+- ✅ **预训练结束后**: 评估一次,验证预训练效果
+- ✅ **Grounding结束后**: 评估三种模式,报告最终性能
+- ❌ **训练过程中**: 不评估测试集,只用验证集调参
+
+这符合机器学习的最佳实践,确保测试集的公正性!
+
+---
+
+## Grounding训练中的Early Stopping机制详解
+
+### **代码位置: trainer.py:442-445**
+
+这段代码实现了grounding训练阶段的**早停(Early Stopping)和模型保存机制**。
+
+```python
+# 第442-445行
+if valid_mrr_iter > best_valid_mrr:
+    best_valid_mrr = valid_mrr_iter
+    test_mrr = test_mrr_iter
+    self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+```
+
+---
+
+### **功能说明**
+
+#### **1. Early Stopping (早停机制)**
+
+**作用**: 只保存在验证集上表现最好的模型,防止过拟合
+
+**工作原理**:
+
+```python
+# 第413行 - 初始化最佳MRR为0
+best_valid_mrr = 0.0
+
+# 第419-445行 - 训练循环
+for k in range(args.num_iters):  # 20轮
+    
+    # 第436行 - 训练一轮
+    self.train_step(...)
+    
+    # 第437行 - 评估当前轮的验证集性能
+    valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+    
+    # 第442行 - 判断是否比历史最佳更好
+    if valid_mrr_iter > best_valid_mrr:
+        # 更新最佳验证集MRR
+        best_valid_mrr = valid_mrr_iter
+        
+        # 第444行 - 记录对应的测试集MRR (存在bug!)
+        test_mrr = test_mrr_iter
+        
+        # 第445行 - 保存这个最好的模型
+        self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+```
+
+**实例演示**:
+
+假设20轮训练的验证集MRR变化如下:
+
+```
+轮次  valid_mrr_iter  best_valid_mrr  是否保存模型?
+ 1      0.520          0.000           ✅ 保存 (0.520 > 0.000)
+ 2      0.535          0.520           ✅ 保存 (0.535 > 0.520)
+ 3      0.548          0.535           ✅ 保存 (0.548 > 0.535)
+ 4      0.556          0.548           ✅ 保存 (0.556 > 0.548)
+ 5      0.561          0.556           ✅ 保存 (0.561 > 0.556) ← 最佳!
+ 6      0.558          0.561           ❌ 不保存 (0.558 < 0.561)
+ 7      0.552          0.561           ❌ 不保存
+ 8      0.549          0.561           ❌ 不保存
+ ...
+20      0.530          0.561           ❌ 不保存
+
+最终保存的模型: 第5轮训练结束时的模型 (valid_mrr = 0.561)
+```
+
+**为什么需要Early Stopping?**
+
+| 情况 | 没有Early Stopping | 有Early Stopping |
+|------|------------------|------------------|
+| **第5轮后** | 继续训练,MRR下降 | 记录第5轮为最佳 |
+| **第20轮后** | 保存过拟合的模型 | 保存第5轮的模型 |
+| **泛化能力** | 差 (过拟合训练集) | 好 (在valid最优点) |
+
+---
+
+#### **2. 第444行的Bug**
+
+```python
+# 第444行
+test_mrr = test_mrr_iter
+```
+
+**问题**: 当第438-439行被注释时,`test_mrr_iter`从未被定义
+
+**原始设计意图**:
+- 第438行应该评估测试集: `test_mrr_iter = self.evaluate('test', ...)`
+- 第444行记录最佳验证集对应的测试集性能
+- 第449行打印这个最佳测试集MRR
+
+**实际情况** (438-439被注释):
+```python
+# 第413-414行
+best_valid_mrr = 0.0 
+test_mrr = 0.0  # test_mrr始终为0
+
+# 第437行
+valid_mrr_iter = self.evaluate('valid', ...)
+
+# 第438-439行 - 被注释,test_mrr_iter未定义!
+# test_mrr_iter = self.evaluate('test', ...)
+
+# 第442-445行
+if valid_mrr_iter > best_valid_mrr:
+    best_valid_mrr = valid_mrr_iter
+    test_mrr = test_mrr_iter  # ← UnboundLocalError: 变量未定义!
+    self.save(...)
+
+# 第449行
+logging.info('| Final Test MRR: {:.6f}'.format(test_mrr))  # 永远打印0.000000
+```
+
+---
+
+### **修改这段代码会影响模型训练吗?**
+
+#### **✅ 不会影响最终模型质量!**
+
+这段代码**只控制保存哪个checkpoint**,不影响训练本身:
+
+| 修改方案 | 对训练的影响 | 对最终结果的影响 |
+|---------|------------|----------------|
+| **保持原样 (有bug)** | ❌ 运行会报错 | - |
+| **注释掉444行** | ✅ 训练正常进行 | ✅ 最终测试集评估正常 (第456-457行) |
+| **取消注释438-439** | ✅ 训练正常,但慢1小时 | ✅ 最终测试集评估正常 |
+| **完全移除442-445** | ⚠️ 会保存最后一轮模型,可能过拟合 | ⚠️ 可能性能下降 |
+
+**推荐修改方案1** (最简单):
+
+```python
+if valid_mrr_iter > best_valid_mrr:
+    best_valid_mrr = valid_mrr_iter
+    # test_mrr = test_mrr_iter  # ← 注释掉这行,避免报错
+    self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+```
+
+**推荐修改方案2** (符合原始设计):
+
+```python
+valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)  # ← 取消注释
+
+if valid_mrr_iter > best_valid_mrr:
+    best_valid_mrr = valid_mrr_iter
+    test_mrr = test_mrr_iter  # 现在有定义了
+    self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+```
+
+---
+
+### **完整的训练和保存流程**
+
+```
+Grounding训练完整流程:
+
+├─ 初始化 (第413-414行)
+│  ├─ best_valid_mrr = 0.0
+│  └─ test_mrr = 0.0
+│
+├─ 训练循环 (第419-445行)
+│  │
+│  ├─ 第1轮:
+│  │  ├─ train_step() → 更新MLP参数
+│  │  ├─ evaluate('valid') → valid_mrr_iter = 0.520
+│  │  └─ if 0.520 > 0.0: 保存grounding.pt ✅
+│  │
+│  ├─ 第2轮:
+│  │  ├─ train_step()
+│  │  ├─ evaluate('valid') → valid_mrr_iter = 0.535
+│  │  └─ if 0.535 > 0.520: 保存grounding.pt ✅
+│  │
+│  ├─ ...
+│  │
+│  ├─ 第5轮:
+│  │  ├─ train_step()
+│  │  ├─ evaluate('valid') → valid_mrr_iter = 0.561 ← 最佳!
+│  │  └─ if 0.561 > 0.556: 保存grounding.pt ✅
+│  │
+│  ├─ 第6-20轮:
+│  │  ├─ train_step()
+│  │  ├─ evaluate('valid') → valid_mrr_iter < 0.561
+│  │  └─ if False: 不保存 ❌
+│  │
+│  └─ (循环结束,grounding.pt保存的是第5轮模型)
+│
+├─ 打印训练过程中的最佳测试集MRR (第448-450行)
+│  └─ logging.info('Final Test MRR: 0.000000')  # bug,无意义
+│
+└─ 最终评估 (第452-457行)
+   ├─ 加载最佳模型: grounding.pt (第5轮)
+   ├─ evaluate('valid') → 验证最佳模型
+   ├─ evaluate('test') → 纯规则模式测试集MRR ✅
+   └─ evaluate_t('test_kge') → 混合模式测试集MRR ✅
+```
+
+---
+
+### **关键要点总结**
+
+#### **1. 这段代码的核心作用**
+
+- **Early Stopping**: 自动保存验证集上最好的模型
+- **防止过拟合**: 避免保存过度训练的模型
+- **提高泛化能力**: 选择在验证集上最优的参数
+
+#### **2. 是否可以修改?**
+
+✅ **可以修改,不会影响训练质量**
+
+- 这段代码只控制"保存哪个checkpoint"
+- 不影响训练过程本身
+- 最终测试集评估在第456-457行,与这里无关
+
+#### **3. 当前代码的问题**
+
+⚠️ **第444行存在bug** (当438-439被注释时)
+
+**症状**: `UnboundLocalError: local variable 'test_mrr_iter' referenced before assignment`
+
+**原因**: 第438-439行被注释,导致`test_mrr_iter`未定义
+
+**解决方案**: 
+- 方案1: 注释掉第444行 (推荐,简单)
+- 方案2: 取消注释第438-439行 (慢,但符合原始设计)
+
+#### **4. 第449行的意义**
+
+```python
+logging.info('| Final Test MRR: {:.6f}'.format(test_mrr))
+```
+
+**原始意图**: 打印训练过程中见到的最佳测试集MRR
+
+**实际情况**: 由于438-439被注释,`test_mrr`永远是0.0,所以这行打印无意义
+
+**真正有意义的测试集评估**: 在第456-457行,训练结束后的完整评估
+
+---
+
+### **与预训练阶段的对比**
+
+Grounding和预训练都使用了相同的Early Stopping机制:
+
+```python
+# 预训练阶段 (trainer.py:117-122)
+if step % args.valid_steps == 0:
+    mrr = self.evaluate("valid", self.expectation)
+    if mrr > best_mrr:
+        save_model(self.model, optimizer, args)  # 保存checkpoint
+        best_mrr = mrr
+
+# Grounding阶段 (trainer.py:442-445)
+if valid_mrr_iter > best_valid_mrr:
+    best_valid_mrr = valid_mrr_iter
+    self.save(args, 'grounding.pt')  # 保存grounding.pt
+```
+
+**共同点**:
+- 都只保存验证集上最好的模型
+- 都不在训练过程中评估测试集 (预训练每1000步评估valid)
+- 都在训练结束后评估测试集一次
+
+**区别**:
+| 阶段 | 评估频率 | 保存文件名 | 可训练参数 |
+|-----|---------|----------|-----------|
+| 预训练 | 每1000步 | checkpoint | 实体、关系、规则嵌入 |
+| Grounding | 每轮(每个epoch) | grounding.pt | MLP特征和评分网络 |
+
+---
+
+### **实际训练日志示例**
+
+假设你的训练日志如下:
+
+```
+2025-11-11 10:00:00 INFO     >>>>> RulE: Grounding-Training
+2025-11-11 10:00:00 INFO     -------------------------
+2025-11-11 10:00:00 INFO     | Iteration: 1/20
+2025-11-11 10:00:00 INFO     -------------------------
+2025-11-11 10:05:00 INFO     >>>>> Predictor: Evaluating on valid
+2025-11-11 10:05:30 INFO     MRR  : 0.520000
+2025-11-11 10:05:30 INFO     Save checkpoint to .../grounding.pt  ← 第1轮保存
+
+2025-11-11 10:05:30 INFO     -------------------------
+2025-11-11 10:05:30 INFO     | Iteration: 2/20
+2025-11-11 10:05:30 INFO     -------------------------
+2025-11-11 10:10:30 INFO     >>>>> Predictor: Evaluating on valid
+2025-11-11 10:11:00 INFO     MRR  : 0.535000
+2025-11-11 10:11:00 INFO     Save checkpoint to .../grounding.pt  ← 第2轮保存
+
+...
+
+2025-11-11 10:25:00 INFO     -------------------------
+2025-11-11 10:25:00 INFO     | Iteration: 5/20
+2025-11-11 10:25:00 INFO     -------------------------
+2025-11-11 10:30:00 INFO     >>>>> Predictor: Evaluating on valid
+2025-11-11 10:30:30 INFO     MRR  : 0.561000  ← 最佳!
+2025-11-11 10:30:30 INFO     Save checkpoint to .../grounding.pt  ← 第5轮保存
+
+2025-11-11 10:30:30 INFO     -------------------------
+2025-11-11 10:30:30 INFO     | Iteration: 6/20
+2025-11-11 10:30:30 INFO     -------------------------
+2025-11-11 10:35:30 INFO     >>>>> Predictor: Evaluating on valid
+2025-11-11 10:36:00 INFO     MRR  : 0.558000  ← 下降,不保存
+
+...
+
+2025-11-11 12:00:00 INFO     -------------------------
+2025-11-11 12:00:00 INFO     | Final Test MRR: 0.000000  ← bug,无意义
+2025-11-11 12:00:00 INFO     -------------------------
+
+2025-11-11 12:00:01 INFO     >>>>> Predictor: Evaluating on valid
+2025-11-11 12:00:30 INFO     MRR  : 0.561000  ← 确认是第5轮的模型
+
+2025-11-11 12:00:31 INFO     >>>>> Predictor: Evaluating on test
+2025-11-11 12:03:00 INFO     MRR  : 0.545000  ← 真正的测试集性能!
+
+2025-11-11 12:03:01 INFO     >>>>> Predictor: Evaluating on test_kge
+2025-11-11 12:05:30 INFO     MRR  : 0.830000  ← 混合模式最终性能!
+```
+
+从日志可以看出:
+1. **第1-5轮**: 验证集MRR持续上升,每轮都保存
+2. **第6-20轮**: 验证集MRR下降,不再保存
+3. **最终加载**: 第5轮的模型 (验证集MRR=0.561)
+4. **最终测试**: 纯规则0.545,混合模式0.830
+
+这就是Early Stopping的效果:自动选择了第5轮的模型,而不是第20轮可能过拟合的模型!
+
