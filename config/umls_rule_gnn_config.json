@@ -26,6 +26,7 @@
     "weight_rule": 1,
     "max_steps": 30000,
     "regularization": 0,
+    "weight_decay": 0,
     "mlp_rule_dim": 100,
     "alpha": 2.0,
     "smoothing": 0.2,
