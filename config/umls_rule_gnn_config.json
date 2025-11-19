@@ -26,6 +26,8 @@
     "weight_rule": 1,
     "max_steps": 30000,
     "regularization": 0,
+    "mlp_rule_dim": 100,
+    "alpha": 2.0,
     "smoothing": 0.2,
     "batch_per_epoch": 1000000,
     "print_every": 10,

@@ -28,16 +28,70 @@ from rule_gnn_trainer import RuleGNNTrainer
 from utils import load_config, save_config, set_logger, set_seed
 
 
-def parse_args():
+def parse_args(args=None):
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='Rule-GNN Training')
+    parser = argparse.ArgumentParser(
+        description='Rule-GNN Training',
+        usage='main_rule_gnn.py [<args>] [-h | --help]'
+    )
 
-    parser.add_argument('--init', type=str, default=None,
-                       help='Path to config file (JSON)')
-    parser.add_argument('--skip_pretrain', action='store_true',
-                       help='Skip RulE pretraining (load from checkpoint)')
+    parser.add_argument("--local_rank", type=int, default=0)
 
-    return parser.parse_args()
+    # data path
+    parser.add_argument('--data_path', default="../data/umls", type=str, help='dataset path')
+    parser.add_argument('--rule_file', default="../data/umls/mined_rules.txt", type=str)
+    parser.add_argument('--dataset', default='umls', type=str, help='dataset name')
+
+    # device
+    parser.add_argument('--cuda', action='store_true', default=False, help='use GPU')
+    parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
+    parser.add_argument('--seed', default=800, type=int, help='seed')
+
+    # pre train process (KGE + rulE)
+    parser.add_argument('-b', '--batch_size', default=256, type=int)
+    parser.add_argument('-n', '--negative_sample_size', default=512, type=int)
+    parser.add_argument('--rule_batch_size', default=256, type=int, help='rule batch size')
+    parser.add_argument('--rule_negative_size', default=128, type=int)
+
+    parser.add_argument('-d', '--hidden_dim', default=2000, type=int)
+    parser.add_argument('-g_f', '--gamma_fact', default=6, type=float, help='the triplet margin')
+    parser.add_argument('-g_r', '--gamma_rule', default=8, type=float, help='the rule margin')
+    parser.add_argument('--disable_adv', action='store_true', default=False, help='disable the adversarial negative sampling')
+    parser.add_argument('--negative_adversarial_sampling', default=True, type=bool)
+    parser.add_argument('-a', '--adversarial_temperature', default=0.25, type=float)
+
+    parser.add_argument('--uni_weight', action='store_true', default=False,
+                       help='Otherwise use subsampling weighting like in word2vec')
+    parser.add_argument('-lr', '--learning_rate', default=0.0001, type=float)
+    parser.add_argument('--warm_up_steps', default=None, type=int)
+    parser.add_argument('--save_checkpoint_steps', default=10, type=int)
+    parser.add_argument('--valid_steps', default=1000, type=int)
+    parser.add_argument('--log_steps', default=100, type=int, help='train log every xx steps')
+    parser.add_argument('--weight_rule', type=float, default=1)
+    parser.add_argument('-reg', '--regularization', default=0, type=float)
+    parser.add_argument('--max_steps', default=30000, type=int)
+    parser.add_argument('--p_norm', default=2, type=int)
+
+    # save path
+    parser.add_argument('-init', '--init', default=None, type=str, help='Path to config file (JSON)')
+    parser.add_argument('-save', '--save_path', default=None, type=str)
+
+    # grounding training process (RulE uses this)
+    parser.add_argument('--mlp_rule_dim', default=100, type=int)
+    parser.add_argument('--alpha', default=2.0, type=float, help='weight the KGE score')
+
+    # Rule-GNN specific parameters
+    parser.add_argument('--smoothing', default=0.2, type=float)
+    parser.add_argument('--batch_per_epoch', default=1000000, type=int)
+    parser.add_argument('--print_every', default=10, type=int)
+    parser.add_argument('--g_batch_size', default=16, type=int)
+    parser.add_argument('--g_lr', default=0.0001, type=float)
+    parser.add_argument('--dropout', default=0.1, type=float)
+    parser.add_argument('--rule_gnn_num_iters', default=50, type=int)
+    parser.add_argument('--rule_gnn_valid_every', default=5, type=int)
+    parser.add_argument('--skip_pretrain', action='store_true', help='Skip RulE pretraining (load from checkpoint)')
+
+    return parser.parse_args(args)
 
 
 def main():
