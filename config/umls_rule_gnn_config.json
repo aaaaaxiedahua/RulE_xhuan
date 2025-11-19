@@ -1,104 +1,37 @@
 {
-    "comment": "=== Rule-GNN 训练配置文件 ===",
-    "comment_2": "Rule-GNN 用 GNN 消息传递替换 RulE 的 Grounding 阶段",
-    "comment_3": "训练流程: RulE 预训练 → 导出嵌入 → Rule-GNN 训练",
-
-    "_comment_basic": "========== 基础配置 ==========",
     "dataset": "umls",
     "data_path": "../data/umls",
     "rule_file": "../data/umls/mined_rules.txt",
     "save_path": "umls",
-
-    "_comment_device": "========== 设备配置 ==========",
     "cuda": true,
     "cpu_num": 10,
     "seed": 800,
-
-    "_comment_model": "========== 模型配置（所有阶段共享） ==========",
     "hidden_dim": 2000,
-    "comment_hidden_dim": "嵌入维度，RulE 和 Rule-GNN 都使用此值",
     "p_norm": 2,
-    "comment_p_norm": "距离度量的范数（RulE 使用）",
-
-    "_comment_rule_pretrain": "========== RulE 预训练参数（阶段1：预训练 RotatE + 规则嵌入） ==========",
-
     "batch_size": 256,
-    "comment_batch_size": "三元组批大小",
-
     "negative_sample_size": 512,
-    "comment_negative_sample_size": "每个正样本对应的负样本数量",
-
     "rule_batch_size": 256,
-    "comment_rule_batch_size": "规则批大小",
-
     "rule_negative_size": 128,
-    "comment_rule_negative_size": "每个正规则对应的负样本数量",
-
     "gamma_fact": 6,
-    "comment_gamma_fact": "三元组损失的 margin 参数",
-
     "gamma_rule": 8,
-    "comment_gamma_rule": "规则损失的 margin 参数",
-
     "negative_adversarial_sampling": true,
-    "comment_negative_adversarial_sampling": "是否使用对抗性负采样",
-
     "adversarial_temperature": 0.25,
-    "comment_adversarial_temperature": "对抗性采样的温度参数",
-
     "uni_weight": false,
-    "comment_uni_weight": "是否使用均匀权重（false 表示使用子采样权重）",
-
     "disable_adv": false,
-    "comment_disable_adv": "是否在 warm-up 后禁用对抗性采样",
-
     "learning_rate": 0.0001,
-    "comment_learning_rate": "RulE 预训练的学习率",
-
     "warm_up_steps": null,
-    "comment_warm_up_steps": "学习率 warm-up 步数（null 表示使用默认值 max_steps/2）",
-
     "save_checkpoint_steps": 10,
-    "comment_save_checkpoint_steps": "每 N 步保存一次 checkpoint",
-
     "valid_steps": 1000,
-    "comment_valid_steps": "每 N 步验证一次",
-
     "log_steps": 100,
-    "comment_log_steps": "每 N 步记录一次日志",
-
     "weight_rule": 1,
-    "comment_weight_rule": "规则损失的权重（相对于三元组损失）",
-
     "max_steps": 30000,
-    "comment_max_steps": "RulE 预训练的最大步数",
-
     "regularization": 0,
-    "comment_regularization": "正则化系数",
-
-    "_comment_rule_gnn": "========== Rule-GNN 参数（GNN 替代 Grounding 阶段） ==========",
-
     "smoothing": 0.2,
-    "comment_smoothing": "标签平滑系数（Rule-GNN 训练用）",
-
     "batch_per_epoch": 1000000,
-    "comment_batch_per_epoch": "每个 epoch 的最大批次数（Rule-GNN 训练用）",
-
     "print_every": 10,
-    "comment_print_every": "每 N 个批次打印一次训练信息（Rule-GNN 训练用）",
-
     "g_batch_size": 16,
-    "comment_g_batch_size": "Rule-GNN 训练的批大小",
-
     "g_lr": 0.0001,
-    "comment_g_lr": "Rule-GNN 训练的学习率",
-
     "dropout": 0.1,
-    "comment_dropout": "Rule-GNN 的 dropout 率",
-
     "rule_gnn_num_iters": 50,
-    "comment_rule_gnn_num_iters": "Rule-GNN 训练的 epoch 数",
-
-    "rule_gnn_valid_every": 5,
-    "comment_rule_gnn_valid_every": "Rule-GNN 每 N 个 epoch 验证一次"
+    "rule_gnn_valid_every": 5
 }
