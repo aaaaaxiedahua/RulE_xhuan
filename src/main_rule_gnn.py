@@ -32,32 +32,22 @@ def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='Rule-GNN Training')
 
-    parser.add_argument('--init', type=str, required=True,
+    parser.add_argument('--init', type=str, default=None,
                        help='Path to config file (JSON)')
     parser.add_argument('--skip_pretrain', action='store_true',
                        help='Skip RulE pretraining (load from checkpoint)')
 
-    args = parser.parse_args()
-
-    # 加载配置文件
-    config = load_config(args.init)
-    args_dict = vars(args)
-
-    # 合并配置
-    if isinstance(config, tuple):
-        config = config[0]
-
-    for key, value in vars(config).items():
-        if key not in args_dict or args_dict[key] is None:
-            args_dict[key] = value
-
-    args = argparse.Namespace(**args_dict)
-    return args
+    return parser.parse_args()
 
 
 def main():
     """主函数"""
     args = parse_args()
+
+    # read the given config
+    if args.init:
+        args = load_config(args.init)
+        args = args[0]
 
     # 设置随机种子
     set_seed(args.seed)
