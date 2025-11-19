@@ -5,3 +5,7 @@ torch==1.11.0
 torchvision==0.12.0
 torchaudio==0.11.0
 torch-scatter==2.0.9
+
+# PyTorch Geometric dependencies for Rule-GNN
+torch-geometric==2.0.4
+tqdm==4.64.0

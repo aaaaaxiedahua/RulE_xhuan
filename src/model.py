@@ -429,3 +429,17 @@ class RulE(torch.nn.Module):
             rules_weight_emb.append(rule_weight_emb)
 
         self.rules_weight_emb = torch.cat(rules_weight_emb)
+
+    def export_embeddings(self):
+        """
+        导出嵌入用于 Rule-GNN
+
+        Returns:
+            embeddings_dict: 包含 entity_embedding, relation_embedding, rule_emb 的字典
+        """
+        embeddings_dict = {
+            'entity_embedding': self.entity_embedding.weight.data.cpu(),
+            'relation_embedding': self.relation_embedding.weight.data.cpu(),
+            'rule_emb': self.rule_emb.weight.data.cpu()
+        }
+        return embeddings_dict

@@ -446,6 +446,51 @@ class KnowledgeGraph(object):
 
         return x
 
+    def get_pyg_graph(self, include_valid=True, include_test=False):
+        """
+        将知识图谱转换为 PyTorch Geometric 格式
+
+        Args:
+            include_valid: 是否包含验证集的边
+            include_test: 是否包含测试集的边
+
+        Returns:
+            edge_index: [2, num_edges] 边索引
+            edge_type: [num_edges] 边类型
+        """
+        all_edges = []
+        all_types = []
+
+        # 训练集
+        for h, r, t in self.train_data:
+            # 正向边
+            all_edges.append([h, t])
+            all_types.append(r)
+            # 逆向边
+            all_edges.append([t, h])
+            all_types.append(r + self.relation_size)
+
+        # 验证集
+        if include_valid:
+            for h, r, t in self.valid_data:
+                all_edges.append([h, t])
+                all_types.append(r)
+                all_edges.append([t, h])
+                all_types.append(r + self.relation_size)
+
+        # 测试集
+        if include_test:
+            for h, r, t in self.test_data:
+                all_edges.append([h, t])
+                all_types.append(r)
+                all_edges.append([t, h])
+                all_types.append(r + self.relation_size)
+
+        edge_index = torch.tensor(all_edges, dtype=torch.long).t()
+        edge_type = torch.tensor(all_types, dtype=torch.long)
+
+        return edge_index, edge_type
+
 class TrainDataset(Dataset):
     def __init__(self, graph, batch_size):
         self.graph = graph
