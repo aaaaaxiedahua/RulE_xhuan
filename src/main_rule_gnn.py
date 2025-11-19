@@ -98,10 +98,16 @@ def main():
     """主函数"""
     args = parse_args()
 
+    # 保存命令行参数（在加载配置前）
+    skip_pretrain = args.skip_pretrain if hasattr(args, 'skip_pretrain') else False
+
     # read the given config
     if args.init:
         args = load_config(args.init)
         args = args[0]
+
+    # 恢复命令行参数
+    args.skip_pretrain = skip_pretrain
 
     # 设置随机种子
     set_seed(args.seed)
@@ -122,10 +128,8 @@ def main():
     logger.info("=" * 80)
     logger.info("Rule-GNN Training")
     logger.info("=" * 80)
-    logger.info(f"Config: {args.init}")
     logger.info(f"Dataset: {args.dataset if hasattr(args, 'dataset') else args.data_path}")
     logger.info(f"Save Path: {args.save_path}")
-    logger.info(f"Skip Pretrain: {args.skip_pretrain}")
 
     # 设置设备
     if args.cuda and torch.cuda.is_available():
