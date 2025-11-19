@@ -156,11 +156,6 @@ def main():
     ruleset = RuleDataset(graph.relation_size, args.rule_file, args.rule_negative_size)
     rules = [rule[0] for rule in ruleset.rules]
     logger.info(f"Number of rules: {len(ruleset)}")
-    logger.info(f"Max rule length: {ruleset.max_body_len}")
-
-    # 关联规则到图
-    graph.rules = ruleset.data
-    graph.relation2rules = ruleset.relation2rules
 
     # 创建数据集
     train_set = TrainDataset(graph, args.g_batch_size)
@@ -255,6 +250,10 @@ def main():
     logger.info(f"Exported relation embeddings: {embeddings_dict['relation_embedding'].shape}")
     logger.info(f"Exported rule embeddings: {embeddings_dict['rule_emb'].shape}")
 
+    # 获取规则体最大长度（用于设置 GNN 层数）
+    max_body_len = rule_model.max_length
+    logger.info(f"Max rule length: {max_body_len}")
+
     # ======================================================================
     # 阶段 4: Rule-GNN 训练 (替代 Grounding)
     # ======================================================================
@@ -263,7 +262,7 @@ def main():
     logger.info("=" * 80)
 
     # GNN 层数 = 规则最大长度
-    num_layers = ruleset.max_body_len
+    num_layers = max_body_len
     logger.info(f"GNN layers (= max rule length): {num_layers}")
 
     # 创建 Rule-GNN 模型
