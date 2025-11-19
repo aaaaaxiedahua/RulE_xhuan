@@ -441,7 +441,7 @@ class GroundTrainer(object):
 
             if valid_mrr_iter > best_valid_mrr:
                 best_valid_mrr = valid_mrr_iter
-                test_mrr = test_mrr_iter
+                # test_mrr = test_mrr_iter
                 self.save(args, os.path.join(args.save_path, 'grounding.pt'))
         
 
