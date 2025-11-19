@@ -148,9 +148,9 @@ def main():
     graph = KnowledgeGraph(args.data_path)
     logger.info(f"Entities: {graph.entity_size}")
     logger.info(f"Relations: {graph.relation_size}")
-    logger.info(f"Train triples: {len(graph.train_data)}")
-    logger.info(f"Valid triples: {len(graph.valid_data)}")
-    logger.info(f"Test triples: {len(graph.test_data)}")
+    logger.info(f"Train triples: {len(graph.train_facts)}")
+    logger.info(f"Valid triples: {len(graph.valid_facts)}")
+    logger.info(f"Test triples: {len(graph.test_facts)}")
 
     # 加载规则
     ruleset = RuleDataset(graph.relation_size, args.rule_file, args.rule_negative_size)

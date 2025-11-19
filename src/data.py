@@ -462,7 +462,7 @@ class KnowledgeGraph(object):
         all_types = []
 
         # 训练集
-        for h, r, t in self.train_data:
+        for h, r, t in self.train_facts:
             # 正向边
             all_edges.append([h, t])
             all_types.append(r)
@@ -472,7 +472,7 @@ class KnowledgeGraph(object):
 
         # 验证集
         if include_valid:
-            for h, r, t in self.valid_data:
+            for h, r, t in self.valid_facts:
                 all_edges.append([h, t])
                 all_types.append(r)
                 all_edges.append([t, h])
@@ -480,7 +480,7 @@ class KnowledgeGraph(object):
 
         # 测试集
         if include_test:
-            for h, r, t in self.test_data:
+            for h, r, t in self.test_facts:
                 all_edges.append([h, t])
                 all_types.append(r)
                 all_edges.append([t, h])
