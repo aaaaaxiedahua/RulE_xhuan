@@ -74,9 +74,18 @@ class RuleAwareGraphConv(nn.Module):
         # 获取规则嵌入
         h_R = self.rule_embedding(rule_ids)  # [num_active_rules, in_dim]
 
-        # 存储所有规则的消息
-        all_messages = []
-        all_attention_weights = []
+        # 初始化累加器（边计算边聚合，节省内存）
+        combined_messages = torch.zeros(num_edges, self.out_dim, device=x.device)
+        combined_attention = torch.zeros(num_edges, device=x.device) if return_attention else None
+        num_rules = len(rule_ids)
+
+        if num_rules == 0:
+            # 没有规则，返回零向量
+            out = torch.zeros(num_nodes, self.out_dim, device=x.device)
+            if return_attention:
+                return out, None
+            else:
+                return out
 
         for rule_idx, rule_id in enumerate(rule_ids):
             h_r_single = h_R[rule_idx]  # [in_dim]
@@ -126,37 +135,36 @@ class RuleAwareGraphConv(nn.Module):
                     msg = msg * attn_weights[mask].unsqueeze(-1)  # 加权
                     messages[mask] = msg
 
-            all_messages.append(messages)
-            all_attention_weights.append(attn_weights)
+            # 累加到累加器（而不是保存到列表）
+            combined_messages += messages
+            if return_attention:
+                combined_attention += attn_weights
 
         # === 聚合所有规则的消息 ===
 
-        if len(all_messages) > 0:
-            # 平均所有规则的消息
-            combined_messages = torch.stack(all_messages, dim=0).mean(dim=0)
-            # [num_edges, out_dim]
+        # 取平均
+        combined_messages /= num_rules
+        if return_attention:
+            combined_attention /= num_rules
 
-            # 聚合到目标节点
-            out = scatter_add(combined_messages, dst, dim=0, dim_size=num_nodes)
-            # [num_nodes, out_dim]
+        # 聚合到目标节点
+        out = scatter_add(combined_messages, dst, dim=0, dim_size=num_nodes)
+        # [num_nodes, out_dim]
 
-            # 添加偏置
-            out = out + self.bias
+        # 添加偏置
+        out = out + self.bias
 
-            # Layer Normalization
-            out = self.layer_norm(out)
+        # Layer Normalization
+        out = self.layer_norm(out)
 
-            # ReLU激活
-            out = F.relu(out)
+        # ReLU激活
+        out = F.relu(out)
 
-            # Dropout
-            out = self.dropout(out)
-        else:
-            out = torch.zeros(num_nodes, self.out_dim, device=x.device)
+        # Dropout
+        out = self.dropout(out)
 
         if return_attention:
-            avg_attention = torch.stack(all_attention_weights, dim=0).mean(dim=0) if all_attention_weights else None
-            return out, avg_attention
+            return out, combined_attention
         else:
             return out
 
