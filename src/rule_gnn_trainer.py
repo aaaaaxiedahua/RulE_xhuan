@@ -25,7 +25,7 @@ class RuleGNNTrainer:
     """
 
     def __init__(self, model, graph, train_dataset, valid_dataset, test_dataset,
-                 device='cuda', logger=None):
+                 relation2rules, rules, device='cuda', logger=None):
         """
         初始化训练器
 
@@ -35,6 +35,8 @@ class RuleGNNTrainer:
             train_dataset: 训练数据集
             valid_dataset: 验证数据集
             test_dataset: 测试数据集
+            relation2rules: 关系到规则的映射（从 RulE 模型获取）
+            rules: 规则列表（从 RulE 模型获取）
             device: 设备 ('cuda' 或 'cpu')
             logger: 日志记录器
         """
@@ -43,6 +45,8 @@ class RuleGNNTrainer:
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
         self.test_dataset = test_dataset
+        self.relation2rules = relation2rules
+        self.rules = rules
         self.device = device
         self.logger = logger or logging.getLogger(__name__)
 
@@ -116,8 +120,8 @@ class RuleGNNTrainer:
 
         for r in query_relations:
             r_item = r.item() if torch.is_tensor(r) else r
-            if r_item in self.graph.relation2rules:
-                for rule in self.graph.relation2rules[r_item]:
+            if r_item < len(self.relation2rules) and self.relation2rules[r_item]:
+                for rule in self.relation2rules[r_item]:
                     rule_id = rule[0]  # rule = [rule_id, head, body...]
                     active_rules.add(rule_id)
 
@@ -343,7 +347,7 @@ class RuleGNNTrainer:
 
                 if len(rule_ids) == 0:
                     # 没有规则，使用所有规则
-                    rule_ids = torch.arange(len(self.graph.rules), dtype=torch.long, device=self.device)
+                    rule_ids = torch.arange(len(self.rules), dtype=torch.long, device=self.device)
 
                 # 对所有实体打分
                 scores = self.model(queries, self.edge_index, self.edge_type,

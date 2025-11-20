@@ -284,6 +284,8 @@ def main():
         train_dataset=train_set,
         valid_dataset=valid_set,
         test_dataset=test_set,
+        relation2rules=rule_model.relation2rules,
+        rules=rule_model.rules,
         device=device,
         logger=logger
     )
