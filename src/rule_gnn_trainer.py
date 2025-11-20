@@ -154,8 +154,8 @@ class RuleGNNTrainer:
         patience_counter = 0
         max_patience = 10
 
-        # 使用 rule_gnn_num_iters 如果存在，否则使用 num_iters
-        num_epochs = getattr(args, 'rule_gnn_num_iters', args.num_iters)
+        # 使用 rule_gnn_num_iters，默认值为 50
+        num_epochs = getattr(args, 'rule_gnn_num_iters', 50)
         valid_every = getattr(args, 'rule_gnn_valid_every', 5)
 
         for epoch in range(num_epochs):
