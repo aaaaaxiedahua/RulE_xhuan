@@ -64,7 +64,7 @@ class RuleGNNTrainer:
 
         # 收集所有边（包括训练集、验证集、测试集）
         for split in ['train', 'valid', 'test']:
-            data = getattr(self.graph, f'{split}_data')
+            data = getattr(self.graph, f'{split}_facts')
             for h, r, t in data:
                 all_edges.append([h, t])
                 all_types.append(r)
