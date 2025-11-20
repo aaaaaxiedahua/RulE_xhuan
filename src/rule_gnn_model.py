@@ -230,8 +230,20 @@ class RuleGNN(nn.Module):
         # 加载关系嵌入
         if 'relation_embedding' in embeddings_dict:
             relation_emb = embeddings_dict['relation_embedding']
-            self.relation_embedding.weight.data.copy_(relation_emb)
-            print(f"  Loaded relation embeddings: {relation_emb.shape}")
+            # RulE 只有 num_relations + 1 个关系嵌入（包括 padding）
+            # Rule-GNN 有 num_relations * 2 个（正向 + 逆向）
+            # 逆关系嵌入 = -1 * 正向关系嵌入
+            num_original = self.num_relations // 2  # 原始关系数量
+
+            # 正向关系：直接复制
+            self.relation_embedding.weight.data[:num_original].copy_(relation_emb[:num_original])
+
+            # 逆向关系：复制并取负
+            self.relation_embedding.weight.data[num_original:].copy_(-relation_emb[:num_original])
+
+            print(f"  Loaded relation embeddings: {relation_emb.shape} -> [{self.num_relations}, {self.hidden_dim}]")
+            print(f"    Forward relations: 0-{num_original-1}")
+            print(f"    Inverse relations: {num_original}-{self.num_relations-1} (negated)")
 
         # 加载规则嵌入（到每个GNN层）
         if 'rule_emb' in embeddings_dict:
