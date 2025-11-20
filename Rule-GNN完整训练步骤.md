@@ -6,9 +6,10 @@
 2. [数据准备](#2-数据准备)
 3. [配置文件说明](#3-配置文件说明)
 4. [训练流程详解](#4-训练流程详解)
-5. [输出文件说明](#5-输出文件说明)
-6. [常见问题排查](#6-常见问题排查)
-7. [进阶使用](#7-进阶使用)
+5. [Rule-GNN 核心算法步骤](#5-rule-gnn-核心算法步骤)
+6. [输出文件说明](#6-输出文件说明)
+7. [常见问题排查](#7-常见问题排查)
+8. [进阶使用](#8-进阶使用)
 
 ---
 
@@ -434,9 +435,314 @@ python main_rule_gnn.py --init ../config/umls_rule_gnn_config.json --skip_pretra
 
 ---
 
-## 5. 输出文件说明
+## 5. Rule-GNN 核心算法步骤
 
-### 5.1 输出目录结构
+### 5.1 设计模式说明
+
+Rule-GNN 采用 **全实体打分模式（Full Ranking）**，与 RulE 原始 Grounding 阶段一致：
+
+| 特性 | Rule-GNN（Grounding 模式） | KGE 负采样模式 |
+|------|--------------------------|--------------|
+| 打分实体数 | 所有实体（如 135） | 1 + neg_size（如 129） |
+| 标签类型 | 多热标签（多个正确答案） | 单热（第 0 个是正样本） |
+| 损失函数 | BCEWithLogitsLoss | CrossEntropyLoss |
+| 适用场景 | 小图、多答案查询 | 大图、单答案查询 |
+
+### 5.2 训练阶段完整步骤
+
+#### 输入数据
+
+```
+- queries: 查询 (h, r) [batch_size, 2]
+- target: 多热标签 [batch_size, num_entities]
+  - target[i][j] = 1 表示实体 j 是查询 i 的正确答案
+- edge_index: 图的边索引 [2, num_edges]
+- edge_type: 边的类型 [num_edges]
+```
+
+#### 步骤 1: 初始化节点特征
+
+```python
+# 从预训练的 RulE 加载实体嵌入
+h = entity_embedding.weight  # [num_entities, hidden_dim]
+```
+
+**说明**：
+- 实体嵌入来自 RulE 预训练阶段
+- 这是所有实体的初始表示
+
+#### 步骤 2: 获取激活规则
+
+```python
+# 根据查询关系，找到相关的规则
+active_rules = set()
+for r in query_relations:
+    if r in relation2rules:
+        for rule in relation2rules[r]:
+            active_rules.add(rule_id)
+
+rule_ids = list(active_rules)  # [num_active_rules]
+```
+
+**示例**：
+- 查询关系 `treats`（治疗）
+- 相关规则：
+  - 规则 1: `diagnoses ∧ treats → treats`
+  - 规则 2: `causes ∧ treats → treats`
+- `rule_ids = [1, 2]`
+
+#### 步骤 3: GNN 消息传递（多层）
+
+```python
+for layer_idx in range(num_layers):
+    h = gnn_layer(h, edge_index, edge_type, rule_ids)
+```
+
+**每层 GNN 做的事情**：
+
+##### 3.1 计算规则感知的注意力权重
+
+```python
+for rule_id in rule_ids:
+    # 获取规则嵌入
+    h_rule = rule_embedding[rule_id]  # [hidden_dim]
+
+    # Query: 目标节点特征
+    query = W_q(h[dst])  # [num_edges, hidden_dim]
+
+    # Key: 拼接 [源节点; 关系嵌入; 规则嵌入]
+    key_input = concat([h[src], relation_emb, rule_emb])  # [num_edges, hidden_dim*3]
+    key = W_k(key_input)  # [num_edges, hidden_dim]
+
+    # 注意力分数
+    attn_scores = (query * key).sum(dim=-1) / sqrt(hidden_dim)
+    attn_weights = softmax(attn_scores, per_dst_node)  # [num_edges]
+```
+
+**关键点**：
+- 注意力权重由**规则嵌入调控**
+- 符合规则的边获得更高的注意力
+
+##### 3.2 计算消息
+
+```python
+# 对每条边计算消息
+for edge_idx in range(num_edges):
+    src_node = edge_index[0, edge_idx]
+    rel_type = edge_type[edge_idx]
+
+    # 消息 = 关系变换矩阵 * 源节点特征 * 注意力权重
+    msg = W_r[rel_type] @ h[src_node] * attn_weights[edge_idx]
+```
+
+##### 3.3 聚合消息到目标节点
+
+```python
+# 使用 scatter_add 聚合
+h_new = scatter_add(messages, dst, dim=0)  # [num_entities, hidden_dim]
+
+# 添加偏置 + LayerNorm + ReLU + Dropout
+h_new = h_new + bias
+h_new = layer_norm(h_new)
+h_new = relu(h_new)
+h_new = dropout(h_new)
+```
+
+##### 3.4 多规则聚合
+
+```python
+# 平均所有规则的消息
+h_final = mean([h_rule1, h_rule2, ...])  # [num_entities, hidden_dim]
+```
+
+**图解**：
+
+```
+     Layer 1                 Layer 2                 Layer 3
+        ↓                       ↓                       ↓
+    [Entity Emb]    →    [Updated Emb]    →    [Final Emb]
+        ↓                       ↓                       ↓
+   规则1 + 规则2            规则1 + 规则2           规则1 + 规则2
+   消息传递                 消息传递                消息传递
+```
+
+#### 步骤 4: 对所有实体打分
+
+```python
+# 提取查询头实体的表示
+h_heads = h[queries[:, 0]]  # [batch_size, hidden_dim]
+
+# 所有实体的表示
+h_tails = h  # [num_entities, hidden_dim]
+
+# 拼接并通过 MLP 打分
+# h_heads: [batch_size, 1, hidden_dim] 扩展
+# h_tails: [1, num_entities, hidden_dim] 扩展
+combined = concat([h_heads, h_tails], dim=-1)  # [batch_size, num_entities, hidden_dim*2]
+
+scores = MLP(combined).squeeze(-1)  # [batch_size, num_entities]
+```
+
+**说明**：
+- 对每个查询，计算所有实体作为尾实体的得分
+- 输出维度：`[batch_size, num_entities]`
+
+#### 步骤 5: 计算损失
+
+```python
+# target: 多热标签 [batch_size, num_entities]
+# 标签平滑
+if smoothing > 0:
+    smooth_target = target * (1.0 - smoothing) + smoothing / num_entities
+    loss = BCEWithLogitsLoss(scores, smooth_target)
+else:
+    loss = BCEWithLogitsLoss(scores, target)
+```
+
+**多热标签示例**：
+```
+查询: (实体5, 关系3, ?)
+正确答案: 实体 10, 12, 15
+
+target = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, ...]
+                                      ↑     ↑        ↑
+                                     10    12       15
+```
+
+#### 步骤 6: 反向传播
+
+```python
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
+```
+
+### 5.3 评估阶段步骤
+
+#### 步骤 1-4: 与训练相同
+
+获取所有实体的得分 `scores: [batch_size, num_entities]`
+
+#### 步骤 5: 过滤已知三元组
+
+```python
+# filter_mask: 标记所有已知三元组（训练+验证+测试）
+# 将已知答案的得分设为负无穷，避免它们影响排名
+scores = scores.masked_fill(filter_mask, -1e9)
+```
+
+#### 步骤 6: 计算排名
+
+```python
+for i in range(batch_size):
+    true_tail = true_tails[i]
+    true_score = scores[i, true_tail]
+
+    # 排名 = 比真实答案得分高的实体数 + 1
+    rank = (scores[i] > true_score).sum() + 1
+
+    ranks.append(rank)
+    reciprocal_ranks.append(1.0 / rank)
+```
+
+#### 步骤 7: 计算指标
+
+```python
+metrics = {
+    'MRR': mean(reciprocal_ranks),      # 平均倒数排名
+    'MR': mean(ranks),                   # 平均排名
+    'HITS@1': mean(ranks <= 1),          # Top-1 准确率
+    'HITS@3': mean(ranks <= 3),          # Top-3 准确率
+    'HITS@10': mean(ranks <= 10)         # Top-10 准确率
+}
+```
+
+### 5.4 与原始 RulE Grounding 的对比
+
+| 步骤 | RulE Grounding | Rule-GNN |
+|------|---------------|----------|
+| **规则处理** | 显式枚举每条规则的 grounding 路径 | 隐式通过 GNN 消息传递 |
+| **路径遍历** | r1 → r2 → r3 按顺序遍历 | 多层 GNN，每层聚合所有关系 |
+| **计算方式** | 稀疏矩阵乘法（逐关系） | 注意力加权消息传递 |
+| **规则权重** | MLP 学习每条规则的权重 | 注意力机制自动调控 |
+| **可并行性** | 规则之间顺序处理 | 所有规则并行计算 |
+
+### 5.5 为什么用 Grounding 模式而不是负采样？
+
+1. **数据兼容**：`TrainDataset` 返回多热标签 `target`，天然支持 Grounding 模式
+
+2. **多答案问题**：
+   - 知识图谱中 `(h, r, ?)` 可能有多个正确答案
+   - 例如："北京的大学" → 清华、北大、人大...
+   - 负采样只能处理单答案，全实体打分能处理多答案
+
+3. **与 RulE 一致**：保持训练方式一致，便于对比
+
+4. **计算可行**：UMLS 只有 135 个实体，全打分计算量可接受
+
+### 5.6 完整代码流程图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Rule-GNN 训练流程                         │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 1. 数据加载                                                  │
+│    - TrainDataset 返回: (all_h, all_r, all_t, target, edges) │
+│    - target: 多热标签 [batch_size, num_entities]             │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 2. 获取激活规则                                              │
+│    - 根据查询关系找相关规则                                   │
+│    - rule_ids = [rule1, rule2, ...]                         │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. GNN 消息传递（重复 num_layers 次）                         │
+│    ┌─────────────────────────────────────────────────────┐  │
+│    │ For each rule:                                      │  │
+│    │   - 计算规则感知的注意力权重                          │  │
+│    │   - 消息 = W_r * h[src] * attention                 │  │
+│    │   - 聚合到目标节点: h[dst] = sum(messages)          │  │
+│    └─────────────────────────────────────────────────────┘  │
+│    - 多规则取平均                                           │
+│    - LayerNorm + ReLU + Dropout                             │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 4. 全实体打分                                                │
+│    - h_heads = h[queries[:, 0]]                             │
+│    - scores = MLP(concat(h_heads, h_all))                   │
+│    - 输出: [batch_size, num_entities]                       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 5. 计算损失                                                  │
+│    - 标签平滑: smooth_target = target * 0.8 + 0.2/N         │
+│    - loss = BCEWithLogitsLoss(scores, smooth_target)        │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 6. 反向传播                                                  │
+│    - optimizer.zero_grad()                                  │
+│    - loss.backward()                                        │
+│    - optimizer.step()                                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 6. 输出文件说明
+
+### 6.1 输出目录结构
 
 训练完成后，输出目录结构如下:
 

@@ -226,12 +226,13 @@ class RuleGNNTrainer:
         """
         self.model.train()
 
+        # TrainDataset 已经内部分好 batch，每个 item 就是一个 batch
+        # 所以 DataLoader 的 batch_size 设为 1
         train_loader = DataLoader(
             self.train_dataset,
-            batch_size=args.g_batch_size,
+            batch_size=1,
             shuffle=True,
-            num_workers=4,
-            collate_fn=self.train_dataset.collate_fn
+            num_workers=4
         )
 
         total_loss = 0.0
@@ -244,11 +245,18 @@ class RuleGNNTrainer:
                 break
 
             # 解包批次数据
-            pos_samples, neg_samples, edges_to_remove = batch
+            # TrainDataset 返回: (all_h, all_r, all_t, target, edges_to_remove)
+            all_h, all_r, all_t, target, edges_to_remove = batch
 
-            # 转移到设备
-            pos_samples = pos_samples.to(self.device)  # [batch_size, 3] (h, r, t)
-            neg_samples = neg_samples.to(self.device)  # [batch_size, neg_size]
+            # 因为 DataLoader batch_size=1，需要 squeeze 掉第一个维度
+            all_h = all_h.squeeze(0).to(self.device)
+            all_r = all_r.squeeze(0).to(self.device)
+            all_t = all_t.squeeze(0).to(self.device)
+            target = target.squeeze(0).to(self.device)
+            edges_to_remove = edges_to_remove.squeeze(0).to(self.device)
+
+            # 构建 pos_samples: [batch_size, 3] (h, r, t)
+            pos_samples = torch.stack([all_h, all_r, all_t], dim=1)
 
             # 获取查询（h, r）
             queries = pos_samples[:, :2]  # [batch_size, 2]
@@ -261,39 +269,19 @@ class RuleGNNTrainer:
                 # 没有规则，跳过
                 continue
 
-            # 前向传播（对正样本和负样本）
-            # 正样本
-            pos_tail = pos_samples[:, 2:3]  # [batch_size, 1]
-            pos_scores = self.model(queries, self.edge_index, self.edge_type,
-                                   rule_ids, candidates=pos_tail)
-            # [batch_size, 1]
+            # 对所有实体打分
+            scores = self.model(queries, self.edge_index, self.edge_type,
+                               rule_ids, candidates=None)
+            # [batch_size, num_entities]
 
-            # 负样本
-            neg_scores = self.model(queries, self.edge_index, self.edge_type,
-                                   rule_ids, candidates=neg_samples)
-            # [batch_size, neg_size]
-
-            # 计算损失（交叉熵 + 标签平滑）
-            # 将正负样本拼接
-            all_scores = torch.cat([pos_scores, neg_scores], dim=1)
-            # [batch_size, 1 + neg_size]
-
-            # 标签：第一个是正样本
-            labels = torch.zeros(batch_size, dtype=torch.long, device=self.device)
-
-            # 交叉熵损失
-            loss_ce = nn.CrossEntropyLoss()(all_scores, labels)
-
-            # 标签平滑
+            # 计算损失（二元交叉熵 + 标签平滑）
+            # target 是多热标签 [batch_size, num_entities]
             if args.smoothing > 0:
-                num_classes = all_scores.size(1)
-                smooth_labels = torch.full_like(all_scores, args.smoothing / num_classes)
-                smooth_labels[:, 0] = 1.0 - args.smoothing + args.smoothing / num_classes
-
-                loss_smooth = -(smooth_labels * torch.log_softmax(all_scores, dim=1)).sum(dim=1).mean()
-                loss = loss_smooth
+                # 标签平滑
+                smooth_target = target * (1.0 - args.smoothing) + args.smoothing / self.graph.entity_size
+                loss = nn.BCEWithLogitsLoss()(scores, smooth_target)
             else:
-                loss = loss_ce
+                loss = nn.BCEWithLogitsLoss()(scores, target)
 
             # 反向传播
             optimizer.zero_grad()
