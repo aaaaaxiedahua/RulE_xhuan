@@ -165,7 +165,7 @@ def main():
     # ======================================================================
     # 阶段 2: RulE 预训练 (可选)
     # ======================================================================
-    rule_checkpoint_path = os.path.join(args.save_path, 'rule_checkpoint')
+    rule_checkpoint_path = os.path.join(args.save_path, 'checkpoint')
 
     if not args.skip_pretrain:
         logger.info("\n" + "=" * 80)
