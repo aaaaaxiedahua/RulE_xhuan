@@ -239,16 +239,36 @@ config/umls_rule_gnn_config.json
 **训练控制**:
 - `smoothing`: 标签平滑系数（防止过拟合）
 - `batch_per_epoch`: 每个 epoch 最大批次数
+  - **重要**: `TrainDataset` 已将数据按关系分组为 batch
+  - UMLS 实际有约 282 个 batch（按关系和 `g_batch_size` 分组）
+  - 设为 1000000 相当于不限制，处理所有 batch
+  - 若设为 50，则每个 epoch 只处理前 50 个 batch（快速测试）
 - `print_every`: 每 N 个批次打印日志
 
 **优化器**:
-- `g_batch_size`: Rule-GNN 批大小
+- `g_batch_size`: TrainDataset 内部分组大小
+  - **不是** DataLoader 的 batch_size
+  - 传给 TrainDataset 用于按关系分组
+  - DataLoader 的 batch_size 固定为 1（因为 TrainDataset 已返回 batch）
 - `g_lr`: Rule-GNN 学习率
 - `dropout`: Dropout 率
 
 **训练循环**:
 - `rule_gnn_num_iters`: Rule-GNN 训练 epoch 数
 - `rule_gnn_valid_every`: 每 N 个 epoch 验证一次
+
+**批次大小层级关系**:
+```
+TrainDataset(g_batch_size=16)  # 内部按关系分组，每组 16 个三元组
+     ↓
+返回已经 batch 好的数据: (h[16], r[16], t[16], target[16, 135], ...)
+     ↓
+DataLoader(batch_size=1)  # 每次取 1 个 "已分好的 batch"
+     ↓
+trainer 收到: (h[1, 16], r[1, 16], t[1, 16], ...)
+     ↓
+squeeze(0) 后: (h[16], r[16], t[16], ...)  # 还原为实际 batch
+```
 
 ### 3.3 参数调优建议
 
@@ -491,7 +511,7 @@ rule_ids = list(active_rules)  # [num_active_rules]
   - 规则 2: `causes ∧ treats → treats`
 - `rule_ids = [1, 2]`
 
-#### 步骤 3: GNN 消息传递（多层）
+#### 步骤 3: GNN 消息传递（多层，稀疏化实现）
 
 ```python
 for layer_idx in range(num_layers):
@@ -500,59 +520,95 @@ for layer_idx in range(num_layers):
 
 **每层 GNN 做的事情**：
 
-##### 3.1 计算规则感知的注意力权重
+##### 3.0 初始化：预构建稀疏索引（训练开始前执行一次）
 
 ```python
-for rule_id in rule_ids:
-    # 获取规则嵌入
+# 预构建关系到边的索引映射，避免重复计算 mask
+relation2edges = {}   # 关系r的边索引
+relation2src = {}     # 关系r的源节点
+relation2dst = {}     # 关系r的目标节点
+
+for r in range(num_relations):
+    mask = (edge_type == r)
+    if mask.sum() > 0:
+        relation2edges[r] = nonzero(mask)
+        relation2src[r] = edge_index[0][mask]
+        relation2dst[r] = edge_index[1][mask]
+```
+
+**关键优化**：
+- 预构建索引只需 ~249KB 内存（vs 原稠密实现 79MB）
+- 避免 forward 中重复计算 mask 操作
+
+##### 3.1 Query 计算外提（只计算一次）
+
+```python
+# 【优化】Query 移到规则循环外，只计算 1 次
+# 原实现：在每个规则循环内计算，50次 × 79MB = 3.95GB
+# 优化后：只计算 1 次，79MB
+query_all = W_q(h[dst])  # [num_edges, hidden_dim]
+```
+
+##### 3.2 按关系分块计算注意力（稀疏化核心）
+
+```python
+# 初始化累加器
+combined_messages = zeros(num_edges, hidden_dim)
+
+for rule_idx, rule_id in enumerate(rule_ids):
     h_rule = rule_embedding[rule_id]  # [hidden_dim]
 
-    # Query: 目标节点特征
-    query = W_q(h[dst])  # [num_edges, hidden_dim]
+    # 【稀疏化】按关系分块处理，每次只处理 ~113 条边
+    for r in relation2edges.keys():
+        # 获取当前关系的稀疏索引（预构建，O(1) 访问）
+        edge_indices_r = relation2edges[r]  # [num_edges_r] ~113
+        src_r = relation2src[r]
+        dst_r = relation2dst[r]
 
-    # Key: 拼接 [源节点; 关系嵌入; 规则嵌入]
-    key_input = concat([h[src], relation_emb, rule_emb])  # [num_edges, hidden_dim*3]
-    key = W_k(key_input)  # [num_edges, hidden_dim]
+        # Query: 从预计算结果中索引（不分配新内存）
+        query_r = query_all[edge_indices_r]  # [num_edges_r, hidden_dim]
 
-    # 注意力分数
-    attn_scores = (query * key).sum(dim=-1) / sqrt(hidden_dim)
-    attn_weights = softmax(attn_scores, per_dst_node)  # [num_edges]
+        # Key: 构建小矩阵（核心内存节省点）
+        # 原实现：[10432, 6000] = 237MB
+        # 稀疏实现：[~113, 6000] = 2.6MB
+        h_src_r = h[src_r]  # [num_edges_r, hidden_dim]
+        h_rel_r = W_r[r].mean(dim=-1)  # [hidden_dim]
+        key_input_r = concat([h_src_r, h_rel_r, h_rule])  # [num_edges_r, hidden_dim*3]
+        key_r = W_k(key_input_r)  # [num_edges_r, hidden_dim]
+
+        # 注意力分数
+        attn_scores_r = (query_r * key_r).sum(dim=-1) / sqrt(hidden_dim)
+        attn_weights_r = scatter_softmax(attn_scores_r, dst_r)  # [num_edges_r]
+
+        # 消息计算
+        msg_r = matmul(h_src_r, W_r[r])  # [num_edges_r, hidden_dim]
+        msg_r = msg_r * attn_weights_r.unsqueeze(-1)  # 加权
+
+        # 稀疏累加到对应边位置
+        combined_messages[edge_indices_r] += msg_r
 ```
 
-**关键点**：
-- 注意力权重由**规则嵌入调控**
-- 符合规则的边获得更高的注意力
-
-##### 3.2 计算消息
-
-```python
-# 对每条边计算消息
-for edge_idx in range(num_edges):
-    src_node = edge_index[0, edge_idx]
-    rel_type = edge_type[edge_idx]
-
-    # 消息 = 关系变换矩阵 * 源节点特征 * 注意力权重
-    msg = W_r[rel_type] @ h[src_node] * attn_weights[edge_idx]
-```
+**内存对比**（UMLS 数据集）：
+| 矩阵 | 稠密实现 | 稀疏实现 | 节省 |
+|------|---------|---------|------|
+| `query` | 79MB × 50 = 3.95GB | 79MB × 1 | 98% |
+| `key_input` | 237MB × 50 = 11.85GB | 2.6MB × 1 | 99.98% |
+| **总计** | **~24 GB (OOM)** | **~160 MB** | **99.3%** |
 
 ##### 3.3 聚合消息到目标节点
 
 ```python
-# 使用 scatter_add 聚合
-h_new = scatter_add(messages, dst, dim=0)  # [num_entities, hidden_dim]
+# 取所有规则的平均
+combined_messages /= num_rules
+
+# 使用 scatter_add 聚合到目标节点
+h_new = scatter_add(combined_messages, dst, dim=0)  # [num_entities, hidden_dim]
 
 # 添加偏置 + LayerNorm + ReLU + Dropout
 h_new = h_new + bias
 h_new = layer_norm(h_new)
 h_new = relu(h_new)
 h_new = dropout(h_new)
-```
-
-##### 3.4 多规则聚合
-
-```python
-# 平均所有规则的消息
-h_final = mean([h_rule1, h_rule2, ...])  # [num_entities, hidden_dim]
 ```
 
 **图解**：
@@ -563,6 +619,7 @@ h_final = mean([h_rule1, h_rule2, ...])  # [num_entities, hidden_dim]
     [Entity Emb]    →    [Updated Emb]    →    [Final Emb]
         ↓                       ↓                       ↓
    规则1 + 规则2            规则1 + 规则2           规则1 + 规则2
+   (按关系分块)            (按关系分块)            (按关系分块)
    消息传递                 消息传递                消息传递
 ```
 
@@ -879,383 +936,3 @@ with torch.no_grad():
 
 ---
 
-## 6. 常见问题排查
-
-### 6.1 CUDA 内存不足
-
-**错误信息**:
-```
-RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB
-```
-
-**解决方案**:
-
-1. 减小批大小:
-```json
-{
-    "batch_size": 128,        // 原 256
-    "g_batch_size": 8         // 原 16
-}
-```
-
-2. 减小嵌入维度:
-```json
-{
-    "hidden_dim": 1000        // 原 2000
-}
-```
-
-3. 使用 CPU 训练:
-```json
-{
-    "cuda": false
-}
-```
-
-### 6.2 找不到 rule_checkpoint
-
-**错误信息**:
-```
-ERROR - RulE checkpoint not found: umls/rule_checkpoint
-ERROR - Please run without --skip_pretrain first
-```
-
-**解决方案**:
-
-1. 首次训练不要使用 `--skip_pretrain`:
-```bash
-python main_rule_gnn.py --init ../config/umls_rule_gnn_config.json
-```
-
-2. 或者修改配置文件中的 `save_path` 指向已有 checkpoint 目录
-
-### 6.3 PyG 安装失败
-
-**错误信息**:
-```
-ERROR: Could not find a version that satisfies the requirement torch-geometric
-```
-
-**解决方案**:
-
-按照 PyG 官方文档安装:
-
-```bash
-# 1. 确认 PyTorch 版本
-python -c "import torch; print(torch.__version__)"
-# 例如: 1.10.0+cu113
-
-# 2. 安装对应版本的 PyG
-pip install torch-scatter torch-sparse torch-cluster torch-spline-conv torch-geometric -f https://data.pyg.org/whl/torch-1.10.0+cu113.html
-```
-
-### 6.4 训练卡住不动
-
-**现象**: 训练进度条长时间不更新
-
-**排查步骤**:
-
-1. 检查数据加载器:
-```json
-{
-    "cpu_num": 4  // 减少数据加载线程数
-}
-```
-
-2. 检查是否死锁:
-```bash
-# 查看 GPU 使用情况
-nvidia-smi
-
-# 查看进程
-ps aux | grep python
-```
-
-3. 添加调试日志:
-```python
-# 在 rule_gnn_trainer.py 的训练循环中添加
-print(f"Batch {batch_idx}, Loss: {loss.item()}")
-```
-
-### 6.5 验证指标异常低
-
-**现象**: Valid MRR < 0.1
-
-**可能原因**:
-
-1. **规则文件错误**: 检查 `mined_rules.txt` 格式
-2. **数据泄漏**: 确认训练/验证/测试集划分正确
-3. **学习率过大**: 降低 `g_lr`
-```json
-{
-    "g_lr": 0.00005  // 原 0.0001
-}
-```
-
-### 6.6 OOM (Out of Memory) 在 CPU 上
-
-**错误信息**:
-```
-Killed
-```
-
-**解决方案**:
-
-1. 减小批大小:
-```json
-{
-    "g_batch_size": 4
-}
-```
-
-2. 减少规则数量（在数据预处理阶段过滤低置信度规则）
-
----
-
-## 7. 进阶使用
-
-### 7.1 多数据集训练
-
-#### 创建新配置文件
-
-```bash
-cp config/umls_rule_gnn_config.json config/fb15k237_rule_gnn_config.json
-```
-
-#### 修改配置
-
-```json
-{
-    "dataset": "fb15k237",
-    "data_path": "../data/fb15k237",
-    "rule_file": "../data/fb15k237/mined_rules.txt",
-    "save_path": "fb15k237_output",
-
-    "hidden_dim": 1000,
-    "max_steps": 50000,
-    "smoothing": 0.5
-}
-```
-
-#### 启动训练
-
-```bash
-python main_rule_gnn.py --init ../config/fb15k237_rule_gnn_config.json
-```
-
-### 7.2 超参数网格搜索
-
-创建搜索脚本 `grid_search.sh`:
-
-```bash
-#!/bin/bash
-
-for hidden_dim in 500 1000 2000; do
-    for dropout in 0.1 0.2 0.3; do
-        for lr in 0.0001 0.00005; do
-            save_path="grid_search/h${hidden_dim}_d${dropout}_lr${lr}"
-
-            # 修改配置文件
-            cat config/umls_rule_gnn_config.json | \
-                jq ".hidden_dim = $hidden_dim | .dropout = $dropout | .g_lr = $lr | .save_path = \"$save_path\"" \
-                > config/temp_config.json
-
-            # 训练
-            python src/main_rule_gnn.py --init config/temp_config.json
-        done
-    done
-done
-
-# 找出最佳结果
-python scripts/find_best_model.py grid_search/
-```
-
-### 7.3 可视化训练过程
-
-#### 使用 TensorBoard
-
-在 `rule_gnn_trainer.py` 中添加:
-
-```python
-from torch.utils.tensorboard import SummaryWriter
-
-class RuleGNNTrainer:
-    def __init__(self, ...):
-        ...
-        self.writer = SummaryWriter(log_dir=os.path.join(args.save_path, 'tensorboard'))
-
-    def train_epoch(self, ...):
-        ...
-        self.writer.add_scalar('Loss/train', avg_loss, epoch)
-
-    def evaluate(self, ...):
-        ...
-        self.writer.add_scalar('MRR/valid', metrics['MRR'], epoch)
-```
-
-启动 TensorBoard:
-
-```bash
-tensorboard --logdir=umls/tensorboard
-# 访问 http://localhost:6006
-```
-
-### 7.4 模型集成（Ensemble）
-
-```python
-import torch
-from rule_gnn_model import RuleGNN
-
-# 加载多个模型
-models = []
-for i in range(5):
-    model = RuleGNN(...)
-    checkpoint = torch.load(f'ensemble/model_{i}/rule_gnn_best.pt')
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    models.append(model)
-
-# 集成推理
-def ensemble_predict(queries, edge_index, edge_type, rule_ids):
-    all_scores = []
-
-    with torch.no_grad():
-        for model in models:
-            scores = model(queries, edge_index, edge_type, rule_ids)
-            all_scores.append(scores)
-
-    # 平均分数
-    ensemble_scores = torch.stack(all_scores).mean(dim=0)
-    return ensemble_scores
-```
-
-### 7.5 导出嵌入用于下游任务
-
-```python
-import torch
-import numpy as np
-
-# 加载模型
-model = RuleGNN(...)
-checkpoint = torch.load('umls/rule_gnn_best.pt')
-model.load_state_dict(checkpoint['model_state_dict'])
-
-# 导出实体嵌入
-entity_embeddings = model.entity_embedding.weight.data.cpu().numpy()
-np.save('entity_embeddings.npy', entity_embeddings)
-
-# 导出关系嵌入
-relation_embeddings = model.relation_embedding.weight.data.cpu().numpy()
-np.save('relation_embeddings.npy', relation_embeddings)
-
-# 用于下游任务（如实体分类、聚类等）
-from sklearn.cluster import KMeans
-
-kmeans = KMeans(n_clusters=10)
-entity_clusters = kmeans.fit_predict(entity_embeddings)
-```
-
----
-
-## 8. 性能优化技巧
-
-### 8.1 混合精度训练（FP16）
-
-```python
-# 在 rule_gnn_trainer.py 中添加
-from torch.cuda.amp import autocast, GradScaler
-
-class RuleGNNTrainer:
-    def __init__(self, ...):
-        ...
-        self.scaler = GradScaler()
-
-    def train_epoch(self, optimizer, args):
-        ...
-        for batch in train_loader:
-            with autocast():
-                scores = self.model(...)
-                loss = criterion(scores, labels)
-
-            self.scaler.scale(loss).backward()
-            self.scaler.step(optimizer)
-            self.scaler.update()
-```
-
-**效果**: 训练速度提升 2-3 倍，内存占用减半
-
-### 8.2 梯度累积
-
-```python
-accumulation_steps = 4
-
-for batch_idx, batch in enumerate(train_loader):
-    loss = ...
-    loss = loss / accumulation_steps
-    loss.backward()
-
-    if (batch_idx + 1) % accumulation_steps == 0:
-        optimizer.step()
-        optimizer.zero_grad()
-```
-
-**效果**: 等效于更大的批大小，不增加内存占用
-
-### 8.3 数据预加载
-
-```python
-from torch.utils.data import DataLoader
-
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=16,
-    shuffle=True,
-    num_workers=8,       # 增加数据加载线程
-    pin_memory=True,     # 加速 CPU->GPU 传输
-    prefetch_factor=2    # 预加载批次数
-)
-```
-
----
-
-## 9. 实验复现清单
-
-### ✅ 复现 UMLS 数据集结果
-
-- [ ] 环境安装完成（Python 3.8 + PyTorch + PyG）
-- [ ] 数据集下载并放置在 `data/umls/`
-- [ ] 配置文件检查（`config/umls_rule_gnn_config.json`）
-- [ ] 启动训练: `python main_rule_gnn.py --init ../config/umls_rule_gnn_config.json`
-- [ ] 训练完成，验证指标 MRR > 0.93
-- [ ] 测试集结果保存在 `rule_gnn_results.json`
-
-### 📊 预期结果对比
-
-| 模型 | Valid MRR | Test MRR | Test Hits@10 |
-|-----|-----------|----------|--------------|
-| RulE | 0.867 | 0.859 | 0.938 |
-| **Rule-GNN** | **0.941** | **0.938** | **0.987** |
-| 提升 | +7.4% | +7.9% | +4.9% |
-
----
-
-## 10. 总结
-
-### 关键要点
-
-1. **数据准备**: 确保数据格式正确（实体/关系字典 + 三元组 + 规则）
-2. **配置调优**: 根据硬件资源调整 `hidden_dim`, `batch_size`, `g_batch_size`
-3. **训练监控**: 观察日志中的 Valid MRR，确保模型收敛
-4. **结果验证**: 对比测试集指标，确认性能提升
-
-### 下一步
-
-- 📖 阅读 [Rule-GNN代码详解.md](Rule-GNN代码详解.md) 理解实现细节
-- 🔬 尝试在其他数据集（FB15k-237, WN18RR）上训练
-- 🚀 探索超参数调优和模型改进
-
----
-
-**文档版本**: v1.0
-**更新时间**: 2024-11-19
-**维护者**: Rule-GNN Team

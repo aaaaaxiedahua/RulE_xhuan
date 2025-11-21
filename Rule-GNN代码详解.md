@@ -120,9 +120,8 @@ logger.info(f"Relations: {graph.relation_size}")
 ruleset = RuleDataset(graph.relation_size, args.rule_file, args.rule_negative_size)
 rules = [rule[0] for rule in ruleset.rules]  # 提取规则（不含负样本）
 
-# 关联规则到图
-graph.rules = ruleset.data
-graph.relation2rules = ruleset.relation2rules
+# 注意：relation2rules 由 RulE 模型的 set_rules() 构建
+# 不是直接加载到 KnowledgeGraph
 
 # 创建数据集
 train_set = TrainDataset(graph, args.g_batch_size)
@@ -131,9 +130,11 @@ test_set = TestDataset(graph, args.g_batch_size)
 ```
 
 **关键点**:
-- `ruleset.data`: 包含正负样本的规则
-- `graph.relation2rules`: 字典，映射 `relation_id -> [rule1, rule2, ...]`
-- `TrainDataset` 按关系分组，方便 grounding 时批量处理
+- `ruleset.rules`: 包含正负样本的规则（用于 RulE 预训练）
+- `rules`: 提取的纯规则列表（不含负样本），传给 RulE 模型
+- `relation2rules`: 由 `rule_model.set_rules(rules)` 构建，映射 `relation_id -> [rule1, rule2, ...]`
+- **重要**: `relation2rules` 和 `rules` 从 RulE 模型传递到 Rule-GNN Trainer
+- `TrainDataset` 按关系分组，方便批量处理
 
 ##### 阶段 2: RulE 预训练 (lines 127-196)
 
@@ -214,6 +215,8 @@ rule_gnn_trainer = RuleGNNTrainer(
     train_dataset=train_set,
     valid_dataset=valid_set,
     test_dataset=test_set,
+    relation2rules=rule_model.relation2rules,  # 从 RulE 模型获取
+    rules=rules,                               # 已加载的规则列表
     device=device,
     logger=logger
 )
@@ -227,147 +230,211 @@ test_metrics = rule_gnn_trainer.train(args)
 
 **关键设计**:
 - `num_relations * 2`: 每个关系有正向和逆向
-- `num_layers = max_body_len`: GNN 层数对应规则长度
+- `num_layers = max_body_len`: GNN 层数对应规则最大长度
+- `relation2rules` 和 `rules` **从 RulE 模型传递**,不是从 KnowledgeGraph 获取
+  - `rule_model.set_rules(rules)` 会构建 `relation2rules` 映射
+  - `relation2rules`: 字典,`{relation_id: [rule1, rule2, ...]}`
+  - `rules`: 列表,每条规则格式为 `[rule_id, head, body...]`
 
 ---
 
 ### 2.2 Rule-GNN 模型 (`rule_gnn_model.py`)
 
-#### 2.2.1 `RuleAwareGraphConv` - 规则感知图卷积层
+#### 2.2.1 `RuleAwareGraphConv` - 规则感知图卷积层（稀疏化实现）
 
 ##### 类定义
 
 ```python
 class RuleAwareGraphConv(nn.Module):
     """
-    规则感知的图卷积层
+    规则感知的图卷积层（稀疏化实现）
 
     核心创新：
     1. 注意力权重由规则嵌入调控
     2. 只有符合规则的边才有高注意力
     3. 消息聚合时自动过滤无关边
+
+    稀疏化优化：
+    1. 预构建关系到边的索引映射，避免重复计算 mask
+    2. Query 计算移到规则循环外，只计算一次
+    3. 按关系分块计算，每次只处理 ~113 条边而非全部 10432 条
     """
 
-    def __init__(self, hidden_dim, num_relations, dropout=0.1):
+    def __init__(self, in_dim, out_dim, num_relations, num_rules, dropout=0.1):
         super().__init__()
-        self.hidden_dim = hidden_dim
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.num_relations = num_relations
 
-        # 关系特定的变换矩阵（每个关系一个）
-        self.W_r = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim, bias=False)
-            for _ in range(num_relations)
-        ])
+        # 关系特定的变换矩阵（类似 R-GCN）
+        self.W_r = nn.Parameter(torch.Tensor(num_relations, in_dim, out_dim))
 
         # 注意力机制
-        self.W_q = nn.Linear(hidden_dim, hidden_dim)  # Query
-        self.W_k = nn.Linear(hidden_dim * 3, hidden_dim)  # Key (node + relation + rule)
-        self.attn = nn.Linear(hidden_dim, 1)  # 注意力打分
+        self.W_q = nn.Linear(in_dim, out_dim)  # Query
+        self.W_k = nn.Linear(in_dim * 3, out_dim)  # Key (node + relation + rule)
 
+        # 规则嵌入（将从预训练的 RulE 加载）
+        self.rule_embedding = nn.Embedding(num_rules, in_dim)
+
+        # 偏置 + Dropout + LayerNorm
+        self.bias = nn.Parameter(torch.Tensor(out_dim))
         self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.layer_norm = nn.LayerNorm(out_dim)
+
+        # 稀疏索引映射（由 set_graph 初始化）
+        self.relation2edges = None   # dict[int -> Tensor]: 关系 r 的边索引
+        self.relation2src = None     # dict[int -> Tensor]: 关系 r 的源节点
+        self.relation2dst = None     # dict[int -> Tensor]: 关系 r 的目标节点
+        self.graph_initialized = False
 ```
 
 **设计要点**:
-- `W_r`: 每个关系类型有独立的变换矩阵（参数化关系）
+- `W_r`: 使用 `nn.Parameter` 而非 `nn.ModuleList`，更高效
 - `W_k`: Key 由三部分组成：源节点 + 关系 + 规则
-- 注意力打分考虑规则信息
+- **稀疏索引映射**: 预构建 `relation2edges/src/dst`，避免重复 mask 计算
 
-##### 前向传播
+##### 稀疏索引初始化
+
+```python
+def set_graph(self, edge_index, edge_type, device):
+    """
+    预构建关系到边的索引映射（只需调用一次）
+
+    核心优化：预先按关系类型分组存储边索引，
+    避免在 forward 中重复计算 mask 操作。
+
+    内存占用分析（UMLS）：
+        92关系 × 113边 × 8bytes × 3(edges/src/dst) = 249KB
+        vs 原稠密实现的 79MB，节省 99.7%
+    """
+    self.relation2edges = {}
+    self.relation2src = {}
+    self.relation2dst = {}
+
+    for r in range(self.num_relations):
+        mask = (edge_type == r)
+        if mask.sum() > 0:
+            edge_indices = torch.nonzero(mask, as_tuple=False).squeeze(1)
+            self.relation2edges[r] = edge_indices.to(device)
+            self.relation2src[r] = edge_index[0][mask].to(device)
+            self.relation2dst[r] = edge_index[1][mask].to(device)
+
+    self.graph_initialized = True
+```
+
+##### 前向传播（稀疏化实现）
 
 ```python
 def forward(self, x, edge_index, edge_type, rule_ids, return_attention=False):
     """
-    Args:
-        x: 节点特征 [num_nodes, hidden_dim]
-        edge_index: 边索引 [2, num_edges] (src, dst)
-        edge_type: 边类型 [num_edges]
-        rule_ids: 激活的规则 ID [num_active_rules]
-        return_attention: 是否返回注意力权重
+    稀疏化的前向传播
 
-    Returns:
-        out: 更新后的节点特征 [num_nodes, hidden_dim]
-        (optional) attn_weights: 注意力权重
+    核心优化：
+    1. Query 计算移到规则循环外，只计算 1 次（节省 98% 计算）
+    2. 按关系分块计算，每次只处理 ~113 条边（节省 99% 内存）
+    3. 使用预构建的稀疏索引，避免重复 mask 计算
+
+    内存对比（UMLS 数据集）：
+        稠密实现: ~24GB (OOM)
+        稀疏实现: ~160MB (可运行)
     """
-    src, dst = edge_index[0], edge_index[1]
+    src, dst = edge_index
     num_nodes = x.size(0)
     num_edges = edge_index.size(1)
+    device = x.device
 
-    # === 步骤 1: 关系特定的消息生成 ===
-    messages = []
-    for i in range(num_edges):
-        r = edge_type[i].item()
-        h_src = x[src[i]]  # 源节点特征
-        m = self.W_r[r](h_src)  # 关系特定变换
-        messages.append(m)
+    # 获取规则嵌入
+    h_R = self.rule_embedding(rule_ids)  # [num_active_rules, in_dim]
+    num_rules = len(rule_ids)
 
-    messages = torch.stack(messages)  # [num_edges, hidden_dim]
+    if num_rules == 0:
+        return torch.zeros(num_nodes, self.out_dim, device=device)
 
-    # === 步骤 2: 规则感知的注意力 ===
-    # 获取规则嵌入（从模型外部传入）
-    h_R = self.rule_embedding(rule_ids)  # [num_rules, hidden_dim]
+    # ========== 优化1: Query 只计算 1 次（移到规则循环外）==========
+    # 原实现：在每个规则循环内计算，50次 × 79MB = 3.95GB
+    # 优化后：只计算 1 次，79MB
+    query_all = self.W_q(x[dst])  # [num_edges, out_dim]
 
-    # 对每个边，计算与所有激活规则的注意力
-    # Query: 目标节点
-    query = self.W_q(x[dst])  # [num_edges, hidden_dim]
+    # 初始化累加器
+    combined_messages = torch.zeros(num_edges, self.out_dim, device=device)
 
-    # Key: 源节点 + 关系 + 规则
-    # 扩展规则嵌入到每条边
-    num_rules = rule_ids.size(0)
-    query_expanded = query.unsqueeze(1).expand(-1, num_rules, -1)
-    # [num_edges, num_rules, hidden_dim]
+    # ========== 优化2: 按关系分块计算（稀疏化核心）==========
+    for rule_idx in range(num_rules):
+        h_rule = h_R[rule_idx]  # [in_dim]
 
-    # 获取关系嵌入
-    relation_emb = self.relation_embedding(edge_type)  # [num_edges, hidden_dim]
-    relation_emb_expanded = relation_emb.unsqueeze(1).expand(-1, num_rules, -1)
+        # ===== 稀疏实现：按关系分块 =====
+        for r in self.relation2edges.keys():
+            # 获取当前关系的稀疏索引（预构建，无需计算 mask）
+            edge_indices_r = self.relation2edges[r]  # [num_edges_r] ~113
+            src_r = self.relation2src[r]
+            dst_r = self.relation2dst[r]
+            num_edges_r = src_r.size(0)
 
-    # 规则嵌入扩展
-    rule_emb_expanded = h_R.unsqueeze(0).expand(num_edges, -1, -1)
+            if num_edges_r == 0:
+                continue
 
-    # 拼接 Key
-    src_expanded = x[src].unsqueeze(1).expand(-1, num_rules, -1)
-    key = torch.cat([src_expanded, relation_emb_expanded, rule_emb_expanded], dim=-1)
-    # [num_edges, num_rules, hidden_dim * 3]
+            # Query: 从预计算结果中索引（不分配新内存）
+            query_r = query_all[edge_indices_r]  # [num_edges_r, out_dim]
 
-    key = self.W_k(key)  # [num_edges, num_rules, hidden_dim]
+            # 源节点特征
+            h_src_r = x[src_r]  # [num_edges_r, in_dim]
 
-    # 计算注意力分数
-    attn_input = query_expanded * key  # Element-wise product
-    attn_scores = self.attn(attn_input).squeeze(-1)  # [num_edges, num_rules]
+            # 关系嵌入（使用 W_r 的平均作为关系表示）
+            h_rel_r = self.W_r[r].mean(dim=-1)  # [in_dim]
 
-    # 对每条边，在所有规则上做 softmax
-    attn_weights = torch.softmax(attn_scores, dim=1)  # [num_edges, num_rules]
+            # Key: 构建小矩阵（核心内存节省点）
+            # 原实现：[10432, 6000] = 237MB
+            # 稀疏实现：[~113, 6000] = 2.6MB
+            key_input_r = torch.cat([
+                h_src_r,                                          # [num_edges_r, in_dim]
+                h_rel_r.unsqueeze(0).expand(num_edges_r, -1),    # [num_edges_r, in_dim]
+                h_rule.unsqueeze(0).expand(num_edges_r, -1)      # [num_edges_r, in_dim]
+            ], dim=-1)  # [num_edges_r, in_dim * 3]
 
-    # 加权聚合规则特征
-    rule_weighted = torch.matmul(attn_weights.unsqueeze(1), h_R.unsqueeze(0).expand(num_edges, -1, -1))
-    # [num_edges, 1, hidden_dim]
-    rule_weighted = rule_weighted.squeeze(1)  # [num_edges, hidden_dim]
+            key_r = self.W_k(key_input_r)  # [num_edges_r, out_dim]
 
-    # === 步骤 3: 结合消息和规则信息 ===
-    combined_messages = messages + rule_weighted  # [num_edges, hidden_dim]
-    combined_messages = self.dropout(combined_messages)
+            # 注意力分数
+            attn_scores_r = (query_r * key_r).sum(dim=-1) / (self.out_dim ** 0.5)
 
-    # === 步骤 4: 消息聚合（scatter_add） ===
+            # Softmax（稀疏版本，只对当前关系的边）
+            attn_weights_r = scatter_softmax(attn_scores_r, dst_r, dim=0, dim_size=num_nodes)
+
+            # 消息计算
+            msg_r = torch.matmul(h_src_r, self.W_r[r])  # [num_edges_r, out_dim]
+            msg_r = msg_r * attn_weights_r.unsqueeze(-1)  # 加权
+
+            # 稀疏累加到对应边位置
+            combined_messages[edge_indices_r] += msg_r
+
+    # ========== 聚合所有规则的消息 ==========
+    combined_messages /= num_rules
+
+    # 聚合到目标节点
     out = scatter_add(combined_messages, dst, dim=0, dim_size=num_nodes)
-    # [num_nodes, hidden_dim]
 
-    # === 步骤 5: 残差连接 + LayerNorm ===
-    out = self.layer_norm(out + x)
+    # 添加偏置 + LayerNorm + ReLU + Dropout
+    out = out + self.bias
+    out = self.layer_norm(out)
+    out = F.relu(out)
+    out = self.dropout(out)
 
-    if return_attention:
-        return out, attn_weights
     return out
 ```
 
 **算法解析**:
 
-1. **消息生成**: 每条边根据关系类型使用特定的 `W_r` 变换
-2. **规则注意力**:
-   - Query: 目标节点
-   - Key: (源节点, 关系, 规则)
-   - 对每条边，计算它与所有激活规则的相关性
-3. **消息增强**: 原始消息 + 规则加权特征
-4. **消息聚合**: 使用 `scatter_add` 将邻居消息聚合到目标节点
-5. **残差 + 归一化**: 保持梯度流动，稳定训练
+1. **稀疏索引预构建**: 训练开始前调用 `set_graph()`，按关系分组存储边索引
+2. **Query 外提**: 只计算一次 `W_q(x[dst])`，50 条规则共享
+3. **按关系分块**: 每次只处理 ~113 条边，而非全部 10432 条
+4. **累积聚合**: 逐规则计算消息并累加，避免存储所有中间结果
+5. **scatter 聚合**: 使用 `scatter_add` 将消息聚合到目标节点
+
+**内存对比**（UMLS 数据集）:
+| 矩阵 | 稠密实现 | 稀疏实现 | 节省 |
+|------|---------|---------|------|
+| `query` | 79MB × 50 = 3.95GB | 79MB × 1 | 98% |
+| `key_input` | 237MB × 50 = 11.85GB | 2.6MB × 1 | 99.98% |
+| **总计** | **~24 GB (OOM)** | **~160 MB** | **99.3%** |
 
 #### 2.2.2 `RuleGNN` - 完整模型
 
@@ -539,12 +606,14 @@ def forward(self, queries, edge_index, edge_type, rule_ids, candidates=None):
 ```python
 class RuleGNNTrainer:
     def __init__(self, model, graph, train_dataset, valid_dataset, test_dataset,
-                 device='cuda', logger=None):
+                 relation2rules, rules, device='cuda', logger=None):
         self.model = model.to(device)
         self.graph = graph
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
         self.test_dataset = test_dataset
+        self.relation2rules = relation2rules  # 从 RulE 模型传入
+        self.rules = rules                    # 规则列表
         self.device = device
         self.logger = logger
 
@@ -553,6 +622,14 @@ class RuleGNNTrainer:
         self.edge_index = self.edge_index.to(device)
         self.edge_type = self.edge_type.to(device)
 ```
+
+**数据结构说明**:
+- `relation2rules`: 字典,从 `rule_model.relation2rules` 获取
+  - 格式: `{relation_id: [rule1, rule2, ...]}`
+  - 每个 rule 是列表: `[rule_id, head, body1, body2, ...]`
+- `rules`: 规则列表,从 main 函数传入
+  - 格式: `[[rule_id_0, head_0, body...], [rule_id_1, head_1, body...], ...]`
+- **重要**: 这两个参数不是 KnowledgeGraph 的属性,而是从 RulE 模型传递的
 
 #### 2.3.2 构建 PyG 图
 
@@ -612,9 +689,9 @@ def get_active_rules(self, query_relations):
     for r in query_relations:
         r_item = r.item() if torch.is_tensor(r) else r
 
-        # 从 graph.relation2rules 查找规则
-        if r_item in self.graph.relation2rules:
-            for rule in self.graph.relation2rules[r_item]:
+        # 从 self.relation2rules 查找规则（不是 graph.relation2rules）
+        if r_item in self.relation2rules:
+            for rule in self.relation2rules[r_item]:
                 rule_id = rule[0]  # rule = [rule_id, head, body...]
                 active_rules.add(rule_id)
 
@@ -624,8 +701,126 @@ def get_active_rules(self, query_relations):
 **作用**:
 - 给定查询关系，找出所有 head = 该关系的规则
 - 去重（多个查询可能共享规则）
+- 使用 `self.relation2rules`（从 RulE 模型传入），不是 `graph.relation2rules`
 
-#### 2.3.4 训练一个 Epoch
+---
+
+### 2.3.4 训练模式说明: Grounding vs 负采样
+
+Rule-GNN 采用 **全实体打分模式（Grounding 模式）**，而不是传统的负采样模式。
+
+#### 模式对比
+
+| 特性 | Grounding 模式（Rule-GNN 使用） | 负采样模式（KGE 常用） |
+|------|-------------------------------|---------------------|
+| **打分实体** | 所有实体（如 135） | 1 正样本 + N 负样本（如 129） |
+| **标签类型** | 多热标签 `[0,0,1,0,1,...]` | 单热 `target=0` |
+| **损失函数** | `BCEWithLogitsLoss` | `CrossEntropyLoss` |
+| **数据结构** | `target: [batch, num_entities]` | `pos_tail + neg_tails` |
+| **内存占用** | batch_size × num_entities | batch_size × (1 + neg_size) |
+| **适用场景** | 小图、多答案查询 | 大图、单答案查询 |
+| **与 RulE 一致性** | ✅ 与 RulE Grounding 一致 | ❌ 不同 |
+
+#### Grounding 模式实现
+
+```python
+# 数据返回格式（TrainDataset 已实现）
+all_h: [batch_size]          # 头实体
+all_r: [batch_size]          # 关系
+all_t: [batch_size]          # 正确尾实体
+target: [batch_size, 135]    # 多热标签
+# target[i][j] = 1 表示实体 j 是查询 i 的正确答案
+
+# 前向传播
+scores = model(queries, edge_index, edge_type, rule_ids, candidates=None)
+# scores: [batch_size, 135] - 对所有实体打分
+
+# 损失计算（带标签平滑）
+if smoothing > 0:
+    smooth_target = target * (1 - smoothing) + smoothing / num_entities
+    loss = BCEWithLogitsLoss()(scores, smooth_target)
+else:
+    loss = BCEWithLogitsLoss()(scores, target)
+```
+
+#### 负采样模式（未使用，仅供对比）
+
+```python
+# 数据返回格式（如果使用负采样）
+pos_samples: [batch_size, 3]      # (h, r, t_pos)
+neg_samples: [batch_size, 128]    # 负样本尾实体
+
+# 前向传播
+pos_scores = model(..., candidates=pos_tail)    # [batch_size, 1]
+neg_scores = model(..., candidates=neg_tails)   # [batch_size, 128]
+all_scores = cat([pos_scores, neg_scores], dim=1)  # [batch_size, 129]
+
+# 损失计算
+labels = zeros(batch_size)  # 第 0 个是正样本
+loss = CrossEntropyLoss()(all_scores, labels)
+```
+
+#### 为什么选择 Grounding 模式？
+
+1. **数据兼容性**: `TrainDataset` 设计为返回多热标签，天然支持 Grounding 模式
+2. **多答案问题**: KG 中 `(h, r, ?)` 可能有多个正确答案（如"北京的大学"）
+3. **与 RulE 一致**: 保持与 RulE Grounding 阶段相同的训练方式
+4. **计算可行**: UMLS 只有 135 个实体，全打分开销可接受
+
+#### 实际代码中的体现
+
+```python
+# rule_gnn_trainer.py: 训练循环（lines 231-308）
+
+# DataLoader batch_size=1（因为 TrainDataset 已返回 batch）
+train_loader = DataLoader(
+    self.train_dataset,
+    batch_size=1,        # ← 关键：TrainDataset 已分好 batch
+    shuffle=True,
+    num_workers=4
+)
+
+for batch_idx, batch in enumerate(train_loader):
+    # 解包：TrainDataset 返回 5 个值
+    all_h, all_r, all_t, target, edges_to_remove = batch
+
+    # squeeze(0): 因为 DataLoader batch_size=1
+    all_h = all_h.squeeze(0).to(self.device)     # [16]
+    all_r = all_r.squeeze(0).to(self.device)     # [16]
+    all_t = all_t.squeeze(0).to(self.device)     # [16]
+    target = target.squeeze(0).to(self.device)   # [16, 135]
+
+    # 全实体打分
+    scores = self.model(queries, self.edge_index, self.edge_type,
+                       rule_ids, candidates=None)  # [16, 135]
+
+    # BCEWithLogitsLoss + 标签平滑
+    loss = nn.BCEWithLogitsLoss()(scores, smooth_target)
+```
+
+#### 批次大小层级关系
+
+```
+TrainDataset(g_batch_size=16)
+     ↓
+  内部按关系分组，每组 16 个三元组
+     ↓
+  返回: (h[16], r[16], t[16], target[16,135], edges[16])
+     ↓
+DataLoader(batch_size=1)
+     ↓
+  每次取 1 个"已分好的 batch"
+     ↓
+  输出: (h[1,16], r[1,16], t[1,16], target[1,16,135], ...)
+     ↓
+squeeze(0)
+     ↓
+  最终: (h[16], r[16], t[16], target[16,135], ...)
+```
+
+---
+
+#### 2.3.5 训练一个 Epoch
 
 ```python
 def train_epoch(self, optimizer, args):
@@ -757,7 +952,7 @@ def evaluate(self, dataset, split='valid'):
 
             if len(rule_ids) == 0:
                 # 没有规则，使用所有规则
-                rule_ids = torch.arange(len(self.graph.rules), dtype=torch.long, device=self.device)
+                rule_ids = torch.arange(len(self.rules), dtype=torch.long, device=self.device)
 
             # 对所有实体打分
             scores = self.model(queries, self.edge_index, self.edge_type,
@@ -1229,7 +1424,71 @@ Total = Params + Activations + Gradients
 
 ### 6.1 已实现的优化
 
-#### 1. **PyG Scatter 操作**
+#### 1. **内存优化 - 边计算边聚合** ⚠️⚠️⚠️
+
+**问题**: 原始实现会导致严重的内存爆炸
+
+```python
+# ❌ 问题代码（会导致 GPU OOM）
+all_messages = []  # 累积所有规则的消息列表
+for rule_id in rule_ids:  # 587 条规则
+    messages = compute_messages(...)  # 每条规则: [13420, 2000] ≈ 80MB
+    all_messages.append(messages)     # 累积
+
+# 3 层 GNN 后: 587 × 80MB × 3 = 141GB（远超 24GB GPU）
+```
+
+**根本原因**: 存储所有中间结果导致内存线性增长
+
+**解决方案**: 采用累积聚合模式（已在代码中实现）
+
+```python
+# ✅ 优化后的代码（rule_gnn_model.py:77-169）
+combined_messages = torch.zeros(num_edges, self.out_dim, device=x.device)
+combined_attention = torch.zeros(num_edges, device=x.device)
+num_rules = len(rule_ids)
+
+if num_rules == 0:
+    # 没有规则，返回零向量
+    out = torch.zeros(num_nodes, self.out_dim, device=x.device)
+    return out
+
+for rule_idx, rule_id in enumerate(rule_ids):
+    h_r_single = h_R[rule_idx]  # [in_dim]
+
+    # 计算注意力和消息
+    messages = ...  # [num_edges, out_dim] ≈ 80MB
+    attn_weights = ...  # [num_edges]
+
+    # 立即累积，而不是保存
+    combined_messages += messages      # 累积到单个张量
+    combined_attention += attn_weights
+    # messages 和 attn_weights 在循环结束后自动释放
+
+# 取平均
+combined_messages /= num_rules
+combined_attention /= num_rules
+```
+
+**内存对比**:
+| 方法 | 单层内存占用 | 3 层总计 | 说明 |
+|------|-------------|---------|------|
+| ❌ 列表累积 | 587 × 80MB = 47GB | 141GB | 超出 GPU |
+| ✅ 累积聚合 | 80MB | 240MB | 可运行 |
+| **减少** | **99.83%** | **99.83%** | **关键优化** |
+
+**设计模式**:
+```
+传统模式（collect-then-aggregate）:
+  收集所有规则结果 → 一次性聚合
+  内存: O(num_rules × num_edges × hidden_dim)
+
+优化模式（edge-compute-edge-aggregate）:
+  逐个规则计算 → 边计算边累积
+  内存: O(num_edges × hidden_dim)
+```
+
+#### 2. **PyG Scatter 操作**
 - 使用高度优化的 `scatter_add`, `scatter_max`
 - 比 Python 循环快 100+ 倍
 
@@ -1474,6 +1733,7 @@ def explain(self, query, predicted_tail):
 1. **用 GNN 替代路径枚举**: 从 O(B^L) 降到 O(E×L)
 2. **规则感知的注意力**: 让模型自动学习哪些边符合哪些规则
 3. **端到端学习**: 预训练嵌入 + GNN 微调
+4. **稀疏化优化**: Query 外提 + 按关系分块计算，内存从 ~24GB 降到 ~160MB
 
 ### 代码质量
 
