@@ -152,94 +152,63 @@ class RuleAwareGraphConv(nn.Module):
         combined_attention = torch.zeros(num_edges, device=device) if return_attention else None
 
         # ========== 优化2: 按关系分块计算（稀疏化核心）==========
-        # 检查是否已初始化稀疏索引
-        use_sparse = self.graph_initialized and self.relation2edges is not None
+        # 确保稀疏索引已初始化
+        if not self.graph_initialized or self.relation2edges is None:
+            raise RuntimeError("稀疏索引未初始化，请先调用 set_graph() 方法")
 
         for rule_idx in range(num_rules):
             h_rule = h_R[rule_idx]  # [in_dim]
 
-            if use_sparse:
-                # ===== 稀疏实现：按关系分块 =====
-                for r in self.relation2edges.keys():
-                    # 获取当前关系的稀疏索引（预构建，无需计算mask）
-                    edge_indices_r = self.relation2edges[r]  # [num_edges_r] ~113
-                    src_r = self.relation2src[r]             # [num_edges_r]
-                    dst_r = self.relation2dst[r]             # [num_edges_r]
-                    num_edges_r = src_r.size(0)
+            # 按关系分块处理
+            for r in self.relation2edges.keys():
+                # 获取当前关系的稀疏索引（预构建，无需计算mask）
+                edge_indices_r = self.relation2edges[r]  # [num_edges_r] ~113
+                src_r = self.relation2src[r]             # [num_edges_r]
+                dst_r = self.relation2dst[r]             # [num_edges_r]
+                num_edges_r = src_r.size(0)
 
-                    if num_edges_r == 0:
-                        continue
+                if num_edges_r == 0:
+                    continue
 
-                    # Query: 从预计算结果中索引（不分配新内存）
-                    query_r = query_all[edge_indices_r]  # [num_edges_r, out_dim]
+                # Query: 从预计算结果中索引（不分配新内存）
+                query_r = query_all[edge_indices_r]  # [num_edges_r, out_dim]
 
-                    # 源节点特征
-                    h_src_r = x[src_r]  # [num_edges_r, in_dim]
+                # 源节点特征
+                h_src_r = x[src_r]  # [num_edges_r, in_dim]
 
-                    # 关系嵌入（使用W_r的平均作为关系表示）
-                    h_rel_r = self.W_r[r].mean(dim=-1)  # [in_dim]
+                # 关系嵌入（使用W_r的平均作为关系表示）
+                h_rel_r = self.W_r[r].mean(dim=-1)  # [in_dim]
 
-                    # Key: 构建小矩阵（核心内存节省点）
-                    # 原实现：[10432, 6000] = 237MB
-                    # 稀疏实现：[~113, 6000] = 2.6MB
-                    key_input_r = torch.cat([
-                        h_src_r,                                          # [num_edges_r, in_dim]
-                        h_rel_r.unsqueeze(0).expand(num_edges_r, -1),    # [num_edges_r, in_dim]
-                        h_rule.unsqueeze(0).expand(num_edges_r, -1)      # [num_edges_r, in_dim]
-                    ], dim=-1)  # [num_edges_r, in_dim * 3]
+                # Key: 构建小矩阵（核心内存节省点）
+                # 原实现：[10432, 6000] = 237MB
+                # 稀疏实现：[~113, 6000] = 2.6MB
+                key_input_r = torch.cat([
+                    h_src_r,                                          # [num_edges_r, in_dim]
+                    h_rel_r.unsqueeze(0).expand(num_edges_r, -1),    # [num_edges_r, in_dim]
+                    h_rule.unsqueeze(0).expand(num_edges_r, -1)      # [num_edges_r, in_dim]
+                ], dim=-1)  # [num_edges_r, in_dim * 3]
 
-                    key_r = self.W_k(key_input_r)  # [num_edges_r, out_dim]
+                key_r = self.W_k(key_input_r)  # [num_edges_r, out_dim]
 
-                    # 注意力分数
-                    attn_scores_r = (query_r * key_r).sum(dim=-1) / (self.out_dim ** 0.5)
-                    # [num_edges_r]
+                # 注意力分数
+                attn_scores_r = (query_r * key_r).sum(dim=-1) / (self.out_dim ** 0.5)
+                # [num_edges_r]
 
-                    # Softmax（稀疏版本，只对当前关系的边）
-                    attn_weights_r = scatter_softmax(attn_scores_r, dst_r, dim=0, dim_size=num_nodes)
-                    # [num_edges_r]
+                # Softmax（稀疏版本，只对当前关系的边）
+                attn_weights_r = scatter_softmax(attn_scores_r, dst_r, dim=0, dim_size=num_nodes)
+                # [num_edges_r]
 
-                    # 消息计算
-                    # 原实现：[10432, 2000] = 79MB
-                    # 稀疏实现：[~113, 2000] = 0.86MB
-                    msg_r = torch.matmul(h_src_r, self.W_r[r])  # [num_edges_r, out_dim]
-                    msg_r = msg_r * attn_weights_r.unsqueeze(-1)  # 加权
+                # 消息计算
+                # 原实现：[10432, 2000] = 79MB
+                # 稀疏实现：[~113, 2000] = 0.86MB
+                msg_r = torch.matmul(h_src_r, self.W_r[r])  # [num_edges_r, out_dim]
+                msg_r = msg_r * attn_weights_r.unsqueeze(-1)  # 加权
 
-                    # 稀疏累加到对应边位置
-                    combined_messages[edge_indices_r] += msg_r
-
-                    if return_attention:
-                        combined_attention[edge_indices_r] += attn_weights_r
-
-            else:
-                # ===== 回退到稠密实现（未初始化时）=====
-                # 获取关系嵌入
-                relation_emb = torch.zeros(num_edges, self.in_dim, device=device)
-                for r in range(self.num_relations):
-                    mask = (edge_type == r)
-                    if mask.sum() > 0:
-                        relation_emb[mask] = self.W_r[r].mean(dim=-1)
-
-                # 扩展规则嵌入
-                rule_emb_expanded = h_rule.unsqueeze(0).expand(num_edges, -1)
-
-                # Key
-                key_input = torch.cat([x[src], relation_emb, rule_emb_expanded], dim=-1)
-                key = self.W_k(key_input)
-
-                # 注意力
-                attn_scores = (query_all * key).sum(dim=-1) / (self.out_dim ** 0.5)
-                attn_weights = scatter_softmax(attn_scores, dst, dim=0, dim_size=num_nodes)
-
-                # 消息
-                for r in range(self.num_relations):
-                    mask = (edge_type == r)
-                    if mask.sum() > 0:
-                        msg = torch.matmul(x[src[mask]], self.W_r[r])
-                        msg = msg * attn_weights[mask].unsqueeze(-1)
-                        combined_messages[mask] += msg
+                # 稀疏累加到对应边位置
+                combined_messages[edge_indices_r] += msg_r
 
                 if return_attention:
-                    combined_attention += attn_weights
+                    combined_attention[edge_indices_r] += attn_weights_r
 
         # ========== 聚合所有规则的消息 ==========
 
