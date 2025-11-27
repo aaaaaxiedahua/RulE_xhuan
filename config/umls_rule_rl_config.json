@@ -1,0 +1,61 @@
+{
+    "comment_pretraining": "=== 预训练模型参数（冻结）===",
+    "data_path": "../data/umls",
+    "rule_file": "../data/umls/mined_rules.txt",
+    "pretrain_checkpoint": "../outputs/umls/checkpoint",
+    "auto_pretrain": true,
+    "cuda": true,
+    "cpu_num": 10,
+    "seed": 800,
+
+    "comment_embedding_dims": "=== 预训练嵌入维度 ===",
+    "hidden_dim": 2000,
+    "mlp_rule_dim": 100,
+    "gamma_fact": 6,
+    "gamma_rule": 8,
+    "p_norm": 2,
+
+    "comment_pretrain_training": "=== 自动预训练参数 ===",
+    "learning_rate": 0.00005,
+    "pretrain_max_steps": 30000,
+    "warm_up_steps": 15000,
+    "batch_size": 256,
+    "negative_sample_size": 512,
+    "rule_batch_size": 128,
+    "rule_negative_size": 64,
+    "weight_rule": 1.0,
+    "adversarial_temperature": 0.5,
+    "test_batch_size": 16,
+
+    "comment_rl_architecture": "=== 强化学习模型架构 ===",
+    "state_dim": 128,
+    "history_dim": 128,
+    "policy_hidden_dim": 256,
+    "value_hidden_dim": 256,
+
+    "comment_rl_hyperparams": "=== 强化学习超参数 ===",
+    "top_k_rules": 5,
+    "max_steps": 5,
+    "gamma": 0.99,
+    "epsilon_start": 0.5,
+    "epsilon_end": 0.05,
+    "ucb_c": 1.0,
+
+    "comment_reward": "=== 奖励参数 ===",
+    "alpha": 0.1,
+
+    "comment_optimization": "=== 优化参数 ===",
+    "lr_policy": 0.001,
+    "lr_value": 0.001,
+    "lr_selector": 0.0001,
+    "grad_clip": 1.0,
+
+    "comment_training": "=== 训练控制 ===",
+    "num_epochs": 100,
+    "log_interval": 100,
+    "eval_interval": 5,
+    "save_interval": 10,
+
+    "comment_save": "=== 保存路径 ===",
+    "save_path": "../outputs/umls_rule_rl"
+}
