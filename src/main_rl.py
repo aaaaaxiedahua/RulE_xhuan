@@ -202,7 +202,7 @@ def main():
     train_set = TrainDataset(graph, batch_size=16)
     valid_set = ValidDataset(graph, batch_size=16)
     test_set = TestDataset(graph, batch_size=16)
-    ruleset = RuleDataset(graph.relation_size, args.rule_file, neg_sample_size=64)
+    ruleset = RuleDataset(graph.relation_size, args.rule_file, negative_sample_size=64)
 
     rules = [rule[0] for rule in ruleset.rules]
     logging.info(f'  - 从 {args.rule_file} 加载了 {len(rules)} 条规则')
