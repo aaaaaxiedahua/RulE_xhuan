@@ -225,7 +225,7 @@ def main():
         gamma_rule=args.gamma_rule,
         hidden_dim=args.hidden_dim,
         device=device,
-        data_path=args.data_path
+        dataset=args.data_path
     )
     rule_model.set_rules(rules)
 
