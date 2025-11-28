@@ -190,11 +190,12 @@ def main():
     # 加载知识图谱
     logging.info(f'从 {args.data_path} 加载知识图谱')
     graph = KnowledgeGraph(args.data_path)
+
     logging.info(f'  - 实体数: {graph.entity_size}')
     logging.info(f'  - 关系数: {graph.relation_size}')
-    logging.info(f'  - 训练三元组: {len(graph.train_triplets)}')
-    logging.info(f'  - 验证三元组: {len(graph.valid_triplets)}')
-    logging.info(f'  - 测试三元组: {len(graph.test_triplets)}')
+    logging.info(f'  - 训练三元组: {len(graph.train_facts)}')
+    logging.info(f'  - 验证三元组: {len(graph.valid_facts)}')
+    logging.info(f'  - 测试三元组: {len(graph.test_facts)}')
 
     # 加载数据集
     logging.info('初始化数据集...')
@@ -413,9 +414,9 @@ def main():
     logging.info('='*80)
 
     # 准备训练数据
-    train_queries = [(h, r, t) for h, r, t in graph.train_triplets]
-    valid_queries = [(h, r, t) for h, r, t in graph.valid_triplets]
-    test_queries = [(h, r, t) for h, r, t in graph.test_triplets]
+    train_queries = [(h, r, t) for h, r, t in graph.train_facts]
+    valid_queries = [(h, r, t) for h, r, t in graph.valid_facts]
+    test_queries = [(h, r, t) for h, r, t in graph.test_facts]
 
     # 开始训练
     test_metrics = trainer.train(train_queries, valid_queries, test_queries)

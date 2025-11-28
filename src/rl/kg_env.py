@@ -53,7 +53,7 @@ class KGReasoningEnv:
         """
         self.adjacency = {}  # {entity_id: [(relation, neighbor), ...]}
 
-        for h, r, t in self.graph.train_triplets:
+        for h, r, t in self.graph.train_facts:
             if h not in self.adjacency:
                 self.adjacency[h] = []
             self.adjacency[h].append((r, t))
