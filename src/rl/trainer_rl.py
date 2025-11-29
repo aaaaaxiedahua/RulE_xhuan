@@ -203,6 +203,17 @@ class RulERLTrainer:
         """
         head, relation, tail = query
         device = self.rule_model.entity_embedding.weight.device
+        debug_logging = self.global_step < 5
+
+        if debug_logging:
+            logging.info(
+                '[Debug][Episode %d] Query=(%d, %d, %d), epsilon=%.3f',
+                self.global_step + 1,
+                head,
+                relation,
+                tail,
+                epsilon
+            )
 
         # ===== Step 1: 高层 Agent 选择规则 =====
         query_entity_emb = self.rule_model.entity_embedding.weight[head]
@@ -229,6 +240,8 @@ class RulERLTrainer:
         rewards = []
         done = False
 
+        episode_info = None
+
         while not done:
             # 获取有效动作掩码
             action_mask = self.env.get_action_mask()
@@ -249,6 +262,7 @@ class RulERLTrainer:
             log_probs.append(log_prob)
             values.append(value)
             rewards.append(reward)
+            episode_info = info
 
             state = next_state
 
@@ -274,13 +288,23 @@ class RulERLTrainer:
         # 统计
         total_reward = sum(rewards)
         path_length = len(actions)
-        success = info.get('success', False)
+        success = episode_info.get('success', False) if episode_info else False
 
         loss_dict = {
             'policy_loss': policy_loss,
             'value_loss': value_loss,
             'selector_loss': selector_loss
         }
+
+        if debug_logging:
+            logging.info(
+                '[Debug][Episode %d] Done reason=%s, total_reward=%.4f, path_length=%d, success=%s',
+                self.global_step + 1,
+                episode_info.get('reason') if episode_info else 'unknown',
+                float(total_reward),
+                path_length,
+                success
+            )
 
         return total_reward, path_length, success, loss_dict
 
