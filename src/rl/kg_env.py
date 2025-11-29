@@ -128,7 +128,11 @@ class KGReasoningEnv:
 
         # 3. 更新路径历史
         current_entity_emb = self.rule_model.entity_embedding.weight[self.current_entity]
-        action_rel_emb = self.rule_model.relation_embedding.weight[action]
+        base_rel_idx = action % self.graph.relation_size
+        # Inverse relations are encoded by offsetting the ID by relation_size; reuse
+        # the base embedding but flip its sign to keep direction information.
+        relation_flag = -1.0 if action >= self.graph.relation_size else 1.0
+        action_rel_emb = self.rule_model.relation_embedding.weight[base_rel_idx] * relation_flag
         self.path_history.append(
             torch.cat([current_entity_emb, action_rel_emb], dim=-1)
         )
