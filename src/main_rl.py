@@ -153,6 +153,12 @@ def parse_args(args=None):
                        help='使用统一权重')
     parser.add_argument('--regularization', default=0.0, type=float,
                        help='正则化系数')
+    parser.add_argument('--log_steps', default=100, type=int,
+                       help='预训练日志打印间隔')
+    parser.add_argument('--valid_steps', default=1000, type=int,
+                       help='预训练验证间隔')
+    parser.add_argument('--save_checkpoint_steps', default=10, type=int,
+                       help='预训练保存间隔')
 
     return parser.parse_args(args)
 
