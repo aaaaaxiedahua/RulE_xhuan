@@ -352,7 +352,7 @@ class RulERLTrainer:
             loss: 价值损失
         """
         states_tensor = torch.stack(states)
-        values = self.path_finder.get_value(states_tensor)
+        values = self.path_finder.get_value(states_tensor.detach())
         value_loss = nn.MSELoss()(values, returns)
 
         self.value_optimizer.zero_grad()
