@@ -246,21 +246,17 @@ def main():
                 logging.info(f'创建预训练检查点目录: {pretrain_dir}')
 
             # 初始化预训练器
-            from data import KGETrainDataset
-            pre_train_set = KGETrainDataset(
-                graph,
-                batch_size=args.batch_size,
-                negative_sample_size=args.negative_sample_size
-            )
-
+            # 初始化预训练器
+            # PreTrainer 会在内部初始化 KGETrainDataset，不需要外部传入
             pre_trainer = PreTrainer(
-                model=rule_model,
                 graph=graph,
-                train_set=pre_train_set,
+                model=rule_model,
                 valid_set=valid_set,
                 test_set=test_set,
                 ruleset=ruleset,
-                device=device
+                expectation=True,
+                device=device,
+                num_worker=args.cpu_num
             )
 
             logging.info(f'开始预训练 (pretrain_max_steps={args.pretrain_max_steps})...')
