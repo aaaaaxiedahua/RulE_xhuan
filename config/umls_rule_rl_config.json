@@ -23,6 +23,8 @@
     "weight_rule": 1.0,
     "adversarial_temperature": 0.5,
     "test_batch_size": 16,
+    "weight_decay": 0.0,
+    "disable_adv": false,
 
     "state_dim": 128,
     "history_dim": 128,

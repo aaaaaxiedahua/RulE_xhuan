@@ -145,6 +145,10 @@ def parse_args(args=None):
                        help='对抗采样温度')
     parser.add_argument('--test_batch_size', default=16, type=int,
                        help='测试批次大小')
+    parser.add_argument('--weight_decay', default=0.0, type=float,
+                       help='权重衰减')
+    parser.add_argument('--disable_adv', action='store_true', default=False,
+                       help='禁用对抗采样')
 
     return parser.parse_args(args)
 
