@@ -253,7 +253,7 @@ class RulERLTrainer:
             state = next_state
 
         # ===== Step 3: 计算回报和优势 =====
-        returns = self._compute_returns(rewards, self.args.gamma)
+        returns = self._compute_returns(rewards, self.args.gamma, device)
         advantages = self._compute_advantages(returns, values)
 
         # ===== Step 4: 更新策略网络（PathFinder） =====
@@ -284,7 +284,7 @@ class RulERLTrainer:
 
         return total_reward, path_length, success, loss_dict
 
-    def _compute_returns(self, rewards, gamma):
+    def _compute_returns(self, rewards, gamma, device):
         """
         计算折扣回报
 
@@ -300,7 +300,7 @@ class RulERLTrainer:
         for r in reversed(rewards):
             R = r + gamma * R
             returns.insert(0, R)
-        return torch.tensor(returns, dtype=torch.float32)
+        return torch.tensor(returns, dtype=torch.float32, device=device)
 
     def _compute_advantages(self, returns, values):
         """
