@@ -149,6 +149,10 @@ def parse_args(args=None):
                        help='权重衰减')
     parser.add_argument('--disable_adv', action='store_true', default=False,
                        help='禁用对抗采样')
+    parser.add_argument('--uni_weight', action='store_true', default=False,
+                       help='使用统一权重')
+    parser.add_argument('--regularization', default=0.0, type=float,
+                       help='正则化系数')
 
     return parser.parse_args(args)
 
