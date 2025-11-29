@@ -6,6 +6,12 @@ from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDa
 from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
 from trainer import GroundTrainer, PreTrainer
+from rl.state_encoder import StateEncoder
+from rl.rule_selector import RuleSelectorAgent
+from rl.path_finder import PathFinderAgent
+from rl.kg_env import KGReasoningEnv
+from rl.reward_calculator import RewardCalculator
+from rl.trainer_rl import RulERLTrainer
 
 # torch.cuda.set_device(1)
 
@@ -84,6 +90,27 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+
+    # reinforcement learning parameters
+    parser.add_argument('--state_dim', default=128, type=int, help='State encoder output dimension for RL')
+    parser.add_argument('--history_dim', default=128, type=int, help='History GRU hidden size for RL state encoder')
+    parser.add_argument('--policy_hidden_dim', default=256, type=int, help='Hidden size of RL policy network')
+    parser.add_argument('--value_hidden_dim', default=256, type=int, help='Hidden size of RL value network')
+    parser.add_argument('--top_k_rules', default=5, type=int, help='Number of rules selected by high-level agent')
+    parser.add_argument('--rl_max_steps', default=5, type=int, help='Maximum steps per RL episode')
+    parser.add_argument('--gamma', default=0.99, type=float, help='Discount factor for RL')
+    parser.add_argument('--epsilon_start', default=0.5, type=float, help='Initial epsilon for rule selector exploration')
+    parser.add_argument('--epsilon_end', default=0.05, type=float, help='Final epsilon for rule selector exploration')
+    parser.add_argument('--ucb_c', default=1.0, type=float, help='UCB exploration coefficient for rule selector')
+    parser.add_argument('--rl_reward_alpha', default=0.1, type=float, help='Reward shaping weight for RL')
+    parser.add_argument('--lr_policy', default=0.001, type=float, help='Learning rate for RL policy network')
+    parser.add_argument('--lr_value', default=0.001, type=float, help='Learning rate for RL value network')
+    parser.add_argument('--lr_selector', default=0.0001, type=float, help='Learning rate for rule selector')
+    parser.add_argument('--grad_clip', default=1.0, type=float, help='Gradient clipping threshold for RL components')
+    parser.add_argument('--num_epochs', default=100, type=int, help='Number of RL training epochs')
+    parser.add_argument('--log_interval', default=100, type=int, help='Steps between RL logging updates')
+    parser.add_argument('--eval_interval', default=5, type=int, help='Epoch interval for RL validation')
+    parser.add_argument('--save_interval', default=10, type=int, help='Epoch interval for saving RL checkpoints')
     return parser.parse_args(args)
 
 def main():
@@ -128,6 +155,7 @@ def main():
 
     RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
     RulE_model.set_rules(rules)
+    RulE_model.rules = rules
 
     
     # For pre-training 
@@ -175,23 +203,99 @@ def main():
     # checkpoint = torch.load(os.path.join(args.save_path, 'grounding.pt'))
     # RulE_model.load_state_dict(checkpoint['model'])
 
-    ground_trainer = GroundTrainer(
-        model=RulE_model,
-        args = args,
-        train_set=train_set,
-        valid_set=valid_set,
-        test_set=test_set,
-        test_kge_set = test_kge_set,
-        device=device,
-        num_worker=args.cpu_num
+    # 以下 grounding 训练阶段暂时停用
+    # ground_trainer = GroundTrainer(
+    #     model=RulE_model,
+    #     args = args,
+    #     train_set=train_set,
+    #     valid_set=valid_set,
+    #     test_set=test_set,
+    #     test_kge_set = test_kge_set,
+    #     device=device,
+    #     num_worker=args.cpu_num
+    # )
+
+    # # valid_mrr = ground_trainer.evaluate('valid', expectation=True)
+    # # test_mrr = ground_trainer.evaluate('test', expectation=True)
+    #
+    # # args.g_batch_size = 32
+    #
+    # ground_trainer.train(args)
+
+    logging.info('开始冻结预训练模型参数，准备进入RulE-RL阶段')
+    RulE_model.eval()
+    for param in RulE_model.parameters():
+        param.requires_grad = False
+
+    frozen_params = sum(p.numel() for p in RulE_model.parameters())
+    logging.info('冻结参数总数: {:,}'.format(frozen_params))
+
+    logging.info('初始化RulE-RL组件')
+    entity_dim = RulE_model.entity_embedding.embedding_dim
+    rel_dim = RulE_model.relation_embedding.embedding_dim
+    rule_dim = RulE_model.rule_emb.embedding_dim
+    num_relations = graph.relation_size
+    num_rules = len(rules)
+
+    logging.info('实体维度: %d, 关系维度: %d, 规则维度: %d', entity_dim, rel_dim, rule_dim)
+    logging.info('规则数量: %d, 关系数量: %d', num_rules, num_relations)
+
+    state_encoder = StateEncoder(
+        entity_dim=entity_dim,
+        rel_dim=rel_dim,
+        rule_dim=rule_dim,
+        history_dim=args.history_dim,
+        state_dim=args.state_dim
+    ).to(device)
+
+    rule_selector = RuleSelectorAgent(
+        entity_dim=entity_dim,
+        rel_dim=rel_dim,
+        rule_dim=rule_dim,
+        num_rules=num_rules,
+        hidden_dim=args.state_dim,
+        ucb_c=args.ucb_c
+    ).to(device)
+
+    path_finder = PathFinderAgent(
+        state_dim=args.state_dim,
+        action_dim=num_relations * 2,
+        hidden_dim=args.policy_hidden_dim
+    ).to(device)
+
+    reward_calculator = RewardCalculator(
+        rule_model=RulE_model,
+        alpha=args.rl_reward_alpha
     )
 
-    # valid_mrr = ground_trainer.evaluate('valid', expectation=True)
-    # test_mrr = ground_trainer.evaluate('test', expectation=True)
-    
-    # args.g_batch_size = 32
-    
-    ground_trainer.train(args)
+    env = KGReasoningEnv(
+        graph=graph,
+        rule_model=RulE_model,
+        state_encoder=state_encoder,
+        reward_calculator=reward_calculator,
+        max_steps=args.rl_max_steps
+    )
+
+    rl_trainer = RulERLTrainer(
+        rule_model=RulE_model,
+        rule_selector=rule_selector,
+        path_finder=path_finder,
+        env=env,
+        graph=graph,
+        args=args
+    )
+
+    train_queries = [tuple(fact) for fact in graph.train_facts]
+    valid_queries = [tuple(fact) for fact in graph.valid_facts]
+    test_queries = [tuple(fact) for fact in graph.test_facts]
+
+    logging.info('RulE-RL训练开始，总训练查询数: %d', len(train_queries))
+    rl_metrics = rl_trainer.train(train_queries, valid_queries, test_queries)
+
+    logging.info('RulE-RL训练完成，测试集指标:')
+    logging.info('MRR: %.4f | MR: %.2f | Hits@1: %.4f | Hits@3: %.4f | Hits@10: %.4f',
+                 rl_metrics["mrr"], rl_metrics["mr"],
+                 rl_metrics["hits@1"], rl_metrics["hits@3"], rl_metrics["hits@10"])
     
     # return test_mrr
 
