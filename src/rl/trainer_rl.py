@@ -264,6 +264,17 @@ class RulERLTrainer:
             rewards.append(reward)
             episode_info = info
 
+            if debug_logging:
+                logging.info(
+                    '[Debug][Episode %d][Step %d] action=%d reward=%.4f done=%s reason=%s',
+                    self.global_step + 1,
+                    len(actions),
+                    int(action),
+                    float(reward),
+                    done,
+                    info.get('reason', 'n/a')
+                )
+
             state = next_state
 
         # ===== Step 3: 计算回报和优势 =====
