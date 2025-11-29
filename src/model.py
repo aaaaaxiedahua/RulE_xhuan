@@ -220,7 +220,7 @@ class RulE(torch.nn.Module):
 
         all_t = torch.arange(0,self.num_entities,device=all_h.device).unsqueeze(0).repeat(all_h.size(0),1)
        
-        relations_flag = torch.pow(-1, all_r // self.num_relations).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(all_r, self.num_relations, rounding_mode='trunc')).unsqueeze(-1)
         all_r = all_r % (self.num_relations)
 
         head = self.entity_embedding(all_h).unsqueeze(1)
@@ -272,7 +272,7 @@ class RulE(torch.nn.Module):
         # cal_mask = (~mask).unsqueeze(1).unsqueeze(-1)
         rule_len = mask.sum(-1).unsqueeze(1).unsqueeze(-1)
         cal_mask = mask.unsqueeze(1).unsqueeze(-1)
-        relations_flag = torch.pow(-1,inputs // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(inputs, self.num_relations, rounding_mode='trunc')).unsqueeze(-1)
         inputs_com = inputs % self.num_relations
 
         inputs_com = torch.where(inputs==self.num_relations * 2, self.padding_index, inputs_com)
@@ -284,7 +284,7 @@ class RulE(torch.nn.Module):
         
         # rule_head
         embedding_r = self.relation_embedding(rules[:,:,1]%self.num_relations)
-        relations_flag = torch.pow(-1,rules[:,:,1] // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(rules[:,:,1], self.num_relations, rounding_mode='trunc')).unsqueeze(-1)
         embedding_r *= relations_flag
 
         rule_body = embedding * cal_mask
@@ -307,7 +307,7 @@ class RulE(torch.nn.Module):
         # cal_mask = (~mask).unsqueeze(1).unsqueeze(-1)
         rule_len = mask.sum(-1).unsqueeze(1).unsqueeze(-1)
         cal_mask = mask.unsqueeze(1).unsqueeze(-1)
-        relations_flag = torch.pow(-1,inputs // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(inputs, self.num_relations, rounding_mode='trunc')).unsqueeze(-1)
         inputs_com = inputs % self.num_relations
 
         inputs_com = torch.where(inputs==self.num_relations * 2, self.padding_index, inputs_com)
@@ -319,7 +319,7 @@ class RulE(torch.nn.Module):
         
         # rule_head
         embedding_r = self.relation_embedding(rules[:,:,1]%self.num_relations)
-        relations_flag = torch.pow(-1,rules[:,:,1] // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(rules[:,:,1], self.num_relations, rounding_mode='trunc')).unsqueeze(-1)
         embedding_r *= relations_flag
 
         rule_body = embedding * cal_mask
@@ -381,7 +381,7 @@ class RulE(torch.nn.Module):
 
 
         # rel = self.relation_embedding(all_r[0]%self.num_relations)
-        # relations_flag = torch.pow(-1,all_r[0] // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(all_r, self.num_relations, rounding_mode='trunc')).unsqueeze(-1)
         # rel = (rel * relations_flag).unsqueeze(0).expand(output.size(0), -1)
 
         # feature = torch.cat([output, rel], dim=-1)
