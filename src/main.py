@@ -14,6 +14,7 @@ from rl.reward_calculator import RewardCalculator
 from rl.trainer_rl import RulERLTrainer
 
 # torch.cuda.set_device(1)
+# python main.py --init ../config/umls_pretrain_config.json
 
 def save_files(rules):
     with open('mined_rules.txt','w') as fw:
