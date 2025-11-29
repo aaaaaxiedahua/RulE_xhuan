@@ -211,109 +211,101 @@ def main():
     logging.info(f'  - 验证三元组: {len(graph.valid_facts)}')
     logging.info(f'  - 测试三元组: {len(graph.test_facts)}')
 
-    # 加载数据集
-    logging.info('初始化数据集...')
-    train_set = TrainDataset(graph, batch_size=16)
-    valid_set = ValidDataset(graph, batch_size=16)
-    test_set = TestDataset(graph, batch_size=16)
-    ruleset = RuleDataset(graph.relation_size, args.rule_file, negative_sample_size=64)
+    # for grounding dataset (与 main.py 一致)
+    train_set = TrainDataset(graph, args.g_batch_size)
+    valid_set = ValidDataset(graph, args.g_batch_size)
+    test_set = TestDataset(graph, args.g_batch_size)
+    test_kge_set = TestDataset(graph, 16)
+    ruleset = RuleDataset(graph.relation_size, args.rule_file, args.rule_negative_size)
 
     rules = [rule[0] for rule in ruleset.rules]
-    logging.info(f'  - 从 {args.rule_file} 加载了 {len(rules)} 条规则')
 
-    # 设置设备
-    if args.cuda and torch.cuda.is_available():
+    
+    if args.cuda:
         device = torch.device('cuda')
-        logging.info(f'使用GPU: {torch.cuda.get_device_name(0)}')
     else:
         device = torch.device('cpu')
-        logging.info('使用CPU')
 
-    # 初始化RulE模型
-    logging.info('初始化RulE模型...')
-    rule_model = RulE(
-        graph=graph,
-        p_norm=args.p_norm,
-        mlp_rule_dim=args.mlp_rule_dim,
-        gamma_fact=args.gamma_fact,
-        gamma_rule=args.gamma_rule,
-        hidden_dim=args.hidden_dim,
-        device=device,
-        dataset=args.data_path
-    )
-    rule_model.set_rules(rules)
+    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
+    RulE_model.set_rules(rules)
 
+    
     # 检查预训练检查点是否存在
-    logging.info(f'检查预训练检查点: {args.pretrain_checkpoint}')
-
     if not os.path.exists(args.pretrain_checkpoint):
         if args.auto_pretrain:
-            # 自动进行预训练
-            logging.info('='*80)
-            logging.info('预训练检查点不存在，开始自动预训练...')
-            logging.info('='*80)
-
             # 创建预训练检查点目录
             pretrain_dir = os.path.dirname(args.pretrain_checkpoint)
             if not os.path.exists(pretrain_dir):
                 os.makedirs(pretrain_dir)
-                logging.info(f'创建预训练检查点目录: {pretrain_dir}')
 
-            # 初始化预训练器
-            # 初始化预训练器
-            # PreTrainer 会在内部初始化 KGETrainDataset，不需要外部传入
+            # For pre-training (与 main.py 完全一致)
+            
+            # 临时修改参数
+            original_save_path = args.save_path
+            original_max_steps = args.max_steps
+            args.save_path = pretrain_dir
+            args.max_steps = args.pretrain_max_steps
+            
             pre_trainer = PreTrainer(
                 graph=graph,
-                model=rule_model,
+                model=RulE_model,
                 valid_set=valid_set,
                 test_set=test_set,
+                # tripletset=kge_train_set,
                 ruleset=ruleset,
                 expectation=True,
-                device=device,
+                device = device,
                 num_worker=args.cpu_num
+                
             )
+            
+            # checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
+            # RulE_model.load_state_dict(checkpoint['model'])
 
-            logging.info(f'开始预训练 (pretrain_max_steps={args.pretrain_max_steps})...')
 
-            # 临时保存原始 max_steps，使用预训练的 max_steps
-            original_max_steps = args.max_steps
-            args.max_steps = args.pretrain_max_steps
-
+            # valid_mrr = pre_trainer.evaluate('valid', expectation=True)
+            # test_mrr = pre_trainer.evaluate('test', expectation=True)
+            
             pre_trainer.train(args)
+            
+            
+            logging.info('Finishing pre-training!')
 
-            # 恢复 RL 的 max_steps
+            print("loading RulE trainer......")
+
+            # load rule embedding and KGE embedding
+
+            checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
+            RulE_model.load_state_dict(checkpoint['model'])
+            
+            
+            logging.info('Test the results of pre-training')
+            
+            valid_mrr = pre_trainer.evaluate('valid', expectation=True)
+            test_mrr = pre_trainer.evaluate('test', expectation=True)
+            
+            # 恢复原始参数
+            args.save_path = original_save_path
             args.max_steps = original_max_steps
-
-            logging.info('='*80)
-            logging.info(f'预训练完成，检查点已保存到: {args.pretrain_checkpoint}')
-            logging.info('='*80)
         else:
-            logging.error(f'预训练检查点未找到: {args.pretrain_checkpoint}')
-            logging.error('请设置 --auto_pretrain 或先使用 main.py 训练RulE模型')
-            raise FileNotFoundError(f'检查点未找到: {args.pretrain_checkpoint}')
+            raise FileNotFoundError(f'预训练检查点未找到: {args.pretrain_checkpoint}')
 
     # 加载预训练检查点
-    logging.info(f'从 {args.pretrain_checkpoint} 加载预训练检查点')
     checkpoint = torch.load(args.pretrain_checkpoint, map_location=device)
-    rule_model.load_state_dict(checkpoint['model'])
-    rule_model.to(device)
+    RulE_model.load_state_dict(checkpoint['model'])
+    RulE_model.to(device)
 
-    logging.info('预训练模型加载成功')
-    logging.info(f'  - 实体嵌入形状: {rule_model.entity_embedding.weight.shape}')
-    logging.info(f'  - 关系嵌入形状: {rule_model.relation_embedding.weight.shape}')
-    logging.info(f'  - 规则嵌入形状: {rule_model.rule_emb.shape}')
-
-    # 冻结预训练参数
+    # 冻结预训练参数 (为RL准备)
     logging.info('冻结预训练参数...')
-    for param in rule_model.entity_embedding.parameters():
+    for param in RulE_model.entity_embedding.parameters():
         param.requires_grad = False
-    for param in rule_model.relation_embedding.parameters():
+    for param in RulE_model.relation_embedding.parameters():
         param.requires_grad = False
-    rule_model.rule_emb.requires_grad = False
+    RulE_model.rule_emb.requires_grad = False
 
     # 统计冻结参数和可训练参数
-    frozen_params = sum(p.numel() for p in rule_model.parameters() if not p.requires_grad)
-    trainable_params = sum(p.numel() for p in rule_model.parameters() if p.requires_grad)
+    frozen_params = sum(p.numel() for p in RulE_model.parameters() if not p.requires_grad)
+    trainable_params = sum(p.numel() for p in RulE_model.parameters() if p.requires_grad)
     logging.info(f'  - 冻结参数: {frozen_params:,}')
     logging.info(f'  - 可训练参数: {trainable_params:,}')
 
@@ -325,9 +317,9 @@ def main():
     logging.info('='*80)
 
     # 从预训练模型获取维度
-    entity_dim = rule_model.entity_embedding.weight.shape[1]  # 应为 hidden_dim * 2
-    rel_dim = rule_model.relation_embedding.weight.shape[1]   # 应为 hidden_dim
-    rule_dim = rule_model.rule_emb.shape[1]                   # 应为 mlp_rule_dim
+    entity_dim = RulE_model.entity_embedding.weight.shape[1]  # 应为 hidden_dim * 2
+    rel_dim = RulE_model.relation_embedding.weight.shape[1]   # 应为 hidden_dim
+    rule_dim = RulE_model.rule_emb.shape[1]                   # 应为 mlp_rule_dim
     num_entities = graph.entity_size
     num_relations = graph.relation_size
     num_rules = len(rules)
@@ -379,7 +371,7 @@ def main():
     # 4. RewardCalculator - 奖励计算器
     logging.info('  [4/6] 初始化 RewardCalculator')
     reward_calculator = RewardCalculator(
-        rule_model=rule_model,
+        rule_model=RulE_model,
         alpha=args.alpha
     )
     logging.info(f'    ✓ RewardCalculator 初始化完成 (alpha={args.alpha})')
@@ -388,7 +380,7 @@ def main():
     logging.info('  [5/6] 初始化 KGReasoningEnv')
     env = KGReasoningEnv(
         graph=graph,
-        rule_model=rule_model,
+        rule_model=RulE_model,
         state_encoder=state_encoder,
         reward_calculator=reward_calculator,
         max_steps=args.max_steps
@@ -398,7 +390,7 @@ def main():
     # 6. RulERLTrainer - RulE-RL训练器
     logging.info('  [6/6] 初始化 RulERLTrainer')
     trainer = RulERLTrainer(
-        rule_model=rule_model,
+        rule_model=RulE_model,
         rule_selector=rule_selector,
         path_finder=path_finder,
         env=env,
