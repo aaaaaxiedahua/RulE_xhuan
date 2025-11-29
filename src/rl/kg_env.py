@@ -227,7 +227,7 @@ class KGReasoningEnv:
 
         # 规则上下文：选中规则的嵌入
         if self.selected_rules is not None and len(self.selected_rules) > 0:
-            rule_context = self.rule_model.rule_emb[self.selected_rules]  # [top_k, rule_dim]
+            rule_context = self.rule_model.rule_emb.weight[self.selected_rules]  # [top_k, rule_dim]
         else:
             rule_context = None
 

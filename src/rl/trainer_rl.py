@@ -208,10 +208,12 @@ class RulERLTrainer:
         query_entity_emb = self.rule_model.entity_embedding.weight[head]
         query_rel_emb = self.rule_model.relation_embedding.weight[relation]
 
+        rule_embeddings = self.rule_model.rule_emb.weight
+
         selected_rules, selection_probs = self.rule_selector(
             query_entity_emb,
             query_rel_emb,
-            self.rule_model.rule_emb,
+            rule_embeddings,
             epsilon=epsilon,
             top_k=self.args.top_k_rules,
             deterministic=False
@@ -437,10 +439,12 @@ class RulERLTrainer:
         query_entity_emb = self.rule_model.entity_embedding.weight[head]
         query_rel_emb = self.rule_model.relation_embedding.weight[relation]
 
+        rule_embeddings = self.rule_model.rule_emb.weight
+
         selected_rules, _ = self.rule_selector(
             query_entity_emb,
             query_rel_emb,
-            self.rule_model.rule_emb,
+            rule_embeddings,
             epsilon=0.0,
             top_k=self.args.top_k_rules,
             deterministic=True
