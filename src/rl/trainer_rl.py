@@ -65,11 +65,11 @@ class RulERLTrainer:
             test_queries: 测试查询列表
         """
         logging.info('\n' + '='*80)
-        logging.info('开始 RulE-RL 训练')
+        logging.info('Starting RulE-RL training')
         logging.info('='*80)
-        logging.info(f'训练查询数: {len(train_queries)}')
-        logging.info(f'验证查询数: {len(valid_queries)}')
-        logging.info(f'测试查询数: {len(test_queries)}')
+        logging.info(f'Train queries: {len(train_queries)}')
+        logging.info(f'Validation queries: {len(valid_queries)}')
+        logging.info(f'Test queries: {len(test_queries)}')
 
         for epoch in range(self.args.num_epochs):
             logging.info(f'\n{"="*80}')
@@ -86,18 +86,18 @@ class RulERLTrainer:
             epoch_stats = self.train_epoch(train_queries, epsilon)
 
             # 打印 epoch 统计
-            logging.info(f'\nEpoch {epoch + 1} 训练统计:')
-            logging.info(f'  平均奖励: {epoch_stats["avg_reward"]:.4f}')
-            logging.info(f'  平均路径长度: {epoch_stats["avg_length"]:.2f}')
-            logging.info(f'  成功率: {epoch_stats["success_rate"]:.2%}')
-            logging.info(f'  策略损失: {epoch_stats["avg_policy_loss"]:.4f}')
-            logging.info(f'  价值损失: {epoch_stats["avg_value_loss"]:.4f}')
+            logging.info(f'\nEpoch {epoch + 1} training stats:')
+            logging.info(f'  Avg reward: {epoch_stats["avg_reward"]:.4f}')
+            logging.info(f'  Avg path length: {epoch_stats["avg_length"]:.2f}')
+            logging.info(f'  Success rate: {epoch_stats["success_rate"]:.2%}')
+            logging.info(f'  Policy loss: {epoch_stats["avg_policy_loss"]:.4f}')
+            logging.info(f'  Value loss: {epoch_stats["avg_value_loss"]:.4f}')
             logging.info(f'  Epsilon: {epsilon:.3f}')
 
             # 验证
             if (epoch + 1) % self.args.eval_interval == 0:
                 logging.info(f'\n{"="*80}')
-                logging.info('验证集评估')
+                logging.info('Validation evaluation')
                 logging.info(f'{"="*80}')
                 val_metrics = self.evaluate(valid_queries)
                 logging.info(f'  MRR: {val_metrics["mrr"]:.4f}')
@@ -110,16 +110,16 @@ class RulERLTrainer:
                 if val_metrics['mrr'] > self.best_mrr:
                     self.best_mrr = val_metrics['mrr']
                     self.save_checkpoint(f'{self.args.save_path}/best_checkpoint.pt', epoch, val_metrics)
-                    logging.info(f'  ✓ 保存最佳模型 (MRR: {self.best_mrr:.4f})')
+                    logging.info(f'  [OK] Saved best checkpoint (MRR: {self.best_mrr:.4f})')
 
             # 定期保存检查点
             if (epoch + 1) % self.args.save_interval == 0:
                 self.save_checkpoint(f'{self.args.save_path}/checkpoint_epoch_{epoch+1}.pt', epoch)
-                logging.info(f'  ✓ 保存检查点: epoch_{epoch+1}')
+                logging.info(f'  [OK] Saved checkpoint: epoch_{epoch+1}')
 
         # 最终测试
         logging.info(f'\n{"="*80}')
-        logging.info('测试集最终评估')
+        logging.info('Final test evaluation')
         logging.info(f'{"="*80}')
         test_metrics = self.evaluate(test_queries)
         logging.info(f'  MRR: {test_metrics["mrr"]:.4f}')
@@ -564,6 +564,6 @@ class RulERLTrainer:
         self.best_mrr = checkpoint['best_mrr']
         self.global_step = checkpoint['global_step']
 
-        logging.info(f'检查点加载成功: {path}')
+        logging.info(f'Checkpoint loaded: {path}')
         logging.info(f'  Epoch: {checkpoint["epoch"]}')
         logging.info(f'  Best MRR: {self.best_mrr:.4f}')

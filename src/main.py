@@ -223,23 +223,23 @@ def main():
     #
     # ground_trainer.train(args)
 
-    logging.info('开始冻结预训练模型参数，准备进入RulE-RL阶段')
+    logging.info('Freezing pretrained parameters before entering the RulE-RL stage')
     RulE_model.eval()
     for param in RulE_model.parameters():
         param.requires_grad = False
 
     frozen_params = sum(p.numel() for p in RulE_model.parameters())
-    logging.info('冻结参数总数: {:,}'.format(frozen_params))
+    logging.info('Total frozen parameters: {:,}'.format(frozen_params))
 
-    logging.info('初始化RulE-RL组件')
+    logging.info('Initializing RulE-RL components')
     entity_dim = RulE_model.entity_embedding.embedding_dim
     rel_dim = RulE_model.relation_embedding.embedding_dim
     rule_dim = RulE_model.rule_emb.embedding_dim
     num_relations = graph.relation_size
     num_rules = len(rules)
 
-    logging.info('实体维度: %d, 关系维度: %d, 规则维度: %d', entity_dim, rel_dim, rule_dim)
-    logging.info('规则数量: %d, 关系数量: %d', num_rules, num_relations)
+    logging.info('Entity dim: %d, relation dim: %d, rule dim: %d', entity_dim, rel_dim, rule_dim)
+    logging.info('Number of rules: %d, number of relations: %d', num_rules, num_relations)
 
     state_encoder = StateEncoder(
         entity_dim=entity_dim,
@@ -290,10 +290,10 @@ def main():
     valid_queries = [tuple(fact) for fact in graph.valid_facts]
     test_queries = [tuple(fact) for fact in graph.test_facts]
 
-    logging.info('RulE-RL训练开始，总训练查询数: %d', len(train_queries))
+    logging.info('Starting RulE-RL training, total train queries: %d', len(train_queries))
     rl_metrics = rl_trainer.train(train_queries, valid_queries, test_queries)
 
-    logging.info('RulE-RL训练完成，测试集指标:')
+    logging.info('RulE-RL training finished, test metrics:')
     logging.info('MRR: %.4f | MR: %.2f | Hits@1: %.4f | Hits@3: %.4f | Hits@10: %.4f',
                  rl_metrics["mrr"], rl_metrics["mr"],
                  rl_metrics["hits@1"], rl_metrics["hits@3"], rl_metrics["hits@10"])
