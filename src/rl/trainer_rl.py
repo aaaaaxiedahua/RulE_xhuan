@@ -157,7 +157,18 @@ class RulERLTrainer:
             query = train_queries[idx]
 
             # 训练一个 episode
-            reward, length, success, loss_dict = self.train_episode(query, epsilon)
+            try:
+                reward, length, success, loss_dict = self.train_episode(query, epsilon)
+            except Exception as exc:
+                logging.exception(
+                    'Exception during episode %d/%d (query_idx=%d, query=%s): %s',
+                    i + 1,
+                    len(train_queries),
+                    idx,
+                    query,
+                    exc
+                )
+                raise
 
             epoch_rewards.append(reward)
             epoch_lengths.append(length)

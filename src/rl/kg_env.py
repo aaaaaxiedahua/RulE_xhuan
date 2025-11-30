@@ -9,6 +9,7 @@ KGReasoningEnv - 知识图谱推理环境
 
 import torch
 import numpy as np
+import logging
 
 
 class KGReasoningEnv:
@@ -133,6 +134,9 @@ class KGReasoningEnv:
         # the base embedding but flip its sign to keep direction information.
         relation_flag = -1.0 if action >= self.graph.relation_size else 1.0
         action_rel_emb = self.rule_model.relation_embedding.weight[base_rel_idx] * relation_flag
+        if torch.isnan(action_rel_emb).any() or torch.isinf(action_rel_emb).any():
+            logging.error('Invalid relation embedding encountered (action=%d)', action)
+            raise ValueError('action relation embedding contains NaN/Inf')
         self.path_history.append(
             torch.cat([current_entity_emb, action_rel_emb], dim=-1)
         )
@@ -146,6 +150,9 @@ class KGReasoningEnv:
 
         # 6. 编码新状态
         next_state = self._encode_state()
+        if torch.isnan(next_state).any() or torch.isinf(next_state).any():
+            logging.error('Invalid encoded state encountered during step; trajectory=%s', self.trajectory)
+            raise ValueError('state encoder output contains NaN/Inf')
 
         # 7. 判断是否结束
         done = (self.step_count >= self.max_steps) or (next_entity == self.query_tail)

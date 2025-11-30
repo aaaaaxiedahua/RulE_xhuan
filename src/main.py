@@ -112,6 +112,7 @@ def parse_args(args=None):
     parser.add_argument('--log_interval', default=100, type=int, help='Steps between RL logging updates')
     parser.add_argument('--eval_interval', default=5, type=int, help='Epoch interval for RL validation')
     parser.add_argument('--save_interval', default=10, type=int, help='Epoch interval for saving RL checkpoints')
+    parser.add_argument('--debug_train_query_limit', default=10, type=int, help='Limit number of training queries for debugging (set -1 for no limit)')
     return parser.parse_args(args)
 
 def main():
@@ -135,6 +136,7 @@ def main():
 
     set_logger(args.save_path)
     set_seed(args.seed)
+    torch.autograd.set_detect_anomaly(True)
 
 
 
@@ -289,6 +291,11 @@ def main():
     train_queries = [tuple(fact) for fact in graph.train_facts]
     valid_queries = [tuple(fact) for fact in graph.valid_facts]
     test_queries = [tuple(fact) for fact in graph.test_facts]
+
+    if args.debug_train_query_limit is not None and args.debug_train_query_limit > -1:
+        original_len = len(train_queries)
+        train_queries = train_queries[:args.debug_train_query_limit]
+        logging.warning('Debug mode: limiting train queries from %d to %d', original_len, len(train_queries))
 
     logging.info('Starting RulE-RL training, total train queries: %d', len(train_queries))
     rl_metrics = rl_trainer.train(train_queries, valid_queries, test_queries)
