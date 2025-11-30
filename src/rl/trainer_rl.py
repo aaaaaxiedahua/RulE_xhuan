@@ -18,30 +18,19 @@ from tqdm import tqdm
 
 class RulERLTrainer:
     """
-    RulE-RL 训练器
+    RulE-RL 训练器（单层 Actor-Critic）
 
     Args:
-        rule_model: 预训练的 RulE 模型（冻结）
-        rule_selector: RuleSelectorAgent 实例
         path_finder: PathFinderAgent 实例
         env: KGReasoningEnv 实例
-        graph: KnowledgeGraph 对象
         args: 训练参数
     """
 
-    def __init__(self, rule_model, rule_selector, path_finder, env, graph, args):
-        self.rule_model = rule_model
-        self.rule_selector = rule_selector
+    def __init__(self, path_finder, env, args):
         self.path_finder = path_finder
         self.env = env
-        self.graph = graph
         self.args = args
 
-        # 优化器
-        self.rule_selector_optimizer = optim.Adam(
-            rule_selector.parameters(),
-            lr=args.lr_selector
-        )
         self.policy_optimizer = optim.Adam(
             path_finder.policy_net.parameters(),
             lr=args.lr_policy
@@ -51,7 +40,6 @@ class RulERLTrainer:
             lr=args.lr_value
         )
 
-        # 训练统计
         self.best_mrr = 0.0
         self.global_step = 0
 
@@ -76,14 +64,8 @@ class RulERLTrainer:
             logging.info(f'Epoch {epoch + 1}/{self.args.num_epochs}')
             logging.info(f'{"="*80}')
 
-            # 课程学习：逐步减小 epsilon
-            epsilon = max(
-                self.args.epsilon_end,
-                self.args.epsilon_start - epoch * (self.args.epsilon_start - self.args.epsilon_end) / self.args.num_epochs
-            )
-
             # 训练一个 epoch
-            epoch_stats = self.train_epoch(train_queries, epsilon)
+            epoch_stats = self.train_epoch(train_queries)
 
             # 打印 epoch 统计
             logging.info(f'\nEpoch {epoch + 1} training stats:')
@@ -92,7 +74,6 @@ class RulERLTrainer:
             logging.info(f'  Success rate: {epoch_stats["success_rate"]:.2%}')
             logging.info(f'  Policy loss: {epoch_stats["avg_policy_loss"]:.4f}')
             logging.info(f'  Value loss: {epoch_stats["avg_value_loss"]:.4f}')
-            logging.info(f'  Epsilon: {epsilon:.3f}')
 
             # 验证
             if (epoch + 1) % self.args.eval_interval == 0:
@@ -130,18 +111,16 @@ class RulERLTrainer:
 
         return test_metrics
 
-    def train_epoch(self, train_queries, epsilon):
+    def train_epoch(self, train_queries):
         """
         训练一个 epoch
 
         Args:
             train_queries: 训练查询列表
-            epsilon: 探索率
 
         Returns:
             epoch_stats: epoch 统计字典
         """
-        self.rule_selector.train()
         self.path_finder.train()
 
         epoch_rewards = []
@@ -158,7 +137,7 @@ class RulERLTrainer:
 
             # 训练一个 episode
             try:
-                reward, length, success, loss_dict = self.train_episode(query, epsilon)
+                reward, length, success, loss_dict = self.train_episode(query)
             except Exception as exc:
                 logging.exception(
                     'Exception during episode %d/%d (query_idx=%d, query=%s): %s',
@@ -198,13 +177,12 @@ class RulERLTrainer:
 
         return epoch_stats
 
-    def train_episode(self, query, epsilon):
+    def train_episode(self, query):
         """
         训练一个 episode
 
         Args:
             query: (head, relation, tail)
-            epsilon: 探索率
 
         Returns:
             total_reward: 总奖励
@@ -213,36 +191,9 @@ class RulERLTrainer:
             loss_dict: 损失字典
         """
         head, relation, tail = query
-        device = self.rule_model.entity_embedding.weight.device
-        debug_logging = self.global_step < 5
+        device = self.path_finder.policy_net[0].weight.device
 
-        if debug_logging:
-            logging.info(
-                '[Debug][Episode %d] Query=(%d, %d, %d), epsilon=%.3f',
-                self.global_step + 1,
-                head,
-                relation,
-                tail,
-                epsilon
-            )
-
-        # ===== Step 1: 高层 Agent 选择规则 =====
-        query_entity_emb = self.rule_model.entity_embedding.weight[head]
-        query_rel_emb = self.rule_model.relation_embedding.weight[relation]
-
-        rule_embeddings = self.rule_model.rule_emb.weight
-
-        selected_rules, selection_probs = self.rule_selector(
-            query_entity_emb,
-            query_rel_emb,
-            rule_embeddings,
-            epsilon=epsilon,
-            top_k=self.args.top_k_rules,
-            deterministic=False
-        )
-
-        # ===== Step 2: 低层 Agent 搜索路径 =====
-        state = self.env.reset(query, selected_rules)
+        state = self.env.reset(query)
 
         states = []
         actions = []
@@ -266,6 +217,11 @@ class RulERLTrainer:
 
             # 执行动作
             next_state, reward, done, info = self.env.step(action)
+            if reward > 0 and not done:
+                done = True
+                info = info or {}
+                info['reason'] = info.get('reason', 'positive_reward')
+                info['success'] = info.get('success', False)
 
             # 记录轨迹
             states.append(state)
@@ -274,17 +230,6 @@ class RulERLTrainer:
             values.append(value)
             rewards.append(reward)
             episode_info = info
-
-            if debug_logging:
-                logging.info(
-                    '[Debug][Episode %d][Step %d] action=%d reward=%.4f done=%s reason=%s',
-                    self.global_step + 1,
-                    len(actions),
-                    int(action),
-                    float(reward),
-                    done,
-                    info.get('reason', 'n/a')
-                )
 
             state = next_state
 
@@ -298,15 +243,6 @@ class RulERLTrainer:
         # ===== Step 5: 更新价值网络（PathFinder） =====
         value_loss = self._update_value(states, returns)
 
-        # ===== Step 6: 更新规则选择器 =====
-        # 使用最终奖励更新规则选择器
-        final_reward = rewards[-1] if len(rewards) > 0 else 0.0
-        selector_loss = self._update_rule_selector(selection_probs, selected_rules, final_reward)
-
-        # 更新 UCB 统计
-        for rule_id in selected_rules:
-            self.rule_selector.update_statistics(rule_id.item(), final_reward)
-
         # 统计
         total_reward = sum(rewards)
         path_length = len(actions)
@@ -314,19 +250,8 @@ class RulERLTrainer:
 
         loss_dict = {
             'policy_loss': policy_loss,
-            'value_loss': value_loss,
-            'selector_loss': selector_loss
+            'value_loss': value_loss
         }
-
-        if debug_logging:
-            logging.info(
-                '[Debug][Episode %d] Done reason=%s, total_reward=%.4f, path_length=%d, success=%s',
-                self.global_step + 1,
-                episode_info.get('reason') if episode_info else 'unknown',
-                float(total_reward),
-                path_length,
-                success
-            )
 
         return total_reward, path_length, success, loss_dict
 
@@ -408,29 +333,6 @@ class RulERLTrainer:
 
         return value_loss.item()
 
-    def _update_rule_selector(self, selection_probs, selected_rules, reward):
-        """
-        更新规则选择器
-
-        Args:
-            selection_probs: 选择概率 [top_k]
-            selected_rules: 选中的规则 [top_k]
-            reward: 最终奖励
-
-        Returns:
-            loss: 选择器损失
-        """
-        # 策略梯度：最大化 log P(rules) * reward
-        log_probs = torch.log(selection_probs + 1e-10)
-        selector_loss = -(log_probs.mean() * reward)
-
-        self.rule_selector_optimizer.zero_grad()
-        selector_loss.backward()
-        nn.utils.clip_grad_norm_(self.rule_selector.parameters(), self.args.grad_clip)
-        self.rule_selector_optimizer.step()
-
-        return selector_loss.item()
-
     def evaluate(self, test_queries):
         """
         评估模型
@@ -441,7 +343,6 @@ class RulERLTrainer:
         Returns:
             metrics: 评估指标字典
         """
-        self.rule_selector.eval()
         self.path_finder.eval()
 
         ranks = []
@@ -464,7 +365,6 @@ class RulERLTrainer:
             'hits@10': (ranks <= 10).float().mean().item()
         }
 
-        self.rule_selector.train()
         self.path_finder.train()
 
         return metrics
@@ -481,26 +381,8 @@ class RulERLTrainer:
         Returns:
             rank: 真实答案的排名
         """
-        # 选择规则（确定性）
-        query_entity_emb = self.rule_model.entity_embedding.weight[head]
-        query_rel_emb = self.rule_model.relation_embedding.weight[relation]
-
-        rule_embeddings = self.rule_model.rule_emb.weight
-
-        selected_rules, _ = self.rule_selector(
-            query_entity_emb,
-            query_rel_emb,
-            rule_embeddings,
-            epsilon=0.0,
-            top_k=self.args.top_k_rules,
-            deterministic=True
-        )
-
-        # 对所有候选实体评分（简化版本：只运行一次到真实答案）
-        # 完整版本应该对所有实体评分，但计算量太大
-        # 这里使用简化策略：基于路径奖励排名
         query = (head, relation, tail)
-        state = self.env.reset(query, selected_rules)
+        state = self.env.reset(query)
         done = False
         path_reward = 0.0
 
@@ -536,14 +418,9 @@ class RulERLTrainer:
         """
         checkpoint = {
             'epoch': epoch,
-            'rule_selector': self.rule_selector.state_dict(),
             'path_finder': self.path_finder.state_dict(),
-            'rule_selector_optimizer': self.rule_selector_optimizer.state_dict(),
             'policy_optimizer': self.policy_optimizer.state_dict(),
             'value_optimizer': self.value_optimizer.state_dict(),
-            'rule_counts': dict(self.rule_selector.rule_counts),
-            'rule_rewards': dict(self.rule_selector.rule_rewards),
-            'total_selections': self.rule_selector.total_selections,
             'best_mrr': self.best_mrr,
             'global_step': self.global_step,
             'args': self.args
@@ -563,15 +440,10 @@ class RulERLTrainer:
         """
         checkpoint = torch.load(path)
 
-        self.rule_selector.load_state_dict(checkpoint['rule_selector'])
         self.path_finder.load_state_dict(checkpoint['path_finder'])
-        self.rule_selector_optimizer.load_state_dict(checkpoint['rule_selector_optimizer'])
         self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer'])
         self.value_optimizer.load_state_dict(checkpoint['value_optimizer'])
 
-        self.rule_selector.rule_counts = checkpoint['rule_counts']
-        self.rule_selector.rule_rewards = checkpoint['rule_rewards']
-        self.rule_selector.total_selections = checkpoint['total_selections']
         self.best_mrr = checkpoint['best_mrr']
         self.global_step = checkpoint['global_step']
 

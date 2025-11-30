@@ -7,7 +7,6 @@ from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
 from trainer import GroundTrainer, PreTrainer
 from rl.state_encoder import StateEncoder
-from rl.rule_selector import RuleSelectorAgent
 from rl.path_finder import PathFinderAgent
 from rl.kg_env import KGReasoningEnv
 from rl.reward_calculator import RewardCalculator
@@ -97,22 +96,17 @@ def parse_args(args=None):
     parser.add_argument('--history_dim', default=128, type=int, help='History GRU hidden size for RL state encoder')
     parser.add_argument('--policy_hidden_dim', default=256, type=int, help='Hidden size of RL policy network')
     parser.add_argument('--value_hidden_dim', default=256, type=int, help='Hidden size of RL value network')
-    parser.add_argument('--top_k_rules', default=5, type=int, help='Number of rules selected by high-level agent')
     parser.add_argument('--rl_max_steps', default=5, type=int, help='Maximum steps per RL episode')
     parser.add_argument('--gamma', default=0.99, type=float, help='Discount factor for RL')
-    parser.add_argument('--epsilon_start', default=0.5, type=float, help='Initial epsilon for rule selector exploration')
-    parser.add_argument('--epsilon_end', default=0.05, type=float, help='Final epsilon for rule selector exploration')
-    parser.add_argument('--ucb_c', default=1.0, type=float, help='UCB exploration coefficient for rule selector')
     parser.add_argument('--rl_reward_alpha', default=0.1, type=float, help='Reward shaping weight for RL')
     parser.add_argument('--lr_policy', default=0.001, type=float, help='Learning rate for RL policy network')
     parser.add_argument('--lr_value', default=0.001, type=float, help='Learning rate for RL value network')
-    parser.add_argument('--lr_selector', default=0.0001, type=float, help='Learning rate for rule selector')
     parser.add_argument('--grad_clip', default=1.0, type=float, help='Gradient clipping threshold for RL components')
     parser.add_argument('--num_epochs', default=100, type=int, help='Number of RL training epochs')
     parser.add_argument('--log_interval', default=100, type=int, help='Steps between RL logging updates')
     parser.add_argument('--eval_interval', default=5, type=int, help='Epoch interval for RL validation')
     parser.add_argument('--save_interval', default=10, type=int, help='Epoch interval for saving RL checkpoints')
-    parser.add_argument('--debug_train_query_limit', default=10, type=int, help='Limit number of training queries for debugging (set -1 for no limit)')
+    parser.add_argument('--top_epsilon', default=32, type=int, help='Prune action space to top-epsilon relations per step (-1 to disable)')
     return parser.parse_args(args)
 
 def main():
@@ -122,8 +116,10 @@ def main():
     if args.init_checkpoint_config:
         args = load_config(args.init_checkpoint_config)
         args = args[0]
-        if not hasattr(args, 'debug_train_query_limit'):
-            args.debug_train_query_limit = -1
+        if not hasattr(args, 'rl_max_steps'):
+            args.rl_max_steps = 5
+        if not hasattr(args, 'top_epsilon'):
+            args.top_epsilon = 32
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -138,7 +134,6 @@ def main():
 
     set_logger(args.save_path)
     set_seed(args.seed)
-    torch.autograd.set_detect_anomaly(True)
 
 
 
@@ -189,8 +184,6 @@ def main():
     
     
     logging.info('Finishing pre-training!')
-
-    print("loading RulE trainer......")
 
     # load rule embedding and KGE embedding
 
@@ -253,15 +246,6 @@ def main():
         state_dim=args.state_dim
     ).to(device)
 
-    rule_selector = RuleSelectorAgent(
-        entity_dim=entity_dim,
-        rel_dim=rel_dim,
-        rule_dim=rule_dim,
-        num_rules=num_rules,
-        hidden_dim=args.state_dim,
-        ucb_c=args.ucb_c
-    ).to(device)
-
     path_finder = PathFinderAgent(
         state_dim=args.state_dim,
         action_dim=num_relations * 2,
@@ -278,26 +262,19 @@ def main():
         rule_model=RulE_model,
         state_encoder=state_encoder,
         reward_calculator=reward_calculator,
-        max_steps=args.rl_max_steps
+        max_steps=args.rl_max_steps,
+        top_epsilon=args.top_epsilon
     )
 
     rl_trainer = RulERLTrainer(
-        rule_model=RulE_model,
-        rule_selector=rule_selector,
         path_finder=path_finder,
         env=env,
-        graph=graph,
         args=args
     )
 
     train_queries = [tuple(fact) for fact in graph.train_facts]
     valid_queries = [tuple(fact) for fact in graph.valid_facts]
     test_queries = [tuple(fact) for fact in graph.test_facts]
-
-    if args.debug_train_query_limit is not None and args.debug_train_query_limit > -1:
-        original_len = len(train_queries)
-        train_queries = train_queries[:args.debug_train_query_limit]
-        logging.warning('Debug mode: limiting train queries from %d to %d', original_len, len(train_queries))
 
     logging.info('Starting RulE-RL training, total train queries: %d', len(train_queries))
     rl_metrics = rl_trainer.train(train_queries, valid_queries, test_queries)

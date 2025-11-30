@@ -31,19 +31,15 @@
     "history_dim": 128,
     "policy_hidden_dim": 256,
     "value_hidden_dim": 256,
-    "top_k_rules": 5,
     "rl_max_steps": 5,
     "gamma": 0.99,
-    "epsilon_start": 0.5,
-    "epsilon_end": 0.05,
-    "ucb_c": 1.0,
     "rl_reward_alpha": 0.1,
     "lr_policy": 0.001,
     "lr_value": 0.001,
-    "lr_selector": 0.0001,
     "grad_clip": 1.0,
     "num_epochs": 100,
     "log_interval": 100,
     "eval_interval": 5,
-    "save_interval": 10
+    "save_interval": 10,
+    "top_epsilon": 32
 }
