@@ -76,11 +76,18 @@ class PathFinderAgent(nn.Module):
 
         # 2. 应用动作掩码（只允许有效动作）
         if action_mask is not None:
+            if not action_mask.any():
+                action_mask = torch.ones_like(action_mask, dtype=torch.bool)
             # 将无效动作的 logit 设为极小值
             logits = logits.masked_fill(~action_mask, -1e9)
 
         # 3. Softmax 得到概率分布
         action_probs = F.softmax(logits, dim=-1)
+        if torch.isnan(action_probs).any():
+            action_probs = torch.nan_to_num(action_probs, nan=0.0, posinf=0.0, neginf=0.0)
+            uniform = 1.0 / action_probs.size(-1)
+            action_probs = action_probs + uniform
+            action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)
 
         # 4. 选择动作
         if deterministic:

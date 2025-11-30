@@ -246,7 +246,7 @@ class KGReasoningEnv:
 
         # 如果仍没有动作（孤立节点），允许所有关系，防止策略网崩溃
         if mask.sum().item() == 0:
-            mask[:] = True
+            mask.fill_(True)
 
         return mask
 
@@ -276,6 +276,7 @@ class KGReasoningEnv:
         rel_embs = rel_embs * direction.unsqueeze(-1)
         query_emb = self.rule_model.relation_embedding.weight[self.query_rel % self.graph.relation_size]
         scores = rel_embs @ query_emb
+        scores = torch.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
         top_k = min(self.top_epsilon, len(rel_list))
         top_indices = torch.topk(scores, k=top_k).indices.tolist()
         return {rel_list[idx] for idx in top_indices}
