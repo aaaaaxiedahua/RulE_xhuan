@@ -292,7 +292,8 @@ class KGReasoningEnv:
         current_entity_emb = self.rule_model.entity_embedding.weight[self.current_entity]
 
         # 查询关系嵌入
-        query_rel_emb = self.rule_model.relation_embedding.weight[self.query_rel]
+        base_query_rel = self.query_rel % self.graph.relation_size
+        query_rel_emb = self.rule_model.relation_embedding.weight[base_query_rel]
 
         # 规则上下文：选中规则的嵌入
         rule_context = None
