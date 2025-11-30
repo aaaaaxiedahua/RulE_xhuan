@@ -122,6 +122,8 @@ def main():
     if args.init_checkpoint_config:
         args = load_config(args.init_checkpoint_config)
         args = args[0]
+        if not hasattr(args, 'debug_train_query_limit'):
+            args.debug_train_query_limit = -1
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
