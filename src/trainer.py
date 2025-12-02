@@ -12,13 +12,14 @@ import matplotlib.pyplot as plt
 
 class PreTrainer(object):
 
-    def __init__(self, graph, model, valid_set, test_set, ruleset, expectation, device, num_worker=0):
-        
-        
+    def __init__(self, graph, model, valid_set, test_set, ruleset, expectation, device, num_worker=0,
+                 beta_kl=0.001, beta_sigma=0.01):
+
+
         self.num_worker = num_worker
         self.device = device
-      
-       
+
+
         if self.device.type == "cuda":
             model = model.cuda(self.device)
 
@@ -26,12 +27,42 @@ class PreTrainer(object):
         self.model = model
         self.valid_set = valid_set
         self.test_set = test_set
-        
+
         self.RuleSet = ruleset
         self.expectation = expectation
-        
 
-    
+        # 不确定性损失权重
+        self.beta_kl = beta_kl
+        self.beta_sigma = beta_sigma
+
+    def compute_uncertainty_loss(self):
+        """
+        计算不确定性正则化损失
+
+        Returns:
+            L_uncertainty = beta_kl * L_kl + beta_sigma * L_sigma
+        """
+        if not hasattr(self.model, 'last_mu'):
+            return torch.tensor(0.0, device=self.device)
+
+        mu = self.model.last_mu
+        logvar = self.model.last_logvar
+        std = self.model.last_std
+        rule_index = self.model.last_rule_index
+
+        # L_kl: KL散度损失（防止方差坍缩）
+        L_kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+        # L_sigma: 方差匹配损失
+        target_sigma = self.model.target_sigma[rule_index].unsqueeze(-1).to(self.device)
+        L_sigma = torch.sum((std - target_sigma).pow(2))
+
+        # 总不确定性损失
+        L_uncertainty = self.beta_kl * L_kl + self.beta_sigma * L_sigma
+
+        return L_uncertainty
+
+
     def train(self, args):
         
         # Set training configuration
@@ -188,7 +219,10 @@ class PreTrainer(object):
         loss_fact = (positive_fact_loss + negative_fact_loss)/2
         loss_rule = (positive_rule_loss + negative_rule_loss)/2
 
-        loss = loss_rule + loss_fact
+        # 计算不确定性损失
+        L_uncertainty = self.compute_uncertainty_loss()
+
+        loss = loss_rule + loss_fact + L_uncertainty
         # loss = loss_fact
         # loss = loss_rule
 
@@ -212,11 +246,12 @@ class PreTrainer(object):
         optimizer.step()
 
         log = {
-            
+
             'positive_fact_loss': positive_fact_loss.item(),
             'negative_fact_loss': negative_fact_loss.item(),
             'positive_rule_loss': positive_rule_loss.item(),
             'negative_rule_loss': negative_rule_loss.item(),
+            'L_uncertainty': L_uncertainty.item(),
             'regularization': regularization.item(),
             'loss': loss.item()
         }

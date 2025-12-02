@@ -84,6 +84,13 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+
+    # 不确定性建模超参数
+    parser.add_argument('--num_samples', default=5, type=int, help='重参数化采样次数')
+    parser.add_argument('--beta_kl', default=0.001, type=float, help='KL散度损失权重')
+    parser.add_argument('--beta_sigma', default=0.01, type=float, help='方差匹配损失权重')
+    parser.add_argument('--lambda_0', default=1.0, type=float, help='方差目标计算基础参数')
+
     return parser.parse_args(args)
 
 def main():
@@ -126,7 +133,8 @@ def main():
     else:
         device = torch.device('cpu')
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
+    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path,
+                      num_samples=args.num_samples, lambda_0=args.lambda_0)
     RulE_model.set_rules(rules)
 
     
@@ -140,9 +148,10 @@ def main():
         # tripletset=kge_train_set,
         ruleset=ruleset,
         expectation=True,
-        device = device,
-        num_worker=args.cpu_num
-        
+        device=device,
+        num_worker=args.cpu_num,
+        beta_kl=args.beta_kl,
+        beta_sigma=args.beta_sigma
     )
     
     # checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))

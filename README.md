@@ -43,3 +43,19 @@ Please consider citing the following paper if you find our codes helpful. Thank 
 ```
 
 ``` -->
+
+  # 步骤1：为每个数据集生成 support_counts.pt
+  python uncertainty.py --data_path ../data/umls --rule_file
+  ../data/umls/mined_rules.txt
+  # 生成: ../data/umls/support_counts.pt
+
+  python uncertainty.py --data_path ../data/FB15k-237
+  --rule_file ../data/FB15k-237/mined_rules.txt
+  # 生成: ../data/FB15k-237/support_counts.pt
+
+  python uncertainty.py --data_path ../data/wn18rr --rule_file
+   ../data/wn18rr/mined_rules.txt
+  # 生成: ../data/wn18rr/support_counts.pt
+
+  # 步骤2：训练模型（会自动加载 support_counts.pt）
+  python main.py --init ../config/umls_config.json

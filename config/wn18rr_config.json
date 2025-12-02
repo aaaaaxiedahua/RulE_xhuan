@@ -34,5 +34,9 @@
     "g_lr": 0.005,
     "weight_decay": 0,
     "num_iters": 20,
-    "topk": 40943
+    "topk": 40943,
+    "num_samples": 5,
+    "beta_kl": 0.001,
+    "beta_sigma": 0.01,
+    "lambda_0": 1.0
 }
