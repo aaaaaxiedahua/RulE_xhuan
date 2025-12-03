@@ -21,7 +21,7 @@ def compute_support_counts(data_path, rule_file):
     graph = KnowledgeGraph(data_path)
 
     logging.info(f'Loading rules from {rule_file}')
-    ruleset = RuleDataset(graph.relation_size, rule_file, neg_size=0)
+    ruleset = RuleDataset(graph.relation_size, rule_file, negative_sample_size=0)
 
     support_counts = []
 
