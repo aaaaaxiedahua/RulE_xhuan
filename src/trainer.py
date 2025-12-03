@@ -37,30 +37,49 @@ class PreTrainer(object):
 
     def compute_uncertainty_loss(self):
         """
-        计算不确定性正则化损失
+        按文档公式计算不确定性正则化损失（在所有规则上）
 
         Returns:
-            L_uncertainty = beta_kl * L_kl + beta_sigma * L_sigma
+            L_uncertainty, stats_dict
         """
-        if not hasattr(self.model, 'last_mu'):
-            return torch.tensor(0.0, device=self.device)
+        model = self.model
+        device = self.device
 
-        mu = self.model.last_mu
-        logvar = self.model.last_logvar
-        std = self.model.last_std
-        rule_index = self.model.last_rule_index
+        # 1. 构造规则特征 features_i = [R_i, r_body_sum_i]
+        features = model.get_uncertainty_features(device)          # [num_rules, rule_dim + hidden_dim]
 
-        # L_kl: KL散度损失（防止方差坍缩）
-        L_kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        # 2. 计算 μ / logσ²
+        mu = model.mu_network(features)                            # [num_rules, 1]
+        logvar = model.logvar_network(features)                    # [num_rules, 1]
 
-        # L_sigma: 方差匹配损失
-        target_sigma = self.model.target_sigma[rule_index].unsqueeze(-1).to(self.device)
-        L_sigma = torch.sum((std - target_sigma).pow(2))
+        # 3. KL 散度损失（文档 7.3 节公式）
+        # KL(N(μ,σ²) || N(0,1)) = 0.5 * Σ(μ² + σ² - logσ² - 1)
+        kl_loss = 0.5 * torch.sum(
+            mu.pow(2) + logvar.exp() - logvar - 1
+        )
 
-        # 总不确定性损失
-        L_uncertainty = self.beta_kl * L_kl + self.beta_sigma * L_sigma
+        # 4. 方差匹配损失：σ_i 与由 support_counts 推导的目标方差对齐
+        support_counts = model.support_counts.to(device).float()   # [num_rules]
+        target_std = model.lambda_0 / (1 + torch.log(support_counts + 1))
+        target_logvar = 2 * torch.log(target_std)                  # log(σ²_target)
 
-        return L_uncertainty
+        sigma_loss = torch.sum(
+            (logvar.squeeze(-1) - target_logvar).pow(2)
+        )
+
+        # 5. 总不确定性损失
+        L_uncertainty = self.beta_kl * kl_loss + self.beta_sigma * sigma_loss
+
+        # 便于调试的统计信息
+        std = torch.exp(0.5 * logvar)
+        stats = {
+            'kl_loss': kl_loss.item(),
+            'sigma_loss': sigma_loss.item(),
+            'mu_mean': mu.mean().item(),
+            'sigma_mean': std.mean().item()
+        }
+
+        return L_uncertainty, stats
 
 
     def train(self, args):
@@ -169,7 +188,7 @@ class PreTrainer(object):
 
         optimizer.zero_grad()
 
-        positive_sample, negative_sample, subsampling_weight, mode= next(triplets_iterator)
+        positive_sample, negative_sample, subsampling_weight, mode = next(triplets_iterator)
         positive_rule, negative_idx, negative_rule, mode_rule, rule_mask = next(rules_iterator)
 
         if self.device.type == "cuda":
@@ -181,25 +200,39 @@ class PreTrainer(object):
             rule_mask = rule_mask.cuda(self.device)
             subsampling_weight = subsampling_weight.cuda(self.device)
 
+        # 计算当前 batch 对应规则的权重 w_i（重参数化采样），用于规则打分
+        # 按文档: w_i ~ N(μ_i, σ_i^2)，μ_i = mu_network([R_i, r_body_sum])
+        features_all = model.get_uncertainty_features(self.device)           # [num_rules, rule_dim + hidden_dim]
+        mu_all = model.mu_network(features_all)                              # [num_rules, 1]
+        logvar_all = model.logvar_network(features_all)                      # [num_rules, 1]
+        w_all, _ = model.reparameterize_sample(mu_all, logvar_all)           # [num_rules, 1]
+
+        rule_ids = positive_rule[:, 0].to(self.device)                       # [batch_size]
+        w_batch = w_all[rule_ids].squeeze(-1)                                # [batch_size]
+        w_batch_sig = torch.sigmoid(w_batch)                                 # σ(w_i) ∈ (0,1)
+
+        # 三元组负样本打分（保持不变）
         negative_fact_score, _ = model.compute_KGE((positive_sample, negative_sample), mode) 
-        negative_rule_score = model.compute_ruleE((positive_rule,  rule_mask, negative_idx, negative_rule), mode=mode_rule) 
-        # print(args.adversarial_temperature)
-        negative_fact_score = (F.softmax(negative_fact_score * args.adversarial_temperature, dim = 1).detach() 
-                            * F.logsigmoid(-negative_fact_score)).sum(dim = 1)
-        
-        negative_rule_score = (F.softmax(negative_rule_score * args.adversarial_temperature, dim = 1).detach() 
-                            * F.logsigmoid(-negative_rule_score)).sum(dim = 1)
-        
-        
-        # negative_rule_score = F.logsigmoid(-negative_rule_score).mean(dim = 1)
+        negative_fact_score = (F.softmax(negative_fact_score * args.adversarial_temperature, dim=1).detach() 
+                            * F.logsigmoid(-negative_fact_score)).sum(dim=1)
 
+        # 规则负样本打分：score_rule_neg = σ(w_i) × (γ_rule - d_rule_neg)
+        negative_rule_raw = model.compute_ruleE(
+            (positive_rule, rule_mask, negative_idx, negative_rule),
+            mode=mode_rule
+        )  # [batch_size, neg_size]
+        negative_rule_raw = w_batch_sig.unsqueeze(1) * negative_rule_raw
+        negative_rule_score = (F.softmax(negative_rule_raw * args.adversarial_temperature, dim=1).detach() 
+                            * F.logsigmoid(-negative_rule_raw)).sum(dim=1)
 
+        # 三元组正样本打分（保持不变）
         positive_fact_score, ent = model.compute_KGE(positive_sample)
-        positive_rule_score = model.compute_ruleE((positive_rule,rule_mask))
+        positive_fact_score = F.logsigmoid(positive_fact_score).squeeze(dim=1)
 
-
-        positive_fact_score = F.logsigmoid(positive_fact_score).squeeze(dim = 1)
-        positive_rule_score = F.logsigmoid(positive_rule_score)
+        # 规则正样本打分：score_rule_pos = σ(w_i) × (γ_rule - d_rule_pos)
+        positive_rule_raw = model.compute_ruleE((positive_rule, rule_mask))  # [batch_size]
+        positive_rule_raw = w_batch_sig * positive_rule_raw
+        positive_rule_score = F.logsigmoid(positive_rule_raw)
 
         negative_rule_score_weight = negative_rule_score 
         positive_rule_score_weight = positive_rule_score 
@@ -220,9 +253,9 @@ class PreTrainer(object):
         loss_rule = (positive_rule_loss + negative_rule_loss)/2
 
         # 计算不确定性损失
-        L_uncertainty = self.compute_uncertainty_loss()
+        L_uncertainty, unc_stats = self.compute_uncertainty_loss()
 
-        loss = loss_rule + loss_fact + L_uncertainty
+        loss = loss_rule + loss_fact + args.lambda_uncertainty * L_uncertainty
         # loss = loss_fact
         # loss = loss_rule
 
@@ -252,6 +285,10 @@ class PreTrainer(object):
             'positive_rule_loss': positive_rule_loss.item(),
             'negative_rule_loss': negative_rule_loss.item(),
             'L_uncertainty': L_uncertainty.item(),
+            'L_kl': unc_stats['kl_loss'],
+            'L_sigma': unc_stats['sigma_loss'],
+            'mu_mean': unc_stats['mu_mean'],
+            'sigma_mean': unc_stats['sigma_mean'],
             'regularization': regularization.item(),
             'loss': loss.item()
         }
@@ -422,10 +459,15 @@ class GroundTrainer(object):
     def train(self, args):
         
         # fix the parameters of pre-training
-
         self.model.entity_embedding.weight.requires_grad = False
         self.model.relation_embedding.weight.requires_grad = False
         self.model.rule_emb.weight.requires_grad = False
+
+        # 不确定性网络在 grounding 阶段不再更新，只使用预训练得到的分布
+        for p in self.model.mu_network.parameters():
+            p.requires_grad = False
+        for p in self.model.logvar_network.parameters():
+            p.requires_grad = False
 
 
         optimizer = torch.optim.Adam(
@@ -439,6 +481,18 @@ class GroundTrainer(object):
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
         
         self.model.eval_compute_rule_weight(self.device)
+
+        # 预计算 grounding 阶段使用的规则置信度 μ
+        self.model.eval()
+        with torch.no_grad():
+            features = self.model.get_uncertainty_features(self.device)
+            self.model.rule_mu = self.model.mu_network(features)   # [num_rules, 1]
+            logging.info(
+                'Pre-computed rule_mu for grounding: '
+                f'mean={self.model.rule_mu.mean().item():.6f}, '
+                f'std={self.model.rule_mu.std().item():.6f}'
+            )
+        self.model.train()
 
 
         

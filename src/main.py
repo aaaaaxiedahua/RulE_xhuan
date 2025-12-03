@@ -90,6 +90,7 @@ def parse_args(args=None):
     parser.add_argument('--beta_kl', default=0.001, type=float, help='KL散度损失权重')
     parser.add_argument('--beta_sigma', default=0.01, type=float, help='方差匹配损失权重')
     parser.add_argument('--lambda_0', default=1.0, type=float, help='方差目标计算基础参数')
+    parser.add_argument('--lambda_uncertainty', default=0.01, type=float, help='不确定性损失总体权重')
 
     return parser.parse_args(args)
 

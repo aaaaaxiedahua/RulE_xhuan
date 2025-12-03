@@ -159,35 +159,44 @@ class RulE(torch.nn.Module):
         #     b=self.embedding_range_rule.item()
         # )
 
-        # 不确定性建模网络
-        self.mu_network = MLP(self.mlp_rule_dim, [256, 128, self.mlp_rule_dim])
-        self.logvar_network = MLP(self.mlp_rule_dim, [256, 128, self.mlp_rule_dim])
+        # 不确定性建模网络（输入为 [R_i, r_body_sum]，输出标量 μ_i / logσ_i²）
+        input_dim = self.rule_dim + self.hidden_dim
+        self.mu_network = MLP(input_dim, [256, 128, 1])
+        self.logvar_network = MLP(input_dim, [256, 128, 1])
 
         # 加载预计算的support_counts
         import os
         support_count_path = os.path.join(self.graph.data_path, 'support_counts.pt')
         if os.path.exists(support_count_path):
             self.support_counts = torch.load(support_count_path)
+            if self.support_counts.shape[0] != self.num_rules:
+                logging.warning(
+                    f'support_counts length ({self.support_counts.shape[0]}) '
+                    f'does not match num_rules ({self.num_rules}); using min(len, num_rules).'
+                )
+                min_len = min(self.support_counts.shape[0], self.num_rules)
+                self.support_counts = self.support_counts[:min_len]
             logging.info(f'Loaded support_counts from {support_count_path}')
         else:
             logging.warning('support_counts.pt not found, using uniform counts')
             self.support_counts = torch.ones(self.num_rules)
 
-        # 计算目标方差
-        self.target_sigma = self.lambda_0 / (1 + torch.log(self.support_counts + 1))
-        logging.info(f'Uncertainty modeling initialized: num_samples={self.num_samples}, lambda_0={self.lambda_0}')
+        logging.info(
+            f'Uncertainty modeling initialized: num_rules={self.num_rules}, '
+            f'num_samples={self.num_samples}, lambda_0={self.lambda_0}'
+        )
 
     def reparameterize_sample(self, mu, logvar):
         """
         重参数化技巧: w = μ + σ * ε, 其中 ε ~ N(0,1)
 
         Args:
-            mu: [num_rules, mlp_rule_dim]
-            logvar: [num_rules, mlp_rule_dim]
+            mu: [num_rules, 1]
+            logvar: [num_rules, 1]
 
         Returns:
-            w_avg: 平均后的采样权重 [num_rules, mlp_rule_dim]
-            std: 标准差 [num_rules, mlp_rule_dim]
+            w_avg: 平均后的采样权重 [num_rules, 1]
+            std: 标准差 [num_rules, 1]
         """
         std = torch.exp(0.5 * logvar)
         samples = []
@@ -197,6 +206,40 @@ class RulE(torch.nn.Module):
             samples.append(w)
         w_avg = torch.stack(samples, dim=0).mean(dim=0)
         return w_avg, std
+
+    def get_uncertainty_features(self, device=None):
+        """
+        构造不确定性建模使用的规则特征:
+            features_i = concat([R_i, r_body_sum_i])
+        其中:
+            R_i 为规则嵌入 rule_emb[i]
+            r_body_sum_i 为规则体关系嵌入之和
+        """
+        if device is None:
+            device = self.entity_embedding.weight.device
+
+        # 规则嵌入 R_i
+        rule_ids = torch.arange(self.num_rules, device=device)
+        R_i = self.rule_emb(rule_ids)  # [num_rules, rule_dim]
+
+        # 规则体关系 id 与 mask
+        rule_features = self.rule_features.to(device)  # [num_rules, 2 + max_len]
+        rule_masks = self.rule_masks.to(device)        # [num_rules, max_len]
+
+        body = rule_features[:, 2:]                    # [num_rules, max_len]
+        mask = rule_masks                              # bool
+
+        relations_flag = torch.pow(-1, body // self.num_relations).unsqueeze(-1)
+        inputs_com = body % self.num_relations
+        inputs_com = torch.where(body == self.num_relations * 2, self.padding_index, inputs_com)
+
+        embedding = self.relation_embedding(inputs_com) * relations_flag  # [num_rules, max_len, hidden_dim]
+        cal_mask = mask.unsqueeze(-1).float()
+        body_emb = embedding * cal_mask
+        r_body_sum = body_emb.sum(dim=1)                                   # [num_rules, hidden_dim]
+
+        features = torch.cat([R_i, r_body_sum], dim=-1)                    # [num_rules, rule_dim + hidden_dim]
+        return features
 
     def compute_ruleE(self, sample, mode='single'):
 
@@ -414,23 +457,15 @@ class RulE(torch.nn.Module):
         
         rule_emb = self.rules_weight_emb[rule_index]
 
-        # 原始特征
-        mlp_feature_base = self.mlp_feature[rule_index]
+        # grounding 阶段：优先使用预训练后预计算的规则置信度 μ 作为标量权重
+        # 如果未预计算（例如仅做前向调试），则退回到当前的 mlp_feature（不加权）
+        if hasattr(self, 'rule_mu'):
+            w = self.rule_mu[rule_index]                      # [num_selected_rules, 1]
+            base_feature = self.mlp_feature[rule_index]       # [num_selected_rules, mlp_rule_dim]
+            mlp_feature = base_feature * w                    # broadcast 标量权重到特征维度
+        else:
+            mlp_feature = self.mlp_feature[rule_index]
 
-        # 预测 μ 和 log(σ²)
-        mu = self.mu_network(mlp_feature_base)
-        logvar = self.logvar_network(mlp_feature_base)
-
-        # 重参数化采样
-        mlp_feature, std = self.reparameterize_sample(mu, logvar)
-
-        # 存储用于损失计算
-        self.last_mu = mu
-        self.last_logvar = logvar
-        self.last_std = std
-        self.last_rule_index = rule_index
-
-        # output = self.rule_to_entity(rule_count, mlp_feature)
         output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
 
 
