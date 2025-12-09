@@ -605,7 +605,7 @@ class GroundTrainer(object):
                 
                 total_loss = 0.0
                 total_size = 0.0
-                self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+                # self.save(args, os.path.join(args.save_path, 'grounding.pt'))
         
 
     @torch.no_grad()
