@@ -108,7 +108,8 @@ class RuleGuidedPolicyNetwork(nn.Module):
         return (h0, c0)
 
     def step(self, next_relations, next_entities, lstm_state, prev_relation,
-             query_embedding, current_entities, rule_model, current_step=0):
+             query_embedding, current_entities, rule_model, current_step=0,
+             query_relation_ids=None):
         """
         执行一步策略网络前向传播（向量化批处理版本，参考SSRL agent.step）
 
@@ -121,6 +122,7 @@ class RuleGuidedPolicyNetwork(nn.Module):
             current_entities: [batch_size] 当前实体ID
             rule_model: RulE模型实例（用于获取嵌入和规则信息）
             current_step: 当前步数（用于规则匹配）
+            query_relation_ids: [batch_size] 查询关系ID（用于规则匹配）
 
         返回:
             logits: [batch_size, max_num_actions] 动作log概率
@@ -182,7 +184,8 @@ class RuleGuidedPolicyNetwork(nn.Module):
         # 6. RulE-SSRL核心创新：添加规则引导加成
         # 计算规则加成（向量化）
         rule_bonus = self._compute_rule_bonus_vectorized(
-            next_relations, H, query_embedding, rule_model, current_step, device
+            next_relations, H, query_embedding, rule_model, current_step, device,
+            query_relation_ids=query_relation_ids
         )  # [batch_size, max_num_actions]
 
         # 7. 组合得分
@@ -206,9 +209,13 @@ class RuleGuidedPolicyNetwork(nn.Module):
         return logits, new_lstm_state, action_idx
 
     def _compute_rule_bonus_vectorized(self, next_relations, state_hidden, query_relation_emb,
-                                       rule_model, current_step, device):
+                                       rule_model, current_step, device,
+                                       query_relation_ids=None):
         """
         向量化计算规则引导加成（核心创新）
+
+        根据规则体中当前步骤期望的关系，给匹配的动作加成。
+        改进：使用预训练的规则质量权重 (rules_weight_emb) 进行加权。
 
         参数:
             next_relations: [batch_size, max_num_actions] 候选关系
@@ -217,6 +224,7 @@ class RuleGuidedPolicyNetwork(nn.Module):
             rule_model: RulE模型实例
             current_step: 当前步数
             device: torch设备
+            query_relation_ids: [batch_size] 查询关系ID（用于规则匹配）
 
         返回:
             rule_bonus: [batch_size, max_num_actions] 规则加成得分
@@ -230,18 +238,63 @@ class RuleGuidedPolicyNetwork(nn.Module):
         attention_scores = self.rule_attention(state_query)  # [batch_size, 1]
         rule_weight = torch.sigmoid(attention_scores)  # [batch_size, 1]
 
-        # 对于每个批次中的查询，检查规则匹配
-        # 注意：这部分仍然需要循环，因为每个查询的规则不同
-        # 但我们尽量减少循环次数
-        for b in range(batch_size):
-            # 从query_relation_emb反推query_relation ID
-            # 这需要rule_model提供方法，或者我们传入query_relation
-            # 为简化，假设我们可以从外部传入或缓存
-            # 这里先跳过具体实现，返回基于注意力的通用加成
+        # 如果没有提供query_relation_ids，退化为简化版本
+        if query_relation_ids is None:
+            for b in range(batch_size):
+                rule_bonus[b, :] = rule_weight[b, 0] * 0.1
+            return rule_bonus
 
-            # 简化版本：对所有候选动作应用相同的规则权重
-            # 未来可以优化为预计算规则-关系匹配矩阵
-            rule_bonus[b, :] = rule_weight[b, 0] * 0.1  # 缩放因子
+        # 检查是否有预计算的规则质量权重
+        has_rule_quality = hasattr(rule_model, 'rules_weight_emb') and rule_model.rules_weight_emb is not None
+
+        # 规则匹配打分：检查候选动作的关系是否匹配规则体当前步期望的关系
+        for b in range(batch_size):
+            query_rel = query_relation_ids[b].item() if isinstance(query_relation_ids, torch.Tensor) else query_relation_ids[b]
+
+            # 获取该查询关系对应的所有规则
+            if not hasattr(rule_model, 'relation2rules') or query_rel >= len(rule_model.relation2rules):
+                # 没有规则，使用默认加成
+                rule_bonus[b, :] = rule_weight[b, 0] * 0.1
+                continue
+
+            rules = rule_model.relation2rules[query_rel]
+
+            if len(rules) == 0:
+                # 没有规则，使用默认加成
+                rule_bonus[b, :] = rule_weight[b, 0] * 0.1
+                continue
+
+            # 遍历每条规则，计算加权匹配加成
+            weighted_match = torch.zeros(self.max_num_actions, device=device)
+            total_rule_quality = 0.0
+
+            for rule_id, (r_head, r_body) in rules:
+                # r_body 是规则体的关系列表，如 [属于, 适用症状]
+                if current_step < len(r_body):
+                    expected_rel = r_body[current_step]  # 当前步期望的关系
+
+                    # ===== 改进：获取规则质量权重 =====
+                    if has_rule_quality:
+                        # 使用预训练的规则质量嵌入的范数作为权重
+                        rule_emb = rule_model.rules_weight_emb[rule_id]  # [hidden_dim]
+                        rule_quality = torch.norm(rule_emb).item()
+                        rule_quality = max(rule_quality, 0.1)  # 避免为0
+                    else:
+                        rule_quality = 1.0  # 退化为原来的等权重
+
+                    # 检查哪些候选动作的关系匹配期望关系
+                    match_mask = (next_relations[b] == expected_rel).float()
+                    weighted_match += rule_quality * match_mask
+                    total_rule_quality += rule_quality
+
+            if total_rule_quality > 0:
+                # 归一化匹配次数，乘以规则权重
+                # 匹配的动作获得更高加成
+                normalized_match = weighted_match / total_rule_quality
+                rule_bonus[b, :] = rule_weight[b, 0] * normalized_match * 0.5  # 规则匹配加成系数
+            else:
+                # 没有适用的规则（current_step超出规则长度），使用默认加成
+                rule_bonus[b, :] = rule_weight[b, 0] * 0.1
 
         return rule_bonus
 
@@ -272,9 +325,10 @@ class RuleGuidedPolicyNetwork(nn.Module):
         # 初始关系
         prev_relation = torch.tensor([graph.rPAD], dtype=torch.long, device=device)
 
-        # 查询嵌入
+        # 查询嵌入和ID
         query_relation_tensor = torch.tensor([query_relation], dtype=torch.long, device=device)
         query_embedding = model.get_relation_embedding_by_id(query_relation_tensor)
+        query_relation_ids = query_relation_tensor  # 用于规则匹配
 
         for step in range(max_steps):
             # 获取动作空间
@@ -294,7 +348,7 @@ class RuleGuidedPolicyNetwork(nn.Module):
                 # 没有有效动作，停止
                 break
 
-            # 前向传播
+            # 前向传播（传入query_relation_ids用于规则匹配）
             logits, lstm_state, action_idx = self.step(
                 next_relations=next_relations,
                 next_entities=next_entities,
@@ -303,7 +357,8 @@ class RuleGuidedPolicyNetwork(nn.Module):
                 query_embedding=query_embedding,
                 current_entities=current_entities_tensor,
                 rule_model=model,
-                current_step=step
+                current_step=step,
+                query_relation_ids=query_relation_ids
             )
 
             # 提取采样的动作
@@ -334,7 +389,10 @@ class PolicyNetworkTrainingHelper:
     def compute_rule_supervised_loss(policy_network, query_batch, graph, model, device,
                                     path_length=3, num_rollouts=1):
         """
-        计算一批查询的规则监督损失（向量化版本）
+        计算一批查询的规则监督损失（规则引导版本）
+
+        核心创新：使用规则体中期望的关系作为监督信号，而不是目标实体。
+        改进：使用预训练的规则质量权重 (rules_weight_emb) 进行加权监督。
 
         参数:
             policy_network: RuleGuidedPolicyNetwork实例
@@ -371,9 +429,12 @@ class PolicyNetworkTrainingHelper:
         # 初始关系（DUMMY_START）
         prev_relation = torch.full((expanded_batch_size,), graph.rPAD, dtype=torch.long, device=device)
 
-        # 查询嵌入
+        # 查询嵌入和ID
         query_relation_tensor = torch.from_numpy(query_relations).long().to(device)
         query_embedding = model.get_relation_embedding_by_id(query_relation_tensor)
+
+        # 检查是否有预计算的规则质量权重
+        has_rule_quality = hasattr(model, 'rules_weight_emb') and model.rules_weight_emb is not None
 
         total_loss = 0.0
         valid_steps = 0
@@ -381,10 +442,6 @@ class PolicyNetworkTrainingHelper:
         # 模拟路径探索
         for step in range(path_length):
             # 获取动作空间（使用预计算的array_store）
-            last_step = (step == path_length - 1)
-
-            # 简化版本：不做复杂的过滤，使用基础的return_next_actions
-            # 或者简化为直接使用array_store
             next_actions = graph.array_store[current_entities, :, :].copy()  # [B, max_actions, 2]
 
             next_entities_np = next_actions[:, :, 0]
@@ -395,7 +452,7 @@ class PolicyNetworkTrainingHelper:
             next_relations = torch.from_numpy(next_relations_np).long().to(device)
             current_entities_tensor = torch.from_numpy(current_entities).long().to(device)
 
-            # 前向传播
+            # 前向传播（传入query_relation_ids用于规则匹配打分）
             logits, lstm_state, action_idx = policy_network.step(
                 next_relations=next_relations,
                 next_entities=next_entities,
@@ -404,35 +461,89 @@ class PolicyNetworkTrainingHelper:
                 query_embedding=query_embedding,
                 current_entities=current_entities_tensor,
                 rule_model=model,
-                current_step=step
+                current_step=step,
+                query_relation_ids=query_relation_tensor
             )
 
-            # 计算损失：这里需要规则监督标签
-            # 简化版本：使用交叉熵，鼓励选择靠近目标的动作
-            # 理想情况下应该使用规则路径作为监督信号
+            # ========== 规则引导监督（核心创新 + 规则质量加权） ==========
+            # 使用规则体中当前步期望的关系作为监督信号
+            # 改进：使用 rules_weight_emb 对不同规则进行加权
 
-            # 找到通向目标实体的动作作为正标签
-            target_mask = (next_entities == torch.from_numpy(target_entities).unsqueeze(1).to(device)).float()
+            target_mask = torch.zeros(expanded_batch_size, policy_network.max_num_actions, device=device)
+            has_rule_supervision = False
 
-            if target_mask.sum() > 0:
-                # 有有效标签
-                # 使用BCE loss
-                probs = torch.exp(logits)
-                target_dist = target_mask / (target_mask.sum(dim=1, keepdim=True) + 1e-10)
-                step_loss = F.kl_div(logits, target_dist, reduction='batchmean')
-                total_loss += step_loss
-                valid_steps += 1
+            for b in range(expanded_batch_size):
+                query_rel = query_relations[b]
+
+                # 获取该查询关系对应的所有规则
+                if not hasattr(model, 'relation2rules') or query_rel >= len(model.relation2rules):
+                    continue
+
+                rules = model.relation2rules[query_rel]
+                if len(rules) == 0:
+                    continue
+
+                # 遍历每条规则，找出当前步期望的关系（使用规则质量加权）
+                for rule_id, (r_head, r_body) in rules:
+                    # r_body 是规则体的关系列表，如 [属于, 适用症状]
+                    if step < len(r_body):
+                        expected_rel = r_body[step]  # 当前步期望的关系
+
+                        # ===== 改进：获取规则质量权重 =====
+                        if has_rule_quality:
+                            rule_emb = model.rules_weight_emb[rule_id]  # [hidden_dim]
+                            rule_quality = torch.norm(rule_emb).item()
+                            rule_quality = max(rule_quality, 0.1)  # 避免为0
+                        else:
+                            rule_quality = 1.0  # 退化为原来的等权重
+
+                        # 找到关系匹配的动作作为正样本（加权）
+                        match_mask = (next_relations[b] == expected_rel).float()
+                        target_mask[b] += rule_quality * match_mask  # 加权累加
+                        if match_mask.sum() > 0:
+                            has_rule_supervision = True
+
+            # 如果有规则监督信号，计算损失
+            if has_rule_supervision and target_mask.sum() > 0:
+                # 归一化目标分布
+                row_sums = target_mask.sum(dim=1, keepdim=True)
+                # 避免除零：只对有正样本的行归一化
+                valid_rows = (row_sums > 0).float()
+                target_dist = target_mask / (row_sums + 1e-10)
+
+                # 只对有监督的样本计算损失
+                if valid_rows.sum() > 0:
+                    # KL散度损失
+                    step_loss = F.kl_div(logits, target_dist, reduction='none')
+                    # 只计算有监督的样本的损失
+                    step_loss = (step_loss.sum(dim=1) * valid_rows.squeeze()).sum() / (valid_rows.sum() + 1e-10)
+                    total_loss += step_loss
+                    valid_steps += 1
+
+            # ========== 补充：目标实体监督（辅助信号） ==========
+            # 如果能直接到达目标实体，也作为正样本（与规则监督结合）
+            target_entity_mask = (next_entities == torch.from_numpy(target_entities).unsqueeze(1).to(device)).float()
+            if target_entity_mask.sum() > 0:
+                # 合并规则监督和目标实体监督
+                combined_mask = target_mask + target_entity_mask * 0.5  # 目标实体权重稍低
+                row_sums = combined_mask.sum(dim=1, keepdim=True)
+                valid_rows = (row_sums > 0).float()
+
+                if valid_rows.sum() > 0:
+                    combined_dist = combined_mask / (row_sums + 1e-10)
+                    aux_loss = F.kl_div(logits, combined_dist, reduction='none')
+                    aux_loss = (aux_loss.sum(dim=1) * valid_rows.squeeze()).sum() / (valid_rows.sum() + 1e-10)
+                    total_loss += aux_loss * 0.3  # 辅助损失权重
+                    valid_steps += 0.3
 
             # 执行动作
-            chosen_entities = next_entities[torch.arange(expanded_batch_size), action_idx]
-            chosen_relations = next_relations[torch.arange(expanded_batch_size), action_idx]
+            chosen_entities = next_entities[torch.arange(expanded_batch_size, device=device), action_idx]
+            chosen_relations = next_relations[torch.arange(expanded_batch_size, device=device), action_idx]
 
             current_entities = chosen_entities.cpu().numpy()
             prev_relation = chosen_relations
 
-            # 如果到达目标则停止（但这里我们继续所有路径）
-
         if valid_steps == 0:
-            return torch.tensor(0.0, device=device)
+            return torch.tensor(0.0, device=device, requires_grad=True)
 
         return total_loss / valid_steps

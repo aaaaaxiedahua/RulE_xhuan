@@ -844,6 +844,11 @@ class PolicyTrainer(object):
         self.model.relation_embedding.requires_grad_(False)
         self.model.rule_emb.requires_grad_(False)
 
+        # Step 1.5: 预计算规则质量权重（利用预训练的规则嵌入）
+        logging.info('预计算规则质量权重 (rules_weight_emb)...')
+        self.model.eval_compute_rule_weight(self.device)
+        logging.info('规则质量权重计算完成，形状: {}'.format(self.model.rules_weight_emb.shape))
+
         # Step 2: 只优化策略网络参数
         policy_params = list(self.model.policy_network.parameters())
         logging.info('策略网络参数数量: {}'.format(sum(p.numel() for p in policy_params)))
