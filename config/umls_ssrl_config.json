@@ -1,15 +1,15 @@
 {
-    "_comment": "========== RulE-SSRL Configuration for UMLS ==========",
-    "_comment_mode": "UMLS is a small dataset (135 entities) - good for quick testing",
+    "_comment": "========== RulE-SSRL拆分方案配置 for UMLS ==========",
+    "_comment_mode": "三阶段流程: Phase1预训练 -> Phase2策略网络训练 -> Phase3融合测试",
 
-    "_comment_data": "========== Data Configuration ==========",
+    "_comment_data": "========== 数据配置 ==========",
     "data_path": "../data/umls",
     "rule_file": "../data/umls/mined_rules.txt",
     "cuda": true,
     "cpu_num": 10,
     "seed": 800,
 
-    "_comment_pretraining": "========== Pre-training Configuration (KGE + Rule + Policy) ==========",
+    "_comment_phase1": "========== Phase 1: 预训练配置 (只有KGE + Rule) ==========",
     "batch_size": 256,
     "negative_sample_size": 512,
     "rule_batch_size": 256,
@@ -34,10 +34,8 @@
     "save_path": "umls_SSRL",
     "weight_decay": 0,
 
-    "_comment_grounding": "========== Grounding Configuration (NOT USED in RulE-SSRL) ==========",
-    "_comment_grounding_note": "These parameters are ignored when use_policy_network=true",
+    "_comment_grounding": "========== Grounding配置 (原始RulE模式使用) ==========",
     "mlp_rule_dim": 100,
-    "alpha": 2.0,
     "smoothing": 0.2,
     "batch_per_epoch": 1000000,
     "print_every": 10,
@@ -45,18 +43,18 @@
     "g_lr": 0.0001,
     "num_iters": 20,
 
-    "_comment_ssrl": "========== RulE-SSRL Policy Network Configuration ==========",
+    "_comment_phase2": "========== Phase 2: 策略网络训练配置 ==========",
     "use_policy_network": true,
     "max_num_actions": 200,
     "policy_hidden_dim": 128,
-    "policy_batch_size": 16,
-    "weight_policy": 0.3,
-    "num_policy_samples": 5,
+    "policy_num_iters": 20,
+    "policy_batch_size": 32,
+    "policy_lr": 0.0001,
+    "policy_log_steps": 100,
     "max_path_length": 3,
 
-    "_comment_rl_finetuning": "========== Optional RL Finetuning Phase ==========",
-    "enable_rl_finetuning": false,
-    "rl_finetuning_steps": 5000,
-    "rl_finetuning_lr": 0.0001,
-    "rl_log_steps": 100
+    "_comment_phase3": "========== Phase 3: 测试配置 (KGE + Policy 融合) ==========",
+    "num_policy_samples": 10,
+    "alpha": 0.5,
+    "beta": 0.5
 }

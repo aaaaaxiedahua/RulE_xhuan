@@ -89,23 +89,9 @@ class PreTrainer(object):
             num_workers=max(1, args.cpu_num//2),
             collate_fn=RuleDataset.collate_fn)
 
-        # RulE-SSRL: 如果模型包含策略网络，加载策略训练数据
-        # 策略训练是RulE-SSRL模型的核心组成部分（不是可选的）
-        if self.model.use_policy_network:
-            from data import QueryDataset
-            query_dataloader = DataLoader(
-                QueryDataset(self.graph.train_facts),
-                batch_size=args.policy_batch_size if hasattr(args, 'policy_batch_size') else 32,
-                shuffle=True,
-                num_workers=max(1, args.cpu_num // 2),
-                collate_fn=QueryDataset.collate_fn
-            )
-            self.query_iterator = Iterator(query_dataloader)
-            logging.info('RulE-SSRL模式: 策略网络已启用，使用QueryDataset，共{}个查询'.format(
-                len(self.graph.train_facts)))
-        else:
-            self.query_iterator = None
-            logging.info('原始RulE模式: 不使用策略网络')
+        # RulE-SSRL拆分方案: 预训练阶段只训练KGE+Rule，不训练策略网络
+        # 策略网络在独立的Phase 2阶段训练
+        logging.info('预训练阶段: 只训练KGE和Rule嵌入（策略网络在Phase 2单独训练）')
 
         self.triplets_iterator = BidirectionalOneShotIterator(triplets_dataloader_head, triplets_dataloader_tail)
         self.rules_iterator = Iterator(rules_dataloader)
@@ -121,8 +107,7 @@ class PreTrainer(object):
 
         for step in range(0, args.max_steps + 1):
 
-            log = self.train_step(optimizer, self.triplets_iterator, self.rules_iterator, args,
-                                 query_iterator=self.query_iterator)
+            log = self.train_step(optimizer, self.triplets_iterator, self.rules_iterator, args)
             
             training_logs.append(log)
 
@@ -153,12 +138,11 @@ class PreTrainer(object):
                 # save_model(self.model,optimizer, args)
 
 
-    def train_step(self, optimizer, triplets_iterator, rules_iterator, args, query_iterator=None):
+    def train_step(self, optimizer, triplets_iterator, rules_iterator, args):
         '''
         单步训练：应用反向传播并返回损失
 
-        参数：
-            query_iterator: 策略训练查询的迭代器（RulE-SSRL）
+        RulE-SSRL拆分方案: 预训练只计算KGE+Rule损失，不计算策略损失
         '''
         
         # self.model.rule_emb.requires_grad = False
@@ -221,28 +205,9 @@ class PreTrainer(object):
         loss_fact = (positive_fact_loss + negative_fact_loss)/2
         loss_rule = (positive_rule_loss + negative_rule_loss)/2
 
-        # RulE-SSRL: 如果模型包含策略网络，策略损失是必须的（不是可选的）
-        if self.model.use_policy_network:
-            if query_iterator is None:
-                raise RuntimeError('模型包含策略网络，但query_iterator为None！')
-
-            query_batch = next(query_iterator)
-            if self.device.type == "cuda":
-                query_batch = query_batch.cuda(self.device)
-
-            # 计算规则监督的策略损失（RulE-SSRL核心创新）
-            loss_policy = model.compute_policy_loss(query_batch)
-
-            # 组合损失：KGE + Rule + Policy
-            weight_policy = args.weight_policy if hasattr(args, 'weight_policy') else 0.5
-            loss = loss_fact + loss_rule + weight_policy * loss_policy
-
-            # 记录策略损失
-            policy_loss_value = loss_policy.item()
-        else:
-            # 原始RulE模式：只有KGE + Rule
-            loss = loss_fact + loss_rule
-            policy_loss_value = 0.0
+        # RulE-SSRL拆分方案: 预训练只有KGE + Rule损失
+        # 策略网络在Phase 2独立训练
+        loss = loss_fact + loss_rule
 
         # loss = loss_fact
         # loss = loss_rule
@@ -272,7 +237,6 @@ class PreTrainer(object):
             'negative_fact_loss': negative_fact_loss.item(),
             'positive_rule_loss': positive_rule_loss.item(),
             'negative_rule_loss': negative_rule_loss.item(),
-            'policy_loss': policy_loss_value,  # RulE-SSRL: 添加策略损失到日志
             'regularization': regularization.item(),
             'loss': loss.item()
         }
@@ -827,3 +791,278 @@ def log_metrics(mode, step, metrics):
     '''
     for metric in metrics:
         logging.info('%s %s at step %d: %f' % (mode, metric, step, metrics[metric]))
+
+
+# ========== RulE-SSRL拆分方案: Phase 2 策略网络训练器 ==========
+
+class PolicyTrainer(object):
+    """
+    策略网络训练器 (Phase 2)
+
+    在预训练完成后，冻结所有嵌入，单独训练策略网络。
+    """
+
+    def __init__(self, model, graph, valid_set, test_set, device, num_worker=0):
+        """
+        初始化策略网络训练器
+
+        参数：
+            model: RulE模型（包含预训练好的嵌入和策略网络）
+            graph: 知识图谱
+            valid_set: 验证集
+            test_set: 测试集
+            device: 计算设备
+            num_worker: 数据加载worker数量
+        """
+        self.model = model
+        self.graph = graph
+        self.valid_set = valid_set
+        self.test_set = test_set
+        self.device = device
+        self.num_worker = num_worker
+
+        if self.device.type == "cuda":
+            self.model = self.model.cuda(self.device)
+
+    def train(self, args):
+        """
+        策略网络训练主循环
+
+        参数：
+            args: 配置参数，需要包含：
+                - policy_num_iters: 训练轮数
+                - policy_batch_size: 批大小
+                - policy_lr: 学习率
+                - policy_log_steps: 日志频率
+                - num_policy_samples: 验证时K采样次数
+        """
+        logging.info('>>>>> Phase 2: 策略网络训练')
+
+        # Step 1: 冻结预训练嵌入
+        logging.info('冻结预训练嵌入: entity, relation, rule')
+        self.model.entity_embedding.requires_grad_(False)
+        self.model.relation_embedding.requires_grad_(False)
+        self.model.rule_emb.requires_grad_(False)
+
+        # Step 2: 只优化策略网络参数
+        policy_params = list(self.model.policy_network.parameters())
+        logging.info('策略网络参数数量: {}'.format(sum(p.numel() for p in policy_params)))
+
+        policy_lr = args.policy_lr if hasattr(args, 'policy_lr') else 0.0001
+        optimizer = torch.optim.Adam(policy_params, lr=policy_lr)
+
+        # Step 3: 数据加载
+        from data import QueryDataset
+        query_dataloader = DataLoader(
+            QueryDataset(self.graph.train_facts),
+            batch_size=args.policy_batch_size if hasattr(args, 'policy_batch_size') else 32,
+            shuffle=True,
+            num_workers=max(1, self.num_worker // 2),
+            collate_fn=QueryDataset.collate_fn
+        )
+
+        logging.info('训练数据: {} 个三元组'.format(len(self.graph.train_facts)))
+        logging.info('批大小: {}'.format(args.policy_batch_size if hasattr(args, 'policy_batch_size') else 32))
+
+        # Step 4: 训练参数
+        policy_num_iters = args.policy_num_iters if hasattr(args, 'policy_num_iters') else 20
+        policy_log_steps = args.policy_log_steps if hasattr(args, 'policy_log_steps') else 100
+
+        logging.info('训练轮数: {}'.format(policy_num_iters))
+
+        # Step 5: 训练循环
+        best_mrr = 0.0
+
+        for iter_num in range(1, policy_num_iters + 1):
+            logging.info('========== Iteration {}/{} =========='.format(iter_num, policy_num_iters))
+
+            self.model.train()
+            total_loss = 0.0
+            batch_count = 0
+
+            for batch_id, query_batch in enumerate(query_dataloader):
+
+                if self.device.type == "cuda":
+                    query_batch = query_batch.cuda(self.device)
+
+                optimizer.zero_grad()
+
+                # 计算策略损失
+                loss = self.model.compute_policy_loss(query_batch)
+
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+                batch_count += 1
+
+                # 日志
+                if (batch_id + 1) % policy_log_steps == 0:
+                    avg_loss = total_loss / batch_count
+                    logging.info('Iter {}, Batch {}, Avg Loss: {:.6f}'.format(
+                        iter_num, batch_id + 1, avg_loss))
+
+            # 每轮结束后验证
+            avg_loss = total_loss / batch_count if batch_count > 0 else 0
+            logging.info('Iteration {} 完成, 平均损失: {:.6f}'.format(iter_num, avg_loss))
+
+            # 验证
+            logging.info('验证中...')
+            mrr = self.evaluate('valid', args)
+
+            if mrr > best_mrr:
+                best_mrr = mrr
+                self.save(args, os.path.join(args.save_path, 'policy_checkpoint'))
+                logging.info('新的最佳MRR: {:.6f}, 已保存checkpoint'.format(mrr))
+
+        logging.info('>>>>> Phase 2 完成! 最佳验证MRR: {:.6f}'.format(best_mrr))
+
+        # 加载最佳模型
+        checkpoint = torch.load(os.path.join(args.save_path, 'policy_checkpoint'))
+        self.model.load_state_dict(checkpoint['model'])
+        logging.info('已加载最佳策略网络checkpoint')
+
+    @torch.no_grad()
+    def evaluate(self, split, args, use_fusion=False):
+        """
+        使用策略网络推理进行评估
+
+        参数：
+            split: 'valid' 或 'test'
+            args: 配置参数
+            use_fusion: 是否融合KGE评分（测试阶段使用）
+
+        返回：
+            mrr: Mean Reciprocal Rank
+        """
+        logging.info('>>>>> PolicyTrainer: 评估 {} (策略网络推理)'.format(split))
+
+        test_set = getattr(self, "%s_set" % split)
+        dataloader = DataLoader(test_set, batch_size=1, num_workers=self.num_worker)
+
+        self.model.eval()
+
+        num_policy_samples = args.num_policy_samples if hasattr(args, 'num_policy_samples') else 10
+        alpha = args.alpha if hasattr(args, 'alpha') else 0.5
+        beta = args.beta if hasattr(args, 'beta') else 0.5
+
+        concat_logits = []
+        concat_all_h = []
+        concat_all_r = []
+        concat_all_t = []
+        concat_flag = []
+
+        for batch in dataloader:
+            all_h, all_r, all_t, flag = batch
+            all_h = all_h.squeeze(0)
+            all_r = all_r.squeeze(0)
+            all_t = all_t.squeeze(0)
+            flag = flag.squeeze(0)
+
+            if self.device.type == "cuda":
+                all_h = all_h.cuda(device=self.device)
+                all_r = all_r.cuda(device=self.device)
+                all_t = all_t.cuda(device=self.device)
+                flag = flag.cuda(device=self.device)
+
+            # 策略网络推理
+            policy_scores, _ = self.model.forward_policy(all_h, all_r, num_samples=num_policy_samples)
+
+            if use_fusion:
+                # 融合KGE和策略网络评分
+                kge_scores = self.model.compute_g_KGE(all_h, all_r)
+                logits = alpha * kge_scores + beta * policy_scores
+            else:
+                logits = policy_scores
+
+            concat_logits.append(logits)
+            concat_all_h.append(all_h)
+            concat_all_r.append(all_r)
+            concat_all_t.append(all_t)
+            concat_flag.append(flag)
+
+        concat_logits = torch.cat(concat_logits, dim=0)
+        concat_all_h = torch.cat(concat_all_h, dim=0)
+        concat_all_r = torch.cat(concat_all_r, dim=0)
+        concat_all_t = torch.cat(concat_all_t, dim=0)
+        concat_flag = torch.cat(concat_flag, dim=0)
+
+        # 计算排名
+        ranks = []
+        for k in range(concat_all_t.size(0)):
+            h = concat_all_h[k]
+            r = concat_all_r[k]
+            t = concat_all_t[k]
+            val = concat_logits[k, t]
+
+            L = (concat_logits[k][concat_flag[k]] > val).sum().item() + 1
+            H = (concat_logits[k][concat_flag[k]] >= val).sum().item() + 2
+            ranks += [[h, r, t, L, H]]
+        ranks = torch.tensor(ranks, dtype=torch.long, device=self.device)
+
+        query2LH = dict()
+        for h, r, t, L, H in ranks.data.cpu().numpy().tolist():
+            query2LH[(h, r, t)] = (L, H)
+
+        # 计算指标
+        hit1, hit3, hit10, mr, mrr = 0.0, 0.0, 0.0, 0.0, 0.0
+        for (L, H) in query2LH.values():
+            for rank in range(L, H):
+                if rank <= 1:
+                    hit1 += 1.0 / (H - L)
+                if rank <= 3:
+                    hit3 += 1.0 / (H - L)
+                if rank <= 10:
+                    hit10 += 1.0 / (H - L)
+                mr += rank / (H - L)
+                mrr += 1.0 / rank / (H - L)
+
+        hit1 /= len(ranks)
+        hit3 /= len(ranks)
+        hit10 /= len(ranks)
+        mr /= len(ranks)
+        mrr /= len(ranks)
+
+        logging.info('Data : {}'.format(len(query2LH)))
+        logging.info('Hit1 : {:.6f}'.format(hit1))
+        logging.info('Hit3 : {:.6f}'.format(hit3))
+        logging.info('Hit10: {:.6f}'.format(hit10))
+        logging.info('MR   : {:.6f}'.format(mr))
+        logging.info('MRR  : {:.6f}'.format(mrr))
+
+        return mrr
+
+    @torch.no_grad()
+    def test_with_fusion(self, args):
+        """
+        Phase 3: 使用KGE+策略网络融合评分进行测试
+
+        参数：
+            args: 配置参数，需要包含：
+                - alpha: KGE评分权重
+                - beta: 策略评分权重
+                - num_policy_samples: K采样次数
+        """
+        logging.info('>>>>> Phase 3: 测试 (KGE + 策略网络 融合)')
+
+        alpha = args.alpha if hasattr(args, 'alpha') else 0.5
+        beta = args.beta if hasattr(args, 'beta') else 0.5
+        logging.info('融合权重: alpha(KGE)={}, beta(Policy)={}'.format(alpha, beta))
+
+        # 验证集融合测试
+        logging.info('--- 验证集 ---')
+        valid_mrr = self.evaluate('valid', args, use_fusion=True)
+
+        # 测试集融合测试
+        logging.info('--- 测试集 ---')
+        test_mrr = self.evaluate('test', args, use_fusion=True)
+
+        return valid_mrr, test_mrr
+
+    def save(self, args, checkpoint_path):
+        """保存checkpoint"""
+        logging.info("保存checkpoint到 %s" % checkpoint_path)
+        state = {
+            "model": self.model.state_dict(),
+        }
+        torch.save(state, checkpoint_path)
