@@ -594,3 +594,54 @@ class BidirectionalOneShotIterator(object):
             for data in dataloader:
                 yield data
 
+
+# ========== RulE-SSRL: 策略训练的查询数据集 ==========
+class QueryDataset(Dataset):
+    """
+    策略网络训练的查询数据集
+
+    提供(h, r, t)三元组作为策略网络的监督信号。
+    每个三元组作为一个查询，策略网络需要学习从h导航到t，
+    使用关系r作为引导。
+
+    数据来源：知识图谱的训练三元组
+    """
+
+    def __init__(self, train_triplets):
+        """
+        初始化查询数据集
+
+        参数：
+            train_triplets: 训练集中的(h, r, t)元组列表
+        """
+        self.queries = train_triplets
+
+    def __len__(self):
+        return len(self.queries)
+
+    def __getitem__(self, idx):
+        """
+        获取单个查询
+
+        返回：
+            (h, r, t): 查询三元组
+                h - 头实体ID
+                r - 查询关系ID
+                t - 目标实体ID（ground truth）
+        """
+        return self.queries[idx]
+
+    @staticmethod
+    def collate_fn(data):
+        """
+        DataLoader的批整理函数
+
+        参数：
+            data: (h, r, t)元组列表
+
+        返回：
+            batch: [batch_size, 3]张量
+        """
+        batch = torch.stack([torch.LongTensor(triplet) for triplet in data], dim=0)
+        return batch
+

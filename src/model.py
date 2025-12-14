@@ -7,7 +7,16 @@ from layers import MLP, FuncToNodeSum
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset,
+                 use_policy_network=False, policy_hidden_dim=256):
+        """
+        RulE模型初始化
+
+        参数：
+            ... (原有参数)
+            use_policy_network: 是否使用策略网络（RulE-SSRL模式）
+            policy_hidden_dim: 策略网络隐藏层维度
+        """
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -89,8 +98,24 @@ class RulE(torch.nn.Module):
         # self.num_layers = num_layers
         # self.rnn = torch.nn.LSTM(self.relation_dim + self.rule_dim, self.rnn_hidden_dim, self.num_layers, batch_first=True)
         # self.linear = torch.nn.Linear(self.rnn_hidden_dim, self.relation_dim)
-        
+
         self.pi = 3.14159262358979323846
+
+        # ========== RulE-SSRL: 策略网络（可选）==========
+        self.use_policy_network = use_policy_network
+        if use_policy_network:
+            from policy_network import RuleGuidedPolicyNetwork
+            logging.info('初始化RulE-SSRL策略网络')
+            self.policy_network = RuleGuidedPolicyNetwork(
+                entity_dim=hidden_dim * 2,      # RotatE实体维度
+                relation_dim=hidden_dim,         # RotatE关系维度
+                rule_dim=hidden_dim,             # 规则嵌入维度
+                hidden_dim=policy_hidden_dim,    # 策略隐藏维度
+                num_layers=1,
+                dropout=0.1
+            )
+        else:
+            self.policy_network = None
 
     # def add_param(self):
 
@@ -334,7 +359,37 @@ class RulE(torch.nn.Module):
         return dist
     
 
-    def forward(self, all_h, all_r, edges_to_remove):
+    def forward(self, all_h, all_r, edges_to_remove=None):
+        """
+        推理入口
+
+        根据use_policy_network路由到不同的推理方法：
+        - False: 原始RulE的Grounding推理
+        - True: 策略网络推理（RulE-SSRL）
+
+        参数：
+            all_h: [batch_size] 头实体
+            all_r: [batch_size] 查询关系
+            edges_to_remove: Grounding期间需要屏蔽的边（可选）
+
+        返回：
+            score: [batch_size, num_entities] 实体得分
+            mask: [batch_size, num_entities] 有效实体掩码
+        """
+        if not self.use_policy_network:
+            # 原始RulE的Grounding推理
+            return self.forward_grounding(all_h, all_r, edges_to_remove)
+        else:
+            # RulE-SSRL策略网络推理
+            return self.forward_policy(all_h, all_r)
+
+    def forward_grounding(self, all_h, all_r, edges_to_remove):
+        """
+        原始RulE的Grounding推理
+
+        这是原来的forward方法，为清晰起见重命名。
+        使用规则grounding来计算实体得分。
+        """
         query_r = all_r[0].item()
         assert (all_r != query_r).sum() == 0
         device = all_r.device
@@ -429,3 +484,138 @@ class RulE(torch.nn.Module):
             rules_weight_emb.append(rule_weight_emb)
 
         self.rules_weight_emb = torch.cat(rules_weight_emb)
+
+
+    # ========== RulE-SSRL: 新增方法 ==========
+
+    def forward_policy(self, all_h, all_r, num_samples=10):
+        """
+        策略网络推理（RulE-SSRL）
+
+        使用策略网络采样多条路径并聚合结果。
+
+        参数：
+            all_h: [batch_size] 头实体
+            all_r: [batch_size] 查询关系
+            num_samples: 每个查询采样的路径数量
+
+        返回：
+            scores: [batch_size, num_entities] 实体得分
+            mask: [batch_size, num_entities] 全为True（策略可达任意实体）
+        """
+        from collections import defaultdict
+
+        batch_size = all_h.size(0)
+        device = all_h.device
+
+        # 初始化得分矩阵
+        scores = torch.zeros(batch_size, self.num_entities, device=device)
+
+        # 处理每个查询
+        for i in range(batch_size):
+            h = all_h[i].item()
+            r = all_r[i].item()
+
+            # 多路径采样
+            entity_visit_count = defaultdict(int)
+
+            for _ in range(num_samples):
+                # 用策略网络采样一条路径
+                with torch.no_grad():
+                    path, final_entity = self.policy_network.rollout(
+                        start_entity=h,
+                        query_relation=r,
+                        graph=self.graph,
+                        model=self,
+                        max_steps=3
+                    )
+
+                entity_visit_count[final_entity] += 1
+
+            # 聚合：简单投票
+            for entity, count in entity_visit_count.items():
+                scores[i, entity] = count / num_samples
+
+        # mask全为True（策略网络可以潜在到达任意实体）
+        mask = torch.ones_like(scores).bool()
+
+        return scores, mask
+
+    def compute_policy_loss(self, query_batch):
+        """
+        计算规则监督的策略损失
+
+        这是RulE-SSRL的核心创新：用规则作为软标签
+        引导策略学习，替代SSRL基于BFS的标签。
+
+        参数：
+            query_batch: [batch_size, 3] (h, r, t)三元组张量
+
+        返回：
+            loss: 标量张量
+        """
+        from policy_network import PolicyNetworkTrainingHelper
+
+        return PolicyNetworkTrainingHelper.compute_rule_supervised_loss(
+            policy_network=self.policy_network,
+            query_batch=query_batch,
+            graph=self.graph,
+            model=self,
+            device=self.device
+        )
+
+    # ========== 策略网络辅助方法 ==========
+
+    def get_rules_for_relation(self, relation_id):
+        """
+        获取与给定关系相关的规则
+
+        参数：
+            relation_id: 关系ID (int)
+
+        返回：
+            rules_info: (rule_id, rule_emb, rule_body)元组列表
+        """
+        if relation_id >= len(self.relation2rules):
+            return []
+
+        rules_info = []
+        for rule_id, (r_head, r_body) in self.relation2rules[relation_id]:
+            rule_emb = self.rule_emb(torch.tensor([rule_id], device=self.device))
+            rules_info.append((rule_id, rule_emb, r_body))
+
+        return rules_info
+
+    def get_entity_embedding_by_id(self, entity_id):
+        """
+        根据ID获取实体嵌入（供策略网络使用）
+
+        参数：
+            entity_id: 实体ID (int)
+
+        返回：
+            emb: [entity_dim]张量
+        """
+        return self.entity_embedding(torch.tensor([entity_id], device=self.device))
+
+    def get_relation_embedding_by_id(self, relation_id):
+        """
+        根据ID获取关系嵌入（供策略网络使用）
+
+        参数：
+            relation_id: 关系ID (int)
+
+        返回：
+            emb: [relation_dim]张量
+        """
+        # 处理逆关系
+        if relation_id >= self.num_relations:
+            # 逆关系
+            actual_rel_id = relation_id % self.num_relations
+            emb = self.relation_embedding(torch.tensor([actual_rel_id], device=self.device))
+            # 逆关系取负
+            emb = -emb
+        else:
+            emb = self.relation_embedding(torch.tensor([relation_id], device=self.device))
+
+        return emb

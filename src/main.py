@@ -5,7 +5,12 @@ import torch
 from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDataset, KGETrainDataset
 from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
-from trainer import GroundTrainer, PreTrainer
+# RulE-SSRL: GroundTrainer仅在原始RulE模式中使用
+from trainer import PreTrainer
+try:
+    from trainer import GroundTrainer
+except ImportError:
+    GroundTrainer = None
 
 # torch.cuda.set_device(1)
 
@@ -72,9 +77,9 @@ def parse_args(args=None):
     parser.add_argument('-init', '--init_checkpoint_config', default="../config/umls_config.json", type=str)
     parser.add_argument('-save', '--save_path', default=None, type=str)
 
-    
-    # grounding training process
-  
+
+    # ========== grounding训练参数（仅原始RulE模式使用，RulE-SSRL不需要）==========
+    # 注：当use_policy_network=True时，以下参数不会被使用
     parser.add_argument('--mlp_rule_dim', default=100, type=int)
     parser.add_argument('--alpha', default=5.0, type=int, help='weight the KGE score')
     parser.add_argument('--smoothing', default=0.5, type=float)
@@ -84,6 +89,31 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+
+    # ========== RulE-SSRL: 策略网络参数 ==========
+    parser.add_argument('--use_policy_network', action='store_true', default=False,
+                       help='使用策略网络进行RulE-SSRL模式')
+    parser.add_argument('--policy_hidden_dim', default=256, type=int,
+                       help='策略网络隐藏层维度')
+    parser.add_argument('--policy_batch_size', default=32, type=int,
+                       help='策略训练的批大小')
+    parser.add_argument('--weight_policy', default=0.5, type=float,
+                       help='策略损失的权重')
+    parser.add_argument('--num_policy_samples', default=10, type=int,
+                       help='推理时采样的路径数量')
+    parser.add_argument('--max_path_length', default=3, type=int,
+                       help='策略rollout的最大路径长度')
+
+    # ========== RulE-SSRL: 可选RL微调阶段参数 ==========
+    parser.add_argument('--enable_rl_finetuning', action='store_true', default=False,
+                       help='在预训练后启用RL微调阶段（冻结嵌入，只训练策略网络）')
+    parser.add_argument('--rl_finetuning_steps', default=10000, type=int,
+                       help='RL微调的训练步数')
+    parser.add_argument('--rl_finetuning_lr', default=0.0001, type=float,
+                       help='RL微调的学习率')
+    parser.add_argument('--rl_log_steps', default=100, type=int,
+                       help='RL微调的日志输出频率')
+
     return parser.parse_args(args)
 
 def main():
@@ -110,13 +140,22 @@ def main():
 
 
 
-    # for grounding dataset
+    # 知识图谱和规则集（两种模式都需要）
     graph = KnowledgeGraph(args.data_path)
-    train_set = TrainDataset(graph, args.g_batch_size)
-    valid_set = ValidDataset(graph, args.g_batch_size)
-    test_set = TestDataset(graph, args.g_batch_size)
-    test_kge_set = TestDataset(graph, 16)
     ruleset = RuleDataset(graph.relation_size, args.rule_file, args.rule_negative_size)
+
+    # RulE-SSRL: grounding数据集（仅原始RulE模式需要）
+    if not (args.use_policy_network if hasattr(args, 'use_policy_network') else False):
+        train_set = TrainDataset(graph, args.g_batch_size)
+        valid_set = ValidDataset(graph, args.g_batch_size)
+        test_set = TestDataset(graph, args.g_batch_size)
+        test_kge_set = TestDataset(graph, 16)
+    else:
+        # RulE-SSRL模式：不需要grounding数据集，使用KGE验证集
+        train_set = None
+        valid_set = ValidDataset(graph, args.g_batch_size)
+        test_set = TestDataset(graph, args.g_batch_size)
+        test_kge_set = None
 
     rules = [rule[0] for rule in ruleset.rules]
     
@@ -126,23 +165,40 @@ def main():
     else:
         device = torch.device('cpu')
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
+    # RulE-SSRL: 构建带可选策略网络的模型
+    RulE_model = RulE(
+        graph,
+        args.p_norm,
+        args.mlp_rule_dim,
+        args.gamma_fact,
+        args.gamma_rule,
+        args.hidden_dim,
+        device,
+        args.data_path,
+        use_policy_network=args.use_policy_network if hasattr(args, 'use_policy_network') else False,
+        policy_hidden_dim=args.policy_hidden_dim if hasattr(args, 'policy_hidden_dim') else 256
+    )
     RulE_model.set_rules(rules)
 
-    
-    # For pre-training 
+    if args.use_policy_network if hasattr(args, 'use_policy_network') else False:
+        logging.info('>>>>> RulE-SSRL模式: 使用策略网络')
+    else:
+        logging.info('>>>>> 原始RulE模式: 使用grounding')
 
+
+    # For pre-training
+
+    # 创建PreTrainer
+    # 注：策略网络训练是模型的核心组成部分，由model.use_policy_network控制
     pre_trainer = PreTrainer(
         graph=graph,
         model=RulE_model,
         valid_set=valid_set,
         test_set=test_set,
-        # tripletset=kge_train_set,
         ruleset=ruleset,
         expectation=True,
-        device = device,
+        device=device,
         num_worker=args.cpu_num
-        
     )
     
     # checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
@@ -153,45 +209,110 @@ def main():
     # test_mrr = pre_trainer.evaluate('test', expectation=True)
     
     pre_trainer.train(args)
-    
-    
+
+
     logging.info('Finishing pre-training!')
 
-    print("loading RulE trainer......")
+    print("Loading best checkpoint from pre-training...")
 
-    # load rule embedding and KGE embedding
-
+    # Load rule embedding and KGE embedding
     checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
     RulE_model.load_state_dict(checkpoint['model'])
-    
-    
-    logging.info('Test the results of pre-training')
-    
+
+
+    logging.info('Testing results of pre-training')
+
     valid_mrr = pre_trainer.evaluate('valid', expectation=True)
     test_mrr = pre_trainer.evaluate('test', expectation=True)
 
-    # RulE_model.add_param()
+    # RulE-SSRL: 条件训练流程
+    if args.use_policy_network if hasattr(args, 'use_policy_network') else False:
+        # RulE-SSRL模式: 跳过grounding阶段，使用策略网络推理
+        logging.info('>>>>> RulE-SSRL: 跳过grounding阶段（使用策略网络）')
 
-    # checkpoint = torch.load(os.path.join(args.save_path, 'grounding.pt'))
-    # RulE_model.load_state_dict(checkpoint['model'])
+        # 可选的RL微调阶段
+        if args.enable_rl_finetuning if hasattr(args, 'enable_rl_finetuning') else False:
+            logging.info('>>>>> RulE-SSRL: 开始可选RL微调阶段')
+            logging.info('>>>>> 冻结KGE和Rule嵌入，只训练策略网络')
 
-    ground_trainer = GroundTrainer(
-        model=RulE_model,
-        args = args,
-        train_set=train_set,
-        valid_set=valid_set,
-        test_set=test_set,
-        test_kge_set = test_kge_set,
-        device=device,
-        num_worker=args.cpu_num
-    )
+            # 冻结实体、关系、规则嵌入
+            RulE_model.entity_embedding.weight.requires_grad = False
+            RulE_model.relation_embedding.weight.requires_grad = False
+            RulE_model.rule_emb.weight.requires_grad = False
 
-    # valid_mrr = ground_trainer.evaluate('valid', expectation=True)
-    # test_mrr = ground_trainer.evaluate('test', expectation=True)
-    
-    # args.g_batch_size = 32
-    
-    ground_trainer.train(args)
+            # 创建只优化策略网络的优化器
+            rl_optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, RulE_model.policy_network.parameters()),
+                lr=args.rl_finetuning_lr if hasattr(args, 'rl_finetuning_lr') else 0.0001
+            )
+
+            # RL微调训练循环
+            from data import QueryDataset, Iterator
+            from torch.utils.data import DataLoader
+            query_dataloader = DataLoader(
+                QueryDataset(graph.train_facts),
+                batch_size=args.policy_batch_size if hasattr(args, 'policy_batch_size') else 32,
+                shuffle=True,
+                num_workers=max(1, args.cpu_num // 2),
+                collate_fn=QueryDataset.collate_fn
+            )
+            rl_query_iterator = Iterator(query_dataloader)
+
+            RulE_model.train()
+            rl_steps = args.rl_finetuning_steps if hasattr(args, 'rl_finetuning_steps') else 10000
+            rl_log_steps = args.rl_log_steps if hasattr(args, 'rl_log_steps') else 100
+
+            logging.info('开始RL微调，共{}步'.format(rl_steps))
+
+            for step in range(1, rl_steps + 1):
+                rl_optimizer.zero_grad()
+
+                query_batch = next(rl_query_iterator)
+                if device.type == "cuda":
+                    query_batch = query_batch.cuda(device)
+
+                # 只计算策略损失
+                loss_policy = RulE_model.compute_policy_loss(query_batch)
+                loss_policy.backward()
+                rl_optimizer.step()
+
+                if step % rl_log_steps == 0:
+                    logging.info('RL微调步骤 {}/{}: policy_loss = {:.6f}'.format(
+                        step, rl_steps, loss_policy.item()))
+
+            logging.info('>>>>> RL微调阶段完成')
+
+            # 保存RL微调后的模型
+            checkpoint = {
+                'model': RulE_model.state_dict(),
+            }
+            torch.save(checkpoint, os.path.join(args.save_path, 'checkpoint_rl_finetuned'))
+            logging.info('RL微调模型已保存到: {}'.format(
+                os.path.join(args.save_path, 'checkpoint_rl_finetuned')))
+
+        logging.info('>>>>> 训练完成！模型使用策略网络进行推理。')
+    else:
+        # 原始RulE模式: 继续grounding阶段
+        logging.info('>>>>> 原始RulE: 开始grounding阶段')
+
+        if GroundTrainer is None:
+            logging.error('GroundTrainer未能导入，无法进行grounding训练！')
+            raise ImportError('GroundTrainer is required for original RulE mode')
+
+        ground_trainer = GroundTrainer(
+            model=RulE_model,
+            args=args,
+            train_set=train_set,
+            valid_set=valid_set,
+            test_set=test_set,
+            test_kge_set=test_kge_set,
+            device=device,
+            num_worker=args.cpu_num
+        )
+
+        ground_trainer.train(args)
+
+        logging.info('>>>>> Grounding阶段完成！')
     
     # return test_mrr
 

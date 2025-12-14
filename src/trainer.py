@@ -13,12 +13,23 @@ import matplotlib.pyplot as plt
 class PreTrainer(object):
 
     def __init__(self, graph, model, valid_set, test_set, ruleset, expectation, device, num_worker=0):
-        
-        
+        """
+        预训练器初始化
+
+        参数：
+            graph: 知识图谱
+            model: RulE模型（可能包含策略网络）
+            valid_set: 验证集
+            test_set: 测试集
+            ruleset: 规则数据集
+            expectation: 是否使用期望排名
+            device: 计算设备
+            num_worker: 数据加载worker数量
+        """
+
         self.num_worker = num_worker
         self.device = device
-      
-       
+
         if self.device.type == "cuda":
             model = model.cuda(self.device)
 
@@ -26,7 +37,7 @@ class PreTrainer(object):
         self.model = model
         self.valid_set = valid_set
         self.test_set = test_set
-        
+
         self.RuleSet = ruleset
         self.expectation = expectation
         
@@ -72,11 +83,29 @@ class PreTrainer(object):
 
 
         rules_dataloader = DataLoader(
-            self.RuleSet, 
-            batch_size=args.rule_batch_size, 
-            shuffle=True, 
+            self.RuleSet,
+            batch_size=args.rule_batch_size,
+            shuffle=True,
             num_workers=max(1, args.cpu_num//2),
             collate_fn=RuleDataset.collate_fn)
+
+        # RulE-SSRL: 如果模型包含策略网络，加载策略训练数据
+        # 策略训练是RulE-SSRL模型的核心组成部分（不是可选的）
+        if self.model.use_policy_network:
+            from data import QueryDataset
+            query_dataloader = DataLoader(
+                QueryDataset(self.graph.train_facts),
+                batch_size=args.policy_batch_size if hasattr(args, 'policy_batch_size') else 32,
+                shuffle=True,
+                num_workers=max(1, args.cpu_num // 2),
+                collate_fn=QueryDataset.collate_fn
+            )
+            self.query_iterator = Iterator(query_dataloader)
+            logging.info('RulE-SSRL模式: 策略网络已启用，使用QueryDataset，共{}个查询'.format(
+                len(self.graph.train_facts)))
+        else:
+            self.query_iterator = None
+            logging.info('原始RulE模式: 不使用策略网络')
 
         self.triplets_iterator = BidirectionalOneShotIterator(triplets_dataloader_head, triplets_dataloader_tail)
         self.rules_iterator = Iterator(rules_dataloader)
@@ -92,7 +121,8 @@ class PreTrainer(object):
 
         for step in range(0, args.max_steps + 1):
 
-            log = self.train_step( optimizer, self.triplets_iterator, self.rules_iterator, args)
+            log = self.train_step(optimizer, self.triplets_iterator, self.rules_iterator, args,
+                                 query_iterator=self.query_iterator)
             
             training_logs.append(log)
 
@@ -123,9 +153,12 @@ class PreTrainer(object):
                 # save_model(self.model,optimizer, args)
 
 
-    def train_step(self, optimizer, triplets_iterator, rules_iterator, args):
+    def train_step(self, optimizer, triplets_iterator, rules_iterator, args, query_iterator=None):
         '''
-        A single train step. Apply back-propation and return the loss
+        单步训练：应用反向传播并返回损失
+
+        参数：
+            query_iterator: 策略训练查询的迭代器（RulE-SSRL）
         '''
         
         # self.model.rule_emb.requires_grad = False
@@ -188,7 +221,29 @@ class PreTrainer(object):
         loss_fact = (positive_fact_loss + negative_fact_loss)/2
         loss_rule = (positive_rule_loss + negative_rule_loss)/2
 
-        loss = loss_rule + loss_fact
+        # RulE-SSRL: 如果模型包含策略网络，策略损失是必须的（不是可选的）
+        if self.model.use_policy_network:
+            if query_iterator is None:
+                raise RuntimeError('模型包含策略网络，但query_iterator为None！')
+
+            query_batch = next(query_iterator)
+            if self.device.type == "cuda":
+                query_batch = query_batch.cuda(self.device)
+
+            # 计算规则监督的策略损失（RulE-SSRL核心创新）
+            loss_policy = model.compute_policy_loss(query_batch)
+
+            # 组合损失：KGE + Rule + Policy
+            weight_policy = args.weight_policy if hasattr(args, 'weight_policy') else 0.5
+            loss = loss_fact + loss_rule + weight_policy * loss_policy
+
+            # 记录策略损失
+            policy_loss_value = loss_policy.item()
+        else:
+            # 原始RulE模式：只有KGE + Rule
+            loss = loss_fact + loss_rule
+            policy_loss_value = 0.0
+
         # loss = loss_fact
         # loss = loss_rule
 
@@ -212,11 +267,12 @@ class PreTrainer(object):
         optimizer.step()
 
         log = {
-            
+
             'positive_fact_loss': positive_fact_loss.item(),
             'negative_fact_loss': negative_fact_loss.item(),
             'positive_rule_loss': positive_rule_loss.item(),
             'negative_rule_loss': negative_rule_loss.item(),
+            'policy_loss': policy_loss_value,  # RulE-SSRL: 添加策略损失到日志
             'regularization': regularization.item(),
             'loss': loss.item()
         }

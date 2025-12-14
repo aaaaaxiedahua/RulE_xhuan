@@ -43,3 +43,13 @@ Please consider citing the following paper if you find our codes helpful. Thank 
 ```
 
 ``` -->
+
+  RulE-master/src/
+  ├── model.py          # RulE模型（entity/relation/rule嵌入 + RotatE + Grounding）
+  ├── trainer.py        # PreTrainer（预训练阶段）+ GroundTrainer（Grounding阶段）
+  ├── data.py           # 数据加载（KGETrainDataset, RuleDataset）
+  ├── layers.py         # 神经网络层（MLP, FuncToNodeSum）
+  ├── main.py           # 主入口
+  └── utils.py          # 工具函数
+
+python main.py --init ../config/umls_ssrl_config.json
