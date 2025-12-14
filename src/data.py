@@ -220,8 +220,16 @@ class RuleETestDataset(Dataset):
         return positive_sample, negative_sample, filter_bias, mode
 
 class KnowledgeGraph(object):
-    def __init__(self, data_path):
+    def __init__(self, data_path, max_num_actions=200):
+        """
+        初始化知识图谱
+
+        参数:
+            data_path: 数据路径
+            max_num_actions: 每个实体的最大动作数（用于策略网络，参考SSRL设计）
+        """
         self.data_path = data_path
+        self.max_num_actions = max_num_actions
 
         self.entity2id = dict()
         self.relation2id = dict()
@@ -242,6 +250,12 @@ class KnowledgeGraph(object):
 
         self.entity_size = len(self.entity2id)
         self.relation_size = len(self.relation2id)
+
+        # RulE-SSRL: 预计算动作空间数组（参考SSRL grapher设计）
+        # 用于策略网络的高效动作空间检索
+        self.ePAD = self.entity_size  # 实体padding索引
+        self.rPAD = self.relation_size * 2  # 关系padding索引
+        self.array_store = None  # 将在读取训练数据后初始化
         
         
         self.train_facts = list()
@@ -379,6 +393,11 @@ class KnowledgeGraph(object):
 
             self.relation2outdegree[r] = torch.LongTensor(self.relation2outdegree[r])
 
+        # RulE-SSRL: 构建预计算的动作空间数组（参考SSRL grapher设计）
+        print("Building action space array store...")
+        self._build_array_store()
+        print("Action space array store built!")
+
         print("Data loading | DONE!")
 
     def encode_hr(self, h, r):
@@ -445,6 +464,97 @@ class KnowledgeGraph(object):
             x = scatter(message, node_out, dim=0, dim_size=x.size(0))
 
         return x
+
+    def _build_array_store(self):
+        """
+        预计算动作空间数组（参考SSRL grapher.py设计）
+
+        构建一个形状为 [entity_size, max_num_actions, 2] 的numpy数组，
+        其中每个实体存储其所有可用动作：
+        - array_store[entity, action_idx, 0] = 目标实体
+        - array_store[entity, action_idx, 1] = 关系
+        - 不足max_num_actions的部分用PAD填充
+        - 超过max_num_actions的部分被截断
+        """
+        # 初始化数组，用PAD填充
+        self.array_store = np.ones((self.entity_size, self.max_num_actions, 2), dtype=np.int32)
+        self.array_store[:, :, 0] *= self.ePAD
+        self.array_store[:, :, 1] *= self.rPAD
+
+        # 首先为每个实体添加NO_OP动作（自环）
+        for entity in range(self.entity_size):
+            self.array_store[entity, 0, 0] = entity
+            self.array_store[entity, 0, 1] = self.rPAD  # NO_OP用rPAD表示
+
+        # 然后从hr2o字典填充实际的动作
+        action_counts = [1] * self.entity_size  # 每个实体已经有1个NO_OP动作
+
+        for hr_index, tails in self.hr2o.items():
+            h, r = self.decode_hr(hr_index)
+
+            for t in tails:
+                if action_counts[h] >= self.max_num_actions:
+                    break  # 达到最大动作数，截断
+
+                self.array_store[h, action_counts[h], 0] = t
+                self.array_store[h, action_counts[h], 1] = r
+                action_counts[h] += 1
+
+    def get_num_actions(self, entity):
+        """
+        获取实体的有效动作数量（不包括PAD）
+
+        参数:
+            entity: 实体ID
+
+        返回:
+            动作数量
+        """
+        return np.where(self.array_store[entity, :, 0] != self.ePAD)[0].shape[0]
+
+    def return_next_actions(self, current_entities, start_entities, query_relations,
+                           answers, all_correct_answers, last_step, num_rollouts):
+        """
+        返回批量实体的下一步可用动作（参考SSRL environment.py设计）
+
+        参数:
+            current_entities: 当前实体数组 [batch_size * num_rollouts]
+            start_entities: 起始实体数组（用于避免查询边）
+            query_relations: 查询关系数组
+            answers: 目标答案数组
+            all_correct_answers: 所有正确答案列表（用于最后一步过滤）
+            last_step: 是否是最后一步
+            num_rollouts: 每个查询的rollout数量
+
+        返回:
+            ret: [batch_size * num_rollouts, max_num_actions, 2] 动作数组
+                 ret[:, :, 0] = 目标实体
+                 ret[:, :, 1] = 关系
+        """
+        ret = self.array_store[current_entities, :, :].copy()
+
+        # 对于每个实体，检查是否需要移除查询边或过滤答案
+        for i in range(current_entities.shape[0]):
+            # 如果仍在起点，移除查询边（避免直接走到答案）
+            if current_entities[i] == start_entities[i]:
+                relations = ret[i, :, 1]
+                entities = ret[i, :, 0]
+                mask = np.logical_and(relations == query_relations[i], entities == answers[i])
+                ret[i, :, 0][mask] = self.ePAD
+                ret[i, :, 1][mask] = self.rPAD
+
+            # 如果是最后一步，过滤掉其他正确答案（只保留当前目标答案）
+            if last_step:
+                entities = ret[i, :, 0]
+                relations = ret[i, :, 1]
+
+                correct_e2 = answers[i]
+                for j in range(entities.shape[0]):
+                    if entities[j] in all_correct_answers[int(i / num_rollouts)] and entities[j] != correct_e2:
+                        entities[j] = self.ePAD
+                        relations[j] = self.rPAD
+
+        return ret
 
 class TrainDataset(Dataset):
     def __init__(self, graph, batch_size):

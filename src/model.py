@@ -105,12 +105,13 @@ class RulE(torch.nn.Module):
         self.use_policy_network = use_policy_network
         if use_policy_network:
             from policy_network import RuleGuidedPolicyNetwork
-            logging.info('初始化RulE-SSRL策略网络')
+            logging.info('初始化RulE-SSRL策略网络（向量化批处理版本）')
             self.policy_network = RuleGuidedPolicyNetwork(
-                entity_dim=hidden_dim * 2,      # RotatE实体维度
-                relation_dim=hidden_dim,         # RotatE关系维度
-                rule_dim=hidden_dim,             # 规则嵌入维度
-                hidden_dim=policy_hidden_dim,    # 策略隐藏维度
+                entity_dim=hidden_dim * 2,       # RotatE实体维度
+                relation_dim=hidden_dim,          # RotatE关系维度
+                rule_dim=hidden_dim,              # 规则嵌入维度
+                hidden_dim=policy_hidden_dim,     # 策略隐藏维度
+                max_num_actions=graph.max_num_actions,  # 使用KG的max_num_actions
                 num_layers=1,
                 dropout=0.1
             )

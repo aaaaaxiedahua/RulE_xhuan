@@ -93,6 +93,8 @@ def parse_args(args=None):
     # ========== RulE-SSRL: 策略网络参数 ==========
     parser.add_argument('--use_policy_network', action='store_true', default=False,
                        help='使用策略网络进行RulE-SSRL模式')
+    parser.add_argument('--max_num_actions', default=200, type=int,
+                       help='每个实体的最大动作数（策略网络，参考SSRL设计）')
     parser.add_argument('--policy_hidden_dim', default=256, type=int,
                        help='策略网络隐藏层维度')
     parser.add_argument('--policy_batch_size', default=32, type=int,
@@ -141,7 +143,11 @@ def main():
 
 
     # 知识图谱和规则集（两种模式都需要）
-    graph = KnowledgeGraph(args.data_path)
+    # RulE-SSRL: 传入max_num_actions用于预计算动作空间
+    graph = KnowledgeGraph(
+        args.data_path,
+        max_num_actions=args.max_num_actions if hasattr(args, 'max_num_actions') else 200
+    )
     ruleset = RuleDataset(graph.relation_size, args.rule_file, args.rule_negative_size)
 
     # RulE-SSRL: grounding数据集（仅原始RulE模式需要）

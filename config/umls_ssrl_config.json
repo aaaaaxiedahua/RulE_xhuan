@@ -47,6 +47,7 @@
 
     "_comment_ssrl": "========== RulE-SSRL Policy Network Configuration ==========",
     "use_policy_network": true,
+    "max_num_actions": 200,
     "policy_hidden_dim": 128,
     "policy_batch_size": 16,
     "weight_policy": 0.3,
