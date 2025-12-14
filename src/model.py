@@ -594,6 +594,7 @@ class RulE(torch.nn.Module):
         参数：
             entity_id: 实体ID (int 或 Tensor)
                       支持标量或任意形状的tensor
+                      PAD ID = entity_size
 
         返回：
             emb: [entity_dim] 或 [*, entity_dim] 张量
@@ -608,7 +609,20 @@ class RulE(torch.nn.Module):
         if entity_id.device != self.device:
             entity_id = entity_id.to(self.device)
 
-        return self.entity_embedding(entity_id)
+        # PAD处理：ePAD = entity_size（参考SSRL设计）
+        ePAD = self.num_entities
+        is_pad = entity_id >= ePAD
+
+        # 将PAD索引临时替换为0（避免越界），后面会用零向量覆盖
+        safe_entity_id = torch.where(is_pad, torch.zeros_like(entity_id), entity_id)
+
+        # 获取embedding
+        emb = self.entity_embedding(safe_entity_id)
+
+        # PAD位置用零向量（参考SSRL中PAD的处理）
+        emb = torch.where(is_pad.unsqueeze(-1).expand_as(emb), torch.zeros_like(emb), emb)
+
+        return emb
 
     def get_relation_embedding_by_id(self, relation_id):
         """
@@ -618,6 +632,7 @@ class RulE(torch.nn.Module):
             relation_id: 关系ID (int 或 Tensor)
                         支持标量或任意形状的tensor
                         逆关系ID >= num_relations
+                        PAD ID = num_relations * 2
 
         返回：
             emb: [relation_dim] 或 [*, relation_dim] 张量
@@ -632,17 +647,30 @@ class RulE(torch.nn.Module):
         if relation_id.device != self.device:
             relation_id = relation_id.to(self.device)
 
+        # 记录原始形状
+        original_shape = relation_id.shape
+
+        # PAD处理：rPAD = num_relations * 2（参考SSRL设计）
+        rPAD = self.num_relations * 2
+        is_pad = relation_id >= rPAD
+
+        # 将PAD索引临时替换为0（避免越界），后面会用零向量覆盖
+        safe_relation_id = torch.where(is_pad, torch.zeros_like(relation_id), relation_id)
+
         # 向量化处理逆关系（参考SSRL设计）
-        # 逆关系：ID >= num_relations，需要对embedding取负
-        is_inverse = relation_id >= self.num_relations
+        # 逆关系：num_relations <= ID < num_relations*2，需要对embedding取负
+        is_inverse = (safe_relation_id >= self.num_relations) & (~is_pad)
         actual_rel_id = torch.where(is_inverse,
-                                     relation_id % self.num_relations,
-                                     relation_id)
+                                     safe_relation_id % self.num_relations,
+                                     safe_relation_id)
 
         # 获取embedding
         emb = self.relation_embedding(actual_rel_id)
 
         # 对逆关系取负
         emb = torch.where(is_inverse.unsqueeze(-1).expand_as(emb), -emb, emb)
+
+        # PAD位置用零向量（参考SSRL中PAD的处理）
+        emb = torch.where(is_pad.unsqueeze(-1).expand_as(emb), torch.zeros_like(emb), emb)
 
         return emb
