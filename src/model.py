@@ -592,31 +592,57 @@ class RulE(torch.nn.Module):
         根据ID获取实体嵌入（供策略网络使用）
 
         参数：
-            entity_id: 实体ID (int)
+            entity_id: 实体ID (int 或 Tensor)
+                      支持标量或任意形状的tensor
 
         返回：
-            emb: [entity_dim]张量
+            emb: [entity_dim] 或 [*, entity_dim] 张量
         """
-        return self.entity_embedding(torch.tensor([entity_id], device=self.device))
+        # 统一处理标量和tensor输入
+        if isinstance(entity_id, int):
+            entity_id = torch.tensor([entity_id], device=self.device)
+        elif not isinstance(entity_id, torch.Tensor):
+            entity_id = torch.tensor(entity_id, device=self.device)
+
+        # 如果不在正确设备上，移动到模型设备
+        if entity_id.device != self.device:
+            entity_id = entity_id.to(self.device)
+
+        return self.entity_embedding(entity_id)
 
     def get_relation_embedding_by_id(self, relation_id):
         """
-        根据ID获取关系嵌入（供策略网络使用）
+        根据ID获取关系嵌入（供策略网络使用，参考SSRL的embedding_lookup）
 
         参数：
-            relation_id: 关系ID (int)
+            relation_id: 关系ID (int 或 Tensor)
+                        支持标量或任意形状的tensor
+                        逆关系ID >= num_relations
 
         返回：
-            emb: [relation_dim]张量
+            emb: [relation_dim] 或 [*, relation_dim] 张量
         """
-        # 处理逆关系
-        if relation_id >= self.num_relations:
-            # 逆关系
-            actual_rel_id = relation_id % self.num_relations
-            emb = self.relation_embedding(torch.tensor([actual_rel_id], device=self.device))
-            # 逆关系取负
-            emb = -emb
-        else:
-            emb = self.relation_embedding(torch.tensor([relation_id], device=self.device))
+        # 统一处理标量和tensor输入
+        if isinstance(relation_id, int):
+            relation_id = torch.tensor([relation_id], device=self.device)
+        elif not isinstance(relation_id, torch.Tensor):
+            relation_id = torch.tensor(relation_id, device=self.device)
+
+        # 如果不在正确设备上，移动到模型设备
+        if relation_id.device != self.device:
+            relation_id = relation_id.to(self.device)
+
+        # 向量化处理逆关系（参考SSRL设计）
+        # 逆关系：ID >= num_relations，需要对embedding取负
+        is_inverse = relation_id >= self.num_relations
+        actual_rel_id = torch.where(is_inverse,
+                                     relation_id % self.num_relations,
+                                     relation_id)
+
+        # 获取embedding
+        emb = self.relation_embedding(actual_rel_id)
+
+        # 对逆关系取负
+        emb = torch.where(is_inverse.unsqueeze(-1).expand_as(emb), -emb, emb)
 
         return emb
