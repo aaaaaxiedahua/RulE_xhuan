@@ -296,7 +296,30 @@ def main():
             logging.info('RL微调模型已保存到: {}'.format(
                 os.path.join(args.save_path, 'checkpoint_rl_finetuned')))
 
-        logging.info('>>>>> 训练完成！模型使用策略网络进行推理。')
+        # RulE-SSRL: 策略网络推理测试
+        logging.info('>>>>> RulE-SSRL: 开始策略网络推理测试')
+
+        if GroundTrainer is not None:
+            # 创建GroundTrainer用于评估（它的evaluate会调用model.forward -> forward_policy）
+            ground_trainer = GroundTrainer(
+                model=RulE_model,
+                args=args,
+                train_set=None,  # RulE-SSRL不需要train_set
+                valid_set=valid_set,
+                test_set=test_set,
+                test_kge_set=None,
+                device=device,
+                num_worker=args.cpu_num
+            )
+
+            logging.info('>>>>> 策略网络推理 - 验证集')
+            ground_trainer.evaluate('valid', alpha=args.alpha, expectation=True)
+            logging.info('>>>>> 策略网络推理 - 测试集')
+            ground_trainer.evaluate('test', alpha=args.alpha, expectation=True)
+        else:
+            logging.warning('GroundTrainer未导入，无法进行策略网络推理测试')
+
+        logging.info('>>>>> 训练完成！')
     else:
         # 原始RulE模式: 继续grounding阶段
         logging.info('>>>>> 原始RulE: 开始grounding阶段')
