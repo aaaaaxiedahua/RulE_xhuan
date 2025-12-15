@@ -107,12 +107,16 @@ def parse_args(args=None):
                        help='策略网络学习率')
     parser.add_argument('--policy_log_steps', default=100, type=int,
                        help='策略网络训练日志频率')
+    parser.add_argument('--policy_num_rollouts', default=1, type=int,
+                       help='策略网络训练时每个查询采样的路径数')
 
     # Phase 3: 推理参数
     parser.add_argument('--num_policy_samples', default=10, type=int,
                        help='推理时K次采样数量')
     parser.add_argument('--max_path_length', default=3, type=int,
                        help='策略探索的最大路径长度')
+    parser.add_argument('--use_kge_fusion', action='store_true', default=True,
+                       help='推理时是否融合KGE评分')
 
     return parser.parse_args(args)
 

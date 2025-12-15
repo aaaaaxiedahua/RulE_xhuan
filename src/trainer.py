@@ -872,8 +872,10 @@ class PolicyTrainer(object):
         # Step 4: 训练参数
         policy_num_iters = args.policy_num_iters if hasattr(args, 'policy_num_iters') else 20
         policy_log_steps = args.policy_log_steps if hasattr(args, 'policy_log_steps') else 100
+        policy_num_rollouts = args.policy_num_rollouts if hasattr(args, 'policy_num_rollouts') else 1
 
         logging.info('训练轮数: {}'.format(policy_num_iters))
+        logging.info('采样路径数: {}'.format(policy_num_rollouts))
 
         # Step 5: 训练循环
         best_mrr = 0.0
@@ -893,7 +895,7 @@ class PolicyTrainer(object):
                 optimizer.zero_grad()
 
                 # 计算策略损失
-                loss = self.model.compute_policy_loss(query_batch)
+                loss = self.model.compute_policy_loss(query_batch, num_rollouts=policy_num_rollouts)
 
                 loss.backward()
                 optimizer.step()
@@ -1044,23 +1046,30 @@ class PolicyTrainer(object):
 
         参数：
             args: 配置参数，需要包含：
+                - use_kge_fusion: 是否融合KGE评分
                 - alpha: KGE评分权重
                 - beta: 策略评分权重
                 - num_policy_samples: K采样次数
         """
-        logging.info('>>>>> Phase 3: 测试 (KGE + 策略网络 融合)')
+        logging.info('>>>>> Phase 3: 测试')
 
+        use_kge_fusion = args.use_kge_fusion if hasattr(args, 'use_kge_fusion') else True
         alpha = args.alpha if hasattr(args, 'alpha') else 0.5
         beta = args.beta if hasattr(args, 'beta') else 0.5
-        logging.info('融合权重: alpha(KGE)={}, beta(Policy)={}'.format(alpha, beta))
 
-        # 验证集融合测试
+        if use_kge_fusion:
+            logging.info('模式: KGE + 策略网络 融合')
+            logging.info('融合权重: alpha(KGE)={}, beta(Policy)={}'.format(alpha, beta))
+        else:
+            logging.info('模式: 纯策略网络推理 (不使用KGE)')
+
+        # 验证集测试
         logging.info('--- 验证集 ---')
-        valid_mrr = self.evaluate('valid', args, use_fusion=True)
+        valid_mrr = self.evaluate('valid', args, use_fusion=use_kge_fusion)
 
-        # 测试集融合测试
+        # 测试集测试
         logging.info('--- 测试集 ---')
-        test_mrr = self.evaluate('test', args, use_fusion=True)
+        test_mrr = self.evaluate('test', args, use_fusion=use_kge_fusion)
 
         return valid_mrr, test_mrr
 

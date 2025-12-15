@@ -542,7 +542,7 @@ class RulE(torch.nn.Module):
 
         return scores, mask
 
-    def compute_policy_loss(self, query_batch):
+    def compute_policy_loss(self, query_batch, num_rollouts=1):
         """
         计算规则监督的策略损失
 
@@ -551,6 +551,7 @@ class RulE(torch.nn.Module):
 
         参数：
             query_batch: [batch_size, 3] (h, r, t)三元组张量
+            num_rollouts: 每个查询采样的路径数量
 
         返回：
             loss: 标量张量
@@ -562,7 +563,8 @@ class RulE(torch.nn.Module):
             query_batch=query_batch,
             graph=self.graph,
             model=self,
-            device=self.device
+            device=self.device,
+            num_rollouts=num_rollouts
         )
 
     # ========== 策略网络辅助方法 ==========
