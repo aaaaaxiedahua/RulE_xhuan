@@ -57,6 +57,6 @@
     "_comment_phase3": "========== Phase 3: 测试配置 (KGE + Policy 融合) ==========",
     "use_kge_fusion": true,
     "num_policy_samples": 10,
-    "alpha": 0.5,
-    "beta": 0.5
+    "alpha": 1,
+    "beta": 2
 }
