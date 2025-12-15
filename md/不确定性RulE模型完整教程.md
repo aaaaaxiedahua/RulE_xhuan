@@ -13,6 +13,15 @@
 5. [参数配置指南](#5-参数配置指南)
 6. [完整示例](#6-完整示例)
 7. [实现细节](#7-实现细节)
+   - 7.0 [文件结构](#70-文件结构)
+   - 7.1 [网络初始化](#71-网络初始化modelpy162-166)
+   - 7.2 [重参数化采样](#72-重参数化采样modelpy189-208)
+   - 7.3 [不确定性损失](#73-不确定性损失trainerpy38-82)
+   - 7.4 [预训练步骤](#74-预训练步骤trainerpy176-296)
+   - 7.5 [Grounding阶段](#75-grounding阶段的规则置信度使用trainerpy459-495)
+   - 7.6 [前向推理](#76-前向推理中的置信度加权modelpy421-498)
+   - 7.7 [支持数预计算工具](#77-支持数预计算工具uncertaintypy)
+   - 7.8 [完整运行指南](#78-完整运行指南)
 8. [常见问题](#8-常见问题)
 
 ---
@@ -45,58 +54,110 @@
 ### 1.2 模型架构图
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   不确定性RulE架构                            │
-├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  输入: 规则 [rule_id, r_head, r_body_1, r_body_2, ...]      │
-│                           ↓                                   │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  规则嵌入模块 (继承自原始RulE)                       │    │
-│  │                                                       │    │
-│  │  R_i = rule_emb[rule_id]           [rule_dim]       │    │
-│  │  r_body_sum = Σ relation_emb[r_j]  [hidden_dim]     │    │
-│  │  r_head_emb = relation_emb[r_head] [hidden_dim]     │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                           ↓                                   │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  【新增】不确定性建模模块                            │    │
-│  │                                                       │    │
-│  │  features = concat([R_i, r_body_sum])                │    │
-│  │            [rule_dim + hidden_dim]                   │    │
-│  │                                                       │    │
-│  │         ┌──────────────┐     ┌──────────────┐       │    │
-│  │         │  μ_network   │     │logvar_network│       │    │
-│  │         │  3层MLP      │     │  3层MLP      │       │    │
-│  │         └──────────────┘     └──────────────┘       │    │
-│  │               ↓                      ↓               │    │
-│  │             μ_i                   log(σ²_i)          │    │
-│  │           [1]标量                [1]标量            │    │
-│  │                                                       │    │
-│  │  σ_i = exp(0.5 × log(σ²_i))                         │    │
-│  │                                                       │    │
-│  │  规则置信度分布: w_i ~ N(μ_i, σ_i²)                 │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                           ↓                                   │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  重参数化采样 (训练时)                               │    │
-│  │                                                       │    │
-│  │  for k in 1..num_samples:                            │    │
-│  │      ε_k ~ N(0, 1)                                   │    │
-│  │      w_k = μ_i + σ_i × ε_k                           │    │
-│  │                                                       │    │
-│  │  w_i = mean([w_1, w_2, ..., w_num_samples])         │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                           ↓                                   │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  损失函数                                             │    │
-│  │                                                       │    │
-│  │  loss = loss_kge                                     │    │
-│  │       + λ_rule × loss_rule(w_i)                      │    │
-│  │       + λ_uncertainty × (β_kl×loss_kl + β_σ×loss_σ)  │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                                                               │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                    不确定性RulE完整架构                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  ╔═══════════════════════════════════════════════════════════════╗  │
+│  ║  【预处理阶段】支持数预计算 (uncertainty.py)                   ║  │
+│  ║                                                                 ║  │
+│  ║  输入: 知识图谱KG + 规则集合Rules                              ║  │
+│  ║                        ↓                                        ║  │
+│  ║  for each rule_i:                                              ║  │
+│  ║      support_count_i = Σ_h grounding(h, rule_body).sum()       ║  │
+│  ║                        ↓                                        ║  │
+│  ║  输出: support_counts.pt  [num_rules]                          ║  │
+│  ╚═══════════════════════════════════════════════════════════════╝  │
+│                              ↓                                        │
+│                      (保存到数据集目录)                               │
+│                              ↓                                        │
+│  ╔═══════════════════════════════════════════════════════════════╗  │
+│  ║  【预训练阶段】(trainer.py: PreTrainer)                        ║  │
+│  ╠═══════════════════════════════════════════════════════════════╣  │
+│  ║                                                                 ║  │
+│  ║  输入: 规则 [rule_id, r_head, r_body_1, r_body_2, ...]        ║  │
+│  ║                           ↓                                     ║  │
+│  ║  ┌───────────────────────────────────────────────────────┐    ║  │
+│  ║  │  规则嵌入模块 (继承自原始RulE)                         │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  R_i = rule_emb[rule_id]           [rule_dim]         │    ║  │
+│  ║  │  r_body_sum = Σ relation_emb[r_j]  [hidden_dim]       │    ║  │
+│  ║  │  r_head_emb = relation_emb[r_head] [hidden_dim]       │    ║  │
+│  ║  └───────────────────────────────────────────────────────┘    ║  │
+│  ║                           ↓                                     ║  │
+│  ║  ┌───────────────────────────────────────────────────────┐    ║  │
+│  ║  │  【新增】不确定性建模模块                              │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  features = concat([R_i, r_body_sum])                  │    ║  │
+│  ║  │            [rule_dim + hidden_dim]                     │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │         ┌──────────────┐     ┌──────────────┐         │    ║  │
+│  ║  │         │  μ_network   │     │logvar_network│         │    ║  │
+│  ║  │         │  3层MLP      │     │  3层MLP      │         │    ║  │
+│  ║  │         └──────────────┘     └──────────────┘         │    ║  │
+│  ║  │               ↓                      ↓                 │    ║  │
+│  ║  │             μ_i                   log(σ²_i)            │    ║  │
+│  ║  │           [1]标量                [1]标量              │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  σ_i = exp(0.5 × log(σ²_i))                           │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  规则置信度分布: w_i ~ N(μ_i, σ_i²)                   │    ║  │
+│  ║  └───────────────────────────────────────────────────────┘    ║  │
+│  ║                           ↓                                     ║  │
+│  ║  ┌───────────────────────────────────────────────────────┐    ║  │
+│  ║  │  重参数化采样 (训练时)                                 │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  for k in 1..num_samples:                              │    ║  │
+│  ║  │      ε_k ~ N(0, 1)                                     │    ║  │
+│  ║  │      w_k = μ_i + σ_i × ε_k                             │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  w_i = mean([w_1, w_2, ..., w_num_samples])           │    ║  │
+│  ║  └───────────────────────────────────────────────────────┘    ║  │
+│  ║                           ↓                                     ║  │
+│  ║  ┌───────────────────────────────────────────────────────┐    ║  │
+│  ║  │  损失函数                                               │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  loss = loss_kge                    ← 三元组损失        │    ║  │
+│  ║  │       + λ_rule × loss_rule(w_i)     ← 规则损失(加权)   │    ║  │
+│  ║  │       + λ_uncertainty × L_uncertainty                  │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  其中 L_uncertainty = β_kl × L_kl + β_σ × L_σ         │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  L_kl = 0.5×Σ(μ_i² + σ_i² - log(σ_i²) - 1)            │    ║  │
+│  ║  │                                                         │    ║  │
+│  ║  │  L_σ = Σ(σ_i - σ_target_i)²                           │    ║  │
+│  ║  │        ↑                                                │    ║  │
+│  ║  │  σ_target_i = λ_0 / (1 + log(support_count_i + 1))    │    ║  │
+│  ║  │              ════════════════════════════════════      │    ║  │
+│  ║  │              来自预计算的support_counts.pt             │    ║  │
+│  ║  └───────────────────────────────────────────────────────┘    ║  │
+│  ╚═══════════════════════════════════════════════════════════════╝  │
+│                              ↓                                        │
+│                    保存checkpoint (含μ/σ网络)                        │
+│                              ↓                                        │
+│  ╔═══════════════════════════════════════════════════════════════╗  │
+│  ║  【Grounding阶段】(trainer.py: GroundTrainer)                  ║  │
+│  ╠═══════════════════════════════════════════════════════════════╣  │
+│  ║                                                                 ║  │
+│  ║  冻结: entity_emb, relation_emb, rule_emb, μ_network, logvar  ║  │
+│  ║                              ↓                                  ║  │
+│  ║  预计算: rule_mu = μ_network(features)  [num_rules, 1]        ║  │
+│  ║                              ↓                                  ║  │
+│  ║  训练: mlp_feature, score_model (使用rule_mu作为权重)         ║  │
+│  ╚═══════════════════════════════════════════════════════════════╝  │
+│                                                                       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**关键数据流**:
+```
+support_counts.pt ──────────────────────────────────┐
+        (预计算)                                     ↓
+                                            σ_target_i 计算
+                                                    ↓
+规则特征 → μ_network → μ_i ──┬──→ w_i (采样) → 规则损失
+         → logvar   → σ_i ──┼──→ L_kl (KL散度)
+                            └──→ L_σ (方差匹配) ← σ_target_i
 ```
 
 ---
@@ -621,16 +682,28 @@ L_σ = Σ_{i=1}^{num_rules} (σ_i - σ_target_i)²
 | `negative_sample_size` | N | 256-512 | 大数据集用512 | 负样本数 |
 | `adversarial_temperature` | α | 0.5 | 固定 | 对抗温度 |
 
-#### 5.1.2 不确定性新增参数
+#### 5.1.2 不确定性新增参数（main.py:89-93）
 
-| 参数名 | 符号 | 典型值 | 调优范围 | 说明 |
+以下是 `main.py` 中定义的不确定性相关参数及其默认值：
+
+| 参数名 | 符号 | 默认值 | 调优范围 | 说明 |
 |--------|------|--------|----------|------|
 | **`num_samples`** | K | **5** | 3-10 | 训练时采样次数 |
-| **`lambda_uncertainty`** | λ_uncertainty | **0.01** | 0.001-0.1 | 不确定性损失权重 |
+| **`lambda_uncertainty`** | λ_uncertainty | **0.01** | 0.001-0.1 | 不确定性损失总体权重 |
 | **`beta_kl`** | β_kl | **0.001** | 0.0001-0.01 | KL散度权重 |
-| **`beta_sigma`** | β_σ | **0.1** | 0.01-1.0 | 方差匹配权重 |
+| **`beta_sigma`** | β_σ | **0.01** | 0.001-0.1 | 方差匹配权重 |
 | **`lambda_0`** | λ_0 | **1.0** | 0.5-2.0 | 支持数依赖系数 |
 | `mlp_hidden_dims` | - | [256, 128] | 固定 | MLP隐藏层维度 |
+
+**命令行参数定义** (main.py:89-93)：
+```python
+# 不确定性建模超参数
+parser.add_argument('--num_samples', default=5, type=int, help='重参数化采样次数')
+parser.add_argument('--beta_kl', default=0.001, type=float, help='KL散度损失权重')
+parser.add_argument('--beta_sigma', default=0.01, type=float, help='方差匹配损失权重')
+parser.add_argument('--lambda_0', default=1.0, type=float, help='方差目标计算基础参数')
+parser.add_argument('--lambda_uncertainty', default=0.01, type=float, help='不确定性损失总体权重')
+```
 
 ### 5.2 数据集特定配置
 
@@ -652,7 +725,7 @@ L_σ = Σ_{i=1}^{num_rules} (σ_i - σ_target_i)²
   "num_samples": 5,
   "lambda_uncertainty": 0.01,
   "beta_kl": 0.001,
-  "beta_sigma": 0.1,
+  "beta_sigma": 0.01,
   "lambda_0": 1.0,
 
   "mlp_rule_dim": 100,
@@ -681,7 +754,7 @@ L_σ = Σ_{i=1}^{num_rules} (σ_i - σ_target_i)²
   "num_samples": 3,
   "lambda_uncertainty": 0.005,
   "beta_kl": 0.0005,
-  "beta_sigma": 0.05,
+  "beta_sigma": 0.005,
   "lambda_0": 1.0,
 
   "mlp_rule_dim": 100,
@@ -1173,197 +1246,457 @@ Rule 2:
 
 ## 7. 实现细节
 
-### 7.1 网络初始化
+本节基于实际代码实现（`src/model.py`, `src/trainer.py`, `src/uncertainty.py`）进行详细说明。
 
-```python
-def init_networks(rule_dim, hidden_dim):
-    """
-    初始化不确定性网络
-    """
-    # 输入维度
-    input_dim = rule_dim + hidden_dim
+### 7.0 文件结构
 
-    # μ网络
-    mu_network = nn.Sequential(
-        nn.Linear(input_dim, 256),
-        nn.ReLU(),
-        nn.Linear(256, 128),
-        nn.ReLU(),
-        nn.Linear(128, 1)
-    )
-
-    # logvar网络
-    logvar_network = nn.Sequential(
-        nn.Linear(input_dim, 256),
-        nn.ReLU(),
-        nn.Linear(256, 128),
-        nn.ReLU(),
-        nn.Linear(128, 1)
-    )
-
-    # Kaiming初始化
-    for net in [mu_network, logvar_network]:
-        for layer in net:
-            if isinstance(layer, nn.Linear):
-                nn.init.kaiming_uniform_(layer.weight, a=math.sqrt(5), mode='fan_in')
-                nn.init.zeros_(layer.bias)
-
-    return mu_network, logvar_network
+```
+src/
+├── model.py          # RulE模型，包含不确定性建模网络
+├── trainer.py        # PreTrainer和GroundTrainer，包含不确定性损失计算
+├── uncertainty.py    # 支持数预计算工具
+├── layers.py         # MLP和FuncToNodeSum层
+├── data.py           # 数据加载
+├── main.py           # 主入口，包含不确定性相关参数
+└── utils.py          # 工具函数
 ```
 
-### 7.2 重参数化采样
+### 7.1 网络初始化（model.py:162-166）
+
+在 `RulE.set_rules()` 方法中初始化不确定性网络：
 
 ```python
-def reparameterize_sample(mu, logvar, num_samples=5):
+# 实际代码 (model.py:162-166)
+def set_rules(self, input):
+    # ... 规则处理代码 ...
+
+    # 不确定性建模网络（输入为 [R_i, r_body_sum]，输出标量 μ_i / logσ_i²）
+    input_dim = self.rule_dim + self.hidden_dim
+    self.mu_network = MLP(input_dim, [256, 128, 1])      # 3层MLP
+    self.logvar_network = MLP(input_dim, [256, 128, 1])  # 3层MLP
+
+    # 加载预计算的support_counts
+    support_count_path = os.path.join(self.graph.data_path, 'support_counts.pt')
+    if os.path.exists(support_count_path):
+        self.support_counts = torch.load(support_count_path)
+        logging.info(f'Loaded support_counts from {support_count_path}')
+    else:
+        logging.warning('support_counts.pt not found, using uniform counts')
+        self.support_counts = torch.ones(self.num_rules)
+```
+
+**MLP 结构** (layers.py:7-49)：标准的多层感知机，使用 ReLU 激活函数，最后一层无激活。
+
+### 7.2 重参数化采样（model.py:189-208）
+
+```python
+# 实际代码 (model.py:189-208)
+def reparameterize_sample(self, mu, logvar):
     """
-    重参数化采样
+    重参数化技巧: w = μ + σ * ε, 其中 ε ~ N(0,1)
 
     Args:
-        mu: [batch_size, 1] 均值
-        logvar: [batch_size, 1] 对数方差
-        num_samples: 采样次数
+        mu: [num_rules, 1]
+        logvar: [num_rules, 1]
 
     Returns:
-        w: [batch_size, 1] 采样平均值
+        w_avg: 平均后的采样权重 [num_rules, 1]
+        std: 标准差 [num_rules, 1]
     """
-    # 计算标准差
-    std = torch.exp(0.5 * logvar)  # σ = exp(0.5 × log(σ²))
-
-    # 多次采样
+    std = torch.exp(0.5 * logvar)
     samples = []
-    for _ in range(num_samples):
-        # 从标准正态分布采样
+    for _ in range(self.num_samples):
         eps = torch.randn_like(mu)
-
-        # 重参数化: w = μ + σ × ε
         w = mu + std * eps
         samples.append(w)
-
-    # 平均
     w_avg = torch.stack(samples, dim=0).mean(dim=0)
-
-    return w_avg
+    return w_avg, std
 ```
 
-### 7.3 不确定性损失
+### 7.2.1 获取不确定性特征（model.py:210-242）
 
 ```python
-def compute_uncertainty_loss(mu, logvar, support_counts,
-                             beta_kl=0.001, beta_sigma=0.1, lambda_0=1.0):
+# 实际代码 (model.py:210-242)
+def get_uncertainty_features(self, device=None):
     """
-    计算不确定性损失
+    构造不确定性建模使用的规则特征:
+        features_i = concat([R_i, r_body_sum_i])
+    其中:
+        R_i 为规则嵌入 rule_emb[i]
+        r_body_sum_i 为规则体关系嵌入之和
+    """
+    if device is None:
+        device = self.entity_embedding.weight.device
 
-    Args:
-        mu: [num_rules, 1] 均值
-        logvar: [num_rules, 1] 对数方差
-        support_counts: [num_rules] 支持数
-        beta_kl: KL散度权重
-        beta_sigma: 方差匹配权重
-        lambda_0: 支持数系数
+    # 规则嵌入 R_i
+    rule_ids = torch.arange(self.num_rules, device=device)
+    R_i = self.rule_emb(rule_ids)  # [num_rules, rule_dim]
+
+    # 规则体关系 id 与 mask
+    rule_features = self.rule_features.to(device)  # [num_rules, 2 + max_len]
+    rule_masks = self.rule_masks.to(device)        # [num_rules, max_len]
+
+    body = rule_features[:, 2:]                    # [num_rules, max_len]
+    mask = rule_masks                              # bool
+
+    relations_flag = torch.pow(-1, body // self.num_relations).unsqueeze(-1)
+    inputs_com = body % self.num_relations
+    inputs_com = torch.where(body == self.num_relations * 2, self.padding_index, inputs_com)
+
+    embedding = self.relation_embedding(inputs_com) * relations_flag  # [num_rules, max_len, hidden_dim]
+    cal_mask = mask.unsqueeze(-1).float()
+    body_emb = embedding * cal_mask
+    r_body_sum = body_emb.sum(dim=1)               # [num_rules, hidden_dim]
+
+    features = torch.cat([R_i, r_body_sum], dim=-1)  # [num_rules, rule_dim + hidden_dim]
+    return features
+```
+
+### 7.3 不确定性损失（trainer.py:38-82）
+
+```python
+# 实际代码 (trainer.py:38-82)
+def compute_uncertainty_loss(self):
+    """
+    按文档公式计算不确定性正则化损失（在所有规则上）
 
     Returns:
-        loss_uncertainty: 总不确定性损失
+        L_uncertainty, stats_dict
     """
-    # 1. KL散度损失
-    # KL(N(μ,σ²) || N(0,1)) = 0.5 × (μ² + σ² - log(σ²) - 1)
+    model = self.model
+    device = self.device
+
+    # 1. 构造规则特征 features_i = [R_i, r_body_sum_i]
+    features = model.get_uncertainty_features(device)  # [num_rules, rule_dim + hidden_dim]
+
+    # 2. 计算 μ / logσ²
+    mu = model.mu_network(features)                    # [num_rules, 1]
+    logvar = model.logvar_network(features)            # [num_rules, 1]
+
+    # 3. KL 散度损失
+    # KL(N(μ,σ²) || N(0,1)) = 0.5 * Σ(μ² + σ² - logσ² - 1)
     kl_loss = 0.5 * torch.sum(
         mu.pow(2) + logvar.exp() - logvar - 1
     )
 
-    # 2. 计算目标方差
-    target_std = lambda_0 / (1 + torch.log(support_counts.float() + 1))
-    target_logvar = 2 * torch.log(target_std)  # log(σ²) = 2×log(σ)
+    # 4. 方差匹配损失：σ_i 与由 support_counts 推导的目标方差对齐
+    support_counts = model.support_counts.to(device).float()   # [num_rules]
+    target_std = model.lambda_0 / (1 + torch.log(support_counts + 1))
+    target_logvar = 2 * torch.log(target_std)                  # log(σ²_target)
 
-    # 3. 方差匹配损失
-    sigma_loss = torch.sum((logvar - target_logvar).pow(2))
+    sigma_loss = torch.sum(
+        (logvar.squeeze(-1) - target_logvar).pow(2)
+    )
 
-    # 4. 总损失
-    loss_uncertainty = beta_kl * kl_loss + beta_sigma * sigma_loss
+    # 5. 总不确定性损失
+    L_uncertainty = self.beta_kl * kl_loss + self.beta_sigma * sigma_loss
 
-    return loss_uncertainty, {
+    # 便于调试的统计信息
+    std = torch.exp(0.5 * logvar)
+    stats = {
         'kl_loss': kl_loss.item(),
-        'sigma_loss': sigma_loss.item()
+        'sigma_loss': sigma_loss.item(),
+        'mu_mean': mu.mean().item(),
+        'sigma_mean': std.mean().item()
     }
+
+    return L_uncertainty, stats
 ```
 
-### 7.4 完整训练循环
+### 7.4 预训练步骤（trainer.py:176-296）
+
+`PreTrainer.train_step()` 中的关键代码：
 
 ```python
-def train_epoch(model, train_loader, optimizer, args):
-    """
-    训练一个epoch
-    """
+# 实际代码 (trainer.py:176-296，简化版)
+def train_step(self, optimizer, triplets_iterator, rules_iterator, args):
+    model = self.model
     model.train()
-    total_loss = 0
-    total_kge_loss = 0
-    total_rule_loss = 0
-    total_uncertainty_loss = 0
+    optimizer.zero_grad()
 
-    for batch_idx, batch in enumerate(train_loader):
-        # 1. KGE损失
-        triplet_batch = batch['triplets']
-        kge_loss = model.compute_kge_loss(triplet_batch)
+    # 获取batch数据
+    positive_sample, negative_sample, subsampling_weight, mode = next(triplets_iterator)
+    positive_rule, negative_idx, negative_rule, mode_rule, rule_mask = next(rules_iterator)
 
-        # 2. 规则损失 (带不确定性采样)
-        rule_batch = batch['rules']
+    # 计算当前 batch 对应规则的权重 w_i（重参数化采样）
+    features_all = model.get_uncertainty_features(self.device)  # [num_rules, rule_dim + hidden_dim]
+    mu_all = model.mu_network(features_all)                     # [num_rules, 1]
+    logvar_all = model.logvar_network(features_all)             # [num_rules, 1]
+    w_all, _ = model.reparameterize_sample(mu_all, logvar_all)  # [num_rules, 1]
 
-        # 2.1 获取规则表示
-        R_i = model.rule_emb[rule_batch[:, 0]]
-        r_body_sum = aggregate_rule_body(model, rule_batch[:, 2:])
+    rule_ids = positive_rule[:, 0].to(self.device)              # [batch_size]
+    w_batch = w_all[rule_ids].squeeze(-1)                       # [batch_size]
+    w_batch_sig = torch.sigmoid(w_batch)                        # σ(w_i) ∈ (0,1)
 
-        # 2.2 构建特征
-        features = torch.cat([R_i, r_body_sum], dim=-1)
+    # 三元组负样本打分（保持不变）
+    negative_fact_score, _ = model.compute_KGE((positive_sample, negative_sample), mode)
+    negative_fact_score = (F.softmax(negative_fact_score * args.adversarial_temperature, dim=1).detach()
+                        * F.logsigmoid(-negative_fact_score)).sum(dim=1)
 
-        # 2.3 计算分布参数
-        mu = model.mu_network(features)
-        logvar = model.logvar_network(features)
+    # 规则负样本打分：score_rule_neg = σ(w_i) × (γ_rule - d_rule_neg)
+    negative_rule_raw = model.compute_ruleE(
+        (positive_rule, rule_mask, negative_idx, negative_rule), mode=mode_rule
+    )
+    negative_rule_raw = w_batch_sig.unsqueeze(1) * negative_rule_raw  # 乘以置信度
+    negative_rule_score = (F.softmax(negative_rule_raw * args.adversarial_temperature, dim=1).detach()
+                        * F.logsigmoid(-negative_rule_raw)).sum(dim=1)
 
-        # 2.4 重参数化采样
-        w = reparameterize_sample(mu, logvar, num_samples=args.num_samples)
+    # 三元组正样本打分
+    positive_fact_score, ent = model.compute_KGE(positive_sample)
+    positive_fact_score = F.logsigmoid(positive_fact_score).squeeze(dim=1)
 
-        # 2.5 计算规则损失
-        rule_loss = compute_rule_loss(model, rule_batch, w)
+    # 规则正样本打分：score_rule_pos = σ(w_i) × (γ_rule - d_rule_pos)
+    positive_rule_raw = model.compute_ruleE((positive_rule, rule_mask))
+    positive_rule_raw = w_batch_sig * positive_rule_raw  # 乘以置信度
+    positive_rule_score = F.logsigmoid(positive_rule_raw)
 
-        # 3. 不确定性损失
-        uncertainty_loss, _ = compute_uncertainty_loss(
-            mu, logvar,
-            support_counts=model.support_counts[rule_batch[:, 0]],
-            beta_kl=args.beta_kl,
-            beta_sigma=args.beta_sigma,
-            lambda_0=args.lambda_0
-        )
+    # 损失计算
+    loss_fact = (positive_fact_loss + negative_fact_loss) / 2
+    loss_rule = (positive_rule_loss + negative_rule_loss) / 2
 
-        # 4. 总损失
-        loss = (kge_loss +
-                args.lambda_rule * rule_loss +
-                args.lambda_uncertainty * uncertainty_loss)
+    # 计算不确定性损失
+    L_uncertainty, unc_stats = self.compute_uncertainty_loss()
 
-        # 5. 反向传播
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+    # 总损失 = 三元组损失 + 规则损失 + 不确定性损失
+    loss = loss_rule + loss_fact + args.lambda_uncertainty * L_uncertainty
 
-        # 6. 统计
-        total_loss += loss.item()
-        total_kge_loss += kge_loss.item()
-        total_rule_loss += rule_loss.item()
-        total_uncertainty_loss += uncertainty_loss.item()
+    loss.backward()
+    optimizer.step()
 
-        if batch_idx % args.log_interval == 0:
-            print(f'Batch {batch_idx}: '
-                  f'Loss={loss.item():.4f}, '
-                  f'KGE={kge_loss.item():.4f}, '
-                  f'Rule={rule_loss.item():.4f}, '
-                  f'Unc={uncertainty_loss.item():.4f}')
-
-    return {
-        'total_loss': total_loss / len(train_loader),
-        'kge_loss': total_kge_loss / len(train_loader),
-        'rule_loss': total_rule_loss / len(train_loader),
-        'uncertainty_loss': total_uncertainty_loss / len(train_loader)
-    }
+    return log
 ```
+
+### 7.5 Grounding阶段的规则置信度使用（trainer.py:459-495）
+
+```python
+# 实际代码 (trainer.py:459-495)
+def train(self, args):
+    # 冻结预训练参数
+    self.model.entity_embedding.weight.requires_grad = False
+    self.model.relation_embedding.weight.requires_grad = False
+    self.model.rule_emb.weight.requires_grad = False
+
+    # 冻结不确定性网络（不再更新）
+    for p in self.model.mu_network.parameters():
+        p.requires_grad = False
+    for p in self.model.logvar_network.parameters():
+        p.requires_grad = False
+
+    # ...
+
+    # 预计算 grounding 阶段使用的规则置信度 μ
+    self.model.eval()
+    with torch.no_grad():
+        features = self.model.get_uncertainty_features(self.device)
+        self.model.rule_mu = self.model.mu_network(features)  # [num_rules, 1]
+        logging.info(
+            'Pre-computed rule_mu for grounding: '
+            f'mean={self.model.rule_mu.mean().item():.6f}, '
+            f'std={self.model.rule_mu.std().item():.6f}'
+        )
+    self.model.train()
+```
+
+### 7.6 前向推理中的置信度加权（model.py:421-498）
+
+```python
+# 实际代码 (model.py:460-468)
+def forward(self, all_h, all_r, edges_to_remove):
+    # ... grounding 计算 ...
+
+    # grounding 阶段：使用预计算的规则置信度 μ 作为标量权重
+    if hasattr(self, 'rule_mu'):
+        w = self.rule_mu[rule_index]                # [num_selected_rules, 1]
+        base_feature = self.mlp_feature[rule_index] # [num_selected_rules, mlp_rule_dim]
+        mlp_feature = base_feature * w              # broadcast 标量权重到特征维度
+    else:
+        mlp_feature = self.mlp_feature[rule_index]
+
+    output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
+    # ...
+```
+
+### 7.7 支持数预计算工具（uncertainty.py）
+
+在训练前，需要预计算每条规则的支持路径数，保存为 `support_counts.pt`。
+
+#### 7.7.1 使用方法
+
+```bash
+cd src
+python uncertainty.py \
+    --data_path ../data/umls \
+    --rule_file ../data/umls/mined_rules.txt \
+    --output support_counts.pt
+```
+
+#### 7.7.2 工具实现（uncertainty.py:7-97）
+
+```python
+# 实际代码 (uncertainty.py:7-97)
+def compute_support_counts(data_path, rule_file):
+    """
+    计算每条规则的支持路径数
+    使用精确的 grounding 方法计算实际支持路径数
+
+    Args:
+        data_path: 数据集路径
+        rule_file: 规则文件路径
+
+    Returns:
+        support_counts: [num_rules] tensor，每条规则的支持路径数
+    """
+    logging.info(f'Loading knowledge graph from {data_path}')
+    graph = KnowledgeGraph(data_path)
+
+    logging.info(f'Loading rules from {rule_file}')
+    ruleset = RuleDataset(graph.relation_size, rule_file, negative_sample_size=0)
+
+    support_counts = []
+
+    logging.info(f'Computing support counts for {len(ruleset.rules)} rules using exact grounding...')
+    logging.info(f'This may take a while (a few minutes to hours depending on dataset size)...')
+
+    for rule_idx, (rule, _) in enumerate(ruleset.rules):
+        rule_id, rule_head, rule_body = rule[0], rule[1], rule[2:]
+
+        # 精确方法：遍历所有实体作为头实体
+        count = 0.0
+        for h in range(graph.entity_size):
+            h_tensor = torch.tensor([h], dtype=torch.long)
+            # 调用知识图谱的 grounding 方法
+            paths = graph.grounding(h_tensor, rule_head, rule_body, edges_to_remove=None)
+            count += paths.sum().item()
+
+        # 至少为1，避免0计数
+        count = max(count, 1.0)
+        support_counts.append(count)
+
+        if (rule_idx + 1) % 10 == 0:
+            logging.info(f'  Processed {rule_idx + 1}/{len(ruleset.rules)} rules (current: {count:.0f} paths)')
+
+    support_counts_tensor = torch.tensor(support_counts, dtype=torch.float32)
+    return support_counts_tensor
+```
+
+#### 7.7.3 输出位置
+
+预计算的 `support_counts.pt` 会保存到数据集目录下（如 `data/umls/support_counts.pt`），模型初始化时会自动加载。
+
+**注意**：
+- 对于小数据集（UMLS, Kinship），预计算需要几分钟
+- 对于大数据集（FB15k-237, WN18RR），可能需要数小时
+- 如果未找到 `support_counts.pt`，模型会使用均匀分布（所有规则支持数=1）
+
+### 7.8 完整运行指南
+
+#### 7.8.1 环境准备
+
+```bash
+# 创建conda环境
+conda create -n RulE python=3.8.0
+conda activate RulE
+
+# 安装依赖
+pip install -r requirements.txt
+```
+
+#### 7.8.2 完整训练流程
+
+**Step 1: 预计算支持数（可选但推荐）**
+
+```bash
+cd src
+python uncertainty.py \
+    --data_path ../data/umls \
+    --rule_file ../data/umls/mined_rules.txt \
+    --output support_counts.pt
+```
+
+**Step 2: 训练模型**
+
+```bash
+cd src
+python main.py --init ../config/umls_config.json
+```
+
+**完整命令行参数示例**（不使用配置文件时）：
+
+```bash
+python main.py \
+    --data_path ../data/umls \
+    --rule_file ../data/umls/mined_rules.txt \
+    --cuda \
+    --hidden_dim 2000 \
+    --gamma_fact 6.0 \
+    --gamma_rule 6.0 \
+    --learning_rate 0.0001 \
+    --max_steps 15000 \
+    --num_samples 5 \
+    --lambda_uncertainty 0.01 \
+    --beta_kl 0.001 \
+    --beta_sigma 0.01 \
+    --lambda_0 1.0
+```
+
+#### 7.8.3 训练日志说明
+
+训练过程中会输出以下关键指标：
+
+```
+Training average at step 100:
+  positive_fact_loss: 0.3456    # 三元组正样本损失
+  negative_fact_loss: -1.2345   # 三元组负样本损失
+  positive_rule_loss: 0.2134    # 规则正样本损失
+  negative_rule_loss: -0.8765   # 规则负样本损失
+  L_uncertainty: 0.0089         # 不确定性损失
+  L_kl: 2.345                   # KL散度损失（未加权）
+  L_sigma: 0.567                # 方差匹配损失（未加权）
+  mu_mean: 0.432                # 所有规则μ的均值
+  sigma_mean: 0.287             # 所有规则σ的均值
+  loss: 0.5678                  # 总损失
+```
+
+**关键指标解读**：
+- `mu_mean`：规则置信度均值，应在0-1范围内
+- `sigma_mean`：不确定性均值，高质量规则应较小（<0.3）
+- `L_uncertainty`：不确定性损失，应逐渐减小并稳定
+
+#### 7.8.4 输出文件
+
+训练完成后，输出目录包含：
+
+```
+outputs/<timestamp>/
+├── checkpoint           # 预训练模型检查点
+├── grounding.pt         # Grounding阶段检查点
+├── config.json          # 训练配置
+├── run.log              # 训练日志
+├── entity_embedding.npy # 实体嵌入
+├── relation_embedding.npy # 关系嵌入
+├── rule_embedding.npy   # 规则嵌入
+└── g_rule_embedding.npy # Grounding阶段MLP特征
+```
+
+#### 7.8.5 不同数据集训练
+
+```bash
+# UMLS (小数据集，约30分钟)
+python main.py --init ../config/umls_config.json
+
+# FB15k-237 (中等数据集，约3-6小时)
+python main.py --init ../config/fb15k237_config.json
+
+# WN18RR (中等数据集，约2-4小时)
+python main.py --init ../config/wn18rr_config.json
+
+# Kinship (小数据集，约20分钟)
+python main.py --init ../config/kinship_config.json
+```
+
+**注意**：
+- 大数据集建议使用GPU（`--cuda`）
+- 确保在运行前已预计算对应数据集的 `support_counts.pt`
 
 ---
 
@@ -1409,31 +1742,19 @@ A:
 
 **Q5: 如何预计算support_counts？**
 
-```python
-def compute_support_counts(rules, train_triplets, graph):
-    """
-    统计每个规则的支持数
-    """
-    support_counts = torch.zeros(len(rules))
+使用 `uncertainty.py` 工具进行预计算（推荐方式）：
 
-    for i, rule in enumerate(rules):
-        rule_head = rule[1]
-        rule_body = rule[2:]
-
-        # 找到所有符合规则头的三元组
-        matching_triplets = [t for t in train_triplets if t[1] == rule_head]
-
-        count = 0
-        for h, r, t in matching_triplets:
-            # 检查是否存在路径
-            grounding = graph.grounding(h, rule_head, rule_body, None)
-            if grounding[t] > 0:
-                count += grounding[t].item()
-
-        support_counts[i] = count
-
-    return support_counts
+```bash
+cd src
+python uncertainty.py \
+    --data_path ../data/umls \
+    --rule_file ../data/umls/mined_rules.txt \
+    --output support_counts.pt
 ```
+
+输出文件 `support_counts.pt` 会保存到数据集目录（如 `data/umls/support_counts.pt`）。
+
+详见 [7.7 支持数预计算工具](#77-支持数预计算工具uncertaintypy)。
 
 **Q6: 训练不稳定怎么办？**
 
@@ -1497,11 +1818,11 @@ learning_rate = 0.0001
 batch_size = 256
 max_steps = 15000-30000
 
-# 不确定性
+# 不确定性 (main.py 默认值)
 num_samples = 5
 lambda_uncertainty = 0.01
 beta_kl = 0.001
-beta_sigma = 0.1
+beta_sigma = 0.01           # 注意：与原文档不同，更新为代码默认值
 lambda_0 = 1.0
 
 # Grounding
@@ -1517,7 +1838,21 @@ alpha = 3.0  # KGE权重
 
 ---
 
-**文档版本**: v1.0
+**文档版本**: v1.1
 **创建日期**: 2025-01-12
+**更新日期**: 2025-12-15
 **作者**: 不确定性RulE项目组
 **适用代码版本**: RulE v1.0 + 不确定性扩展
+
+### 更新日志
+
+**v1.1 (2025-12-15)**
+- 更新第7节实现细节，与实际代码对应（含行号引用）
+- 添加 7.7 支持数预计算工具使用说明（uncertainty.py）
+- 添加 7.8 完整运行指南
+- 更新不确定性参数默认值与 main.py 一致（beta_sigma: 0.1 → 0.01）
+- 更新目录结构，添加第7节子章节链接
+- 更新 Q5 常见问题，引用预计算工具
+
+**v1.0 (2025-01-12)**
+- 初始版本
