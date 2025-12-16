@@ -533,6 +533,7 @@ class RulE(torch.nn.Module):
             current_batch_size = current_entities.size(0)
 
             # 获取动作空间: [current_batch_size, max_num_actions, 2]
+            # 注意：array_store已为ePAD实体预留空间并添加自环边，无需特殊处理
             current_entities_np = current_entities.cpu().numpy()
             next_actions = self.graph.array_store[current_entities_np, :, :].copy()
             next_entities = torch.from_numpy(next_actions[:, :, 0]).long().to(device)

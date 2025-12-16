@@ -469,15 +469,17 @@ class KnowledgeGraph(object):
         """
         预计算动作空间数组（参考SSRL grapher.py设计）
 
-        构建一个形状为 [entity_size, max_num_actions, 2] 的numpy数组，
+        构建一个形状为 [entity_size + 1, max_num_actions, 2] 的numpy数组，
         其中每个实体存储其所有可用动作：
         - array_store[entity, action_idx, 0] = 目标实体
         - array_store[entity, action_idx, 1] = 关系
         - 不足max_num_actions的部分用PAD填充
         - 超过max_num_actions的部分被截断
+        - 额外+1是为ePAD实体预留空间（参考SSRL的dummy_e自环设计）
         """
         # 初始化数组，用PAD填充
-        self.array_store = np.ones((self.entity_size, self.max_num_actions, 2), dtype=np.int32)
+        # 大小为 entity_size + 1，最后一行给 ePAD 实体
+        self.array_store = np.ones((self.entity_size + 1, self.max_num_actions, 2), dtype=np.int32)
         self.array_store[:, :, 0] *= self.ePAD
         self.array_store[:, :, 1] *= self.rPAD
 
@@ -485,6 +487,11 @@ class KnowledgeGraph(object):
         for entity in range(self.entity_size):
             self.array_store[entity, 0, 0] = entity
             self.array_store[entity, 0, 1] = self.rPAD  # NO_OP用rPAD表示
+
+        # 为 ePAD 实体添加自环边（参考SSRL: dummy_e -> dummy_e）
+        # 这样当beam search到达PAD实体时，不会越界，而是停留在PAD状态
+        self.array_store[self.ePAD, 0, 0] = self.ePAD
+        self.array_store[self.ePAD, 0, 1] = self.rPAD
 
         # 然后从hr2o字典填充实际的动作
         action_counts = [1] * self.entity_size  # 每个实体已经有1个NO_OP动作
