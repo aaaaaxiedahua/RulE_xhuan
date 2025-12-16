@@ -607,7 +607,8 @@ class RulE(torch.nn.Module):
         # 初始化得分矩阵
         scores = torch.zeros(batch_size, self.num_entities, device=device)
 
-        # 向量化填充得分（参考SSRL pg.py:333-336，使用scatter_reduce保持max语义）
+        # 向量化填充得分（参考SSRL ops.py unique_max方法，使用广播比较+max实现去重取最大值）
+        HUGE_INT = 1e10
         for i in range(batch_size):
             # 过滤PAD实体
             valid_mask = final_entities[i] < self.num_entities
@@ -615,14 +616,19 @@ class RulE(torch.nn.Module):
             valid_probs = final_probs[i][valid_mask]
 
             if valid_entities.numel() > 0:
-                # scatter_reduce 实现 max 聚合（PyTorch 1.11.0+）
-                scores[i].scatter_reduce_(
-                    dim=0,
-                    index=valid_entities,
-                    src=valid_probs,
-                    reduce='amax',  # 取最大值
-                    include_self=True
-                )
+                # 获取唯一实体
+                unique_entities = torch.unique(valid_entities)
+
+                # 广播比较 + max（SSRL的unique_max方法）
+                # marker_2D: [num_unique, num_valid]，标记每个唯一实体在valid_entities中的位置
+                marker_2D = (unique_entities.unsqueeze(1) == valid_entities.unsqueeze(0)).float()
+                # values_2D: 匹配位置用真实概率，不匹配位置用负无穷
+                values_2D = marker_2D * valid_probs.unsqueeze(0) - (1 - marker_2D) * HUGE_INT
+                # 每个唯一实体取最大概率
+                unique_probs, _ = values_2D.max(dim=1)  # [num_unique]
+
+                # 赋值到得分矩阵
+                scores[i][unique_entities] = unique_probs
 
         # mask全为True
         mask = torch.ones_like(scores).bool()
