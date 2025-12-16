@@ -163,10 +163,11 @@ def main():
         test_set = TestDataset(graph, args.g_batch_size)
         test_kge_set = TestDataset(graph, 16)
     else:
-        # RulE-SSRL模式：不需要grounding数据集，使用KGE验证集
+        # RulE-SSRL模式：使用dev_batch_size作为验证/测试batch大小
+        dev_batch_size = args.dev_batch_size if hasattr(args, 'dev_batch_size') else 64
         train_set = None
-        valid_set = ValidDataset(graph, args.g_batch_size)
-        test_set = TestDataset(graph, args.g_batch_size)
+        valid_set = ValidDataset(graph, dev_batch_size)
+        test_set = TestDataset(graph, dev_batch_size)
         test_kge_set = None
 
     rules = [rule[0] for rule in ruleset.rules]
