@@ -56,7 +56,7 @@
 
     "_comment_phase3": "========== Phase 3: Testing (KGE + Policy Fusion with Beam Search) ==========",
     "use_kge_fusion": true,
-    "beam_size": 20,
+    "beam_size": 15,
     "dev_batch_size": 64,
     "alpha": 1,
     "beta": 2

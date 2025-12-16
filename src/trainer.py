@@ -966,7 +966,8 @@ class PolicyTrainer(object):
         concat_all_t = []
         concat_flag = []
 
-        for batch in dataloader:
+        total_batches = len(dataloader)
+        for batch_idx, batch in enumerate(dataloader):
             all_h, all_r, all_t, flag = batch
 
             # DataLoader batch_size=1 会在dim=0加一维，需要squeeze掉
@@ -1000,6 +1001,10 @@ class PolicyTrainer(object):
             concat_all_r.append(all_r)
             concat_all_t.append(all_t)
             concat_flag.append(flag)
+
+            # 打印验证进度
+            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == total_batches:
+                logging.info(f'验证进度: {batch_idx + 1}/{total_batches} batches ({100*(batch_idx+1)/total_batches:.1f}%)')
 
         concat_logits = torch.cat(concat_logits, dim=0)
         concat_all_h = torch.cat(concat_all_h, dim=0)

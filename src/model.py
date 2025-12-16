@@ -607,14 +607,22 @@ class RulE(torch.nn.Module):
         # 初始化得分矩阵
         scores = torch.zeros(batch_size, self.num_entities, device=device)
 
-        # 填充得分（使用scatter_add聚合相同实体的得分）
+        # 向量化填充得分（参考SSRL pg.py:333-336，使用scatter_reduce保持max语义）
         for i in range(batch_size):
-            entities = final_entities[i]
-            probs = final_probs[i]
-            for j in range(entities.size(0)):
-                e = entities[j].item()
-                if e < self.num_entities:  # 排除PAD
-                    scores[i, e] = max(scores[i, e].item(), probs[j].item())
+            # 过滤PAD实体
+            valid_mask = final_entities[i] < self.num_entities
+            valid_entities = final_entities[i][valid_mask]
+            valid_probs = final_probs[i][valid_mask]
+
+            if valid_entities.numel() > 0:
+                # scatter_reduce 实现 max 聚合（PyTorch 1.11.0+）
+                scores[i].scatter_reduce_(
+                    dim=0,
+                    index=valid_entities,
+                    src=valid_probs,
+                    reduce='amax',  # 取最大值
+                    include_self=True
+                )
 
         # mask全为True
         mask = torch.ones_like(scores).bool()
