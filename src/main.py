@@ -117,6 +117,10 @@ def parse_args(args=None):
                        help='策略探索的最大路径长度')
     parser.add_argument('--use_kge_fusion', action='store_true', default=True,
                        help='推理时是否融合KGE评分')
+    parser.add_argument('--beam_size', default=50, type=int,
+                       help='Beam Search beam width')
+    parser.add_argument('--dev_batch_size', default=64, type=int,
+                       help='Validation/Test batch size')
 
     return parser.parse_args(args)
 
