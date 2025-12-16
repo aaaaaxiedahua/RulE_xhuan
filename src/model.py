@@ -487,60 +487,160 @@ class RulE(torch.nn.Module):
         self.rules_weight_emb = torch.cat(rules_weight_emb)
 
 
-    # ========== RulE-SSRL: 新增方法 ==========
+    # ========== RulE-SSRL: Beam Search推理 ==========
 
-    def forward_policy(self, all_h, all_r, num_samples=10):
+    def forward_policy_beam(self, all_h, all_r, beam_size=100, max_steps=3):
         """
-        策略网络推理（RulE-SSRL）
+        批处理Beam Search策略网络推理（参考SSRL实现）
 
-        使用策略网络采样多条路径并聚合结果。
+        所有查询同时处理，shape为 [batch_size * beam_size]
 
         参数：
             all_h: [batch_size] 头实体
             all_r: [batch_size] 查询关系
-            num_samples: 每个查询采样的路径数量
+            beam_size: beam宽度（保留top-k路径）
+            max_steps: 最大路径长度
 
         返回：
             scores: [batch_size, num_entities] 实体得分
-            mask: [batch_size, num_entities] 全为True（策略可达任意实体）
+            mask: [batch_size, num_entities] 全为True
         """
-        from collections import defaultdict
-
         batch_size = all_h.size(0)
         device = all_h.device
+
+        # 初始化：每个查询从起始实体开始，当前beam大小为1
+        # current_entities: [batch_size * k], 初始k=1
+        current_entities = all_h.clone()  # [batch_size]
+        current_k = 1
+
+        # 累计log概率: [batch_size * k]
+        log_action_probs = torch.zeros(batch_size, device=device)
+
+        # 查询关系嵌入: [batch_size, relation_dim]
+        query_embedding = self.get_relation_embedding_by_id(all_r)
+
+        # LSTM状态初始化: [num_layers, batch_size * k, hidden_dim]
+        lstm_state = self.policy_network.get_init_state(batch_size, device)
+
+        # 初始prev_relation: [batch_size]
+        prev_relation = torch.full((batch_size,), self.graph.rPAD, dtype=torch.long, device=device)
+
+        # 查询关系ID用于规则匹配: [batch_size]
+        query_relation_ids = all_r.clone()
+
+        for step in range(max_steps):
+            # 当前batch大小（包含所有beam）
+            current_batch_size = current_entities.size(0)
+
+            # 获取动作空间: [current_batch_size, max_num_actions, 2]
+            current_entities_np = current_entities.cpu().numpy()
+            next_actions = self.graph.array_store[current_entities_np, :, :].copy()
+            next_entities = torch.from_numpy(next_actions[:, :, 0]).long().to(device)
+            next_relations = torch.from_numpy(next_actions[:, :, 1]).long().to(device)
+
+            # 扩展查询嵌入到当前beam大小
+            # query_embedding_expanded: [current_batch_size, relation_dim]
+            query_embedding_expanded = self._tile_along_beam(query_embedding, current_k)
+            query_relation_ids_expanded = self._tile_along_beam(query_relation_ids.unsqueeze(1), current_k).squeeze(1)
+
+            # 策略网络前向传播
+            # logits: [current_batch_size, max_num_actions]
+            logits, lstm_state, _ = self.policy_network.step(
+                next_relations=next_relations,
+                next_entities=next_entities,
+                lstm_state=lstm_state,
+                prev_relation=prev_relation,
+                query_embedding=query_embedding_expanded,
+                current_entities=current_entities,
+                rule_model=self,
+                current_step=step,
+                query_relation_ids=query_relation_ids_expanded
+            )
+
+            # 计算累计log概率: [current_batch_size, max_num_actions]
+            # log_action_probs: [current_batch_size] -> [current_batch_size, 1]
+            cumulative_log_probs = log_action_probs.unsqueeze(1) + logits
+
+            # 重塑为 [batch_size, k * max_num_actions]
+            action_space_size = next_relations.size(1)
+            cumulative_log_probs = cumulative_log_probs.view(batch_size, -1)
+            next_entities_flat = next_entities.view(batch_size, -1)
+            next_relations_flat = next_relations.view(batch_size, -1)
+
+            # 选择top-k动作
+            new_k = min(beam_size, cumulative_log_probs.size(1))
+            top_log_probs, top_indices = torch.topk(cumulative_log_probs, new_k, dim=1)
+
+            # 提取选中的实体和关系
+            # top_indices: [batch_size, new_k]
+            selected_entities = torch.gather(next_entities_flat, 1, top_indices)  # [batch_size, new_k]
+            selected_relations = torch.gather(next_relations_flat, 1, top_indices)  # [batch_size, new_k]
+
+            # 更新状态
+            # 展平为 [batch_size * new_k]
+            current_entities = selected_entities.view(-1)
+            prev_relation = selected_relations.view(-1)
+            log_action_probs = top_log_probs.view(-1)
+
+            # 更新LSTM状态索引
+            # beam_offset: 从哪个beam扩展来的
+            beam_offset = top_indices // action_space_size  # [batch_size, new_k]
+            batch_offset = torch.arange(batch_size, device=device).unsqueeze(1) * current_k
+            state_indices = (batch_offset + beam_offset).view(-1)  # [batch_size * new_k]
+
+            # 重新索引LSTM状态
+            h, c = lstm_state
+            h = h[:, state_indices, :]
+            c = c[:, state_indices, :]
+            lstm_state = (h, c)
+
+            current_k = new_k
+
+        # 将beam search结果转换为实体得分
+        # current_entities: [batch_size * beam_size]
+        # log_action_probs: [batch_size * beam_size]
+        final_entities = current_entities.view(batch_size, -1)  # [batch_size, beam_size]
+        final_log_probs = log_action_probs.view(batch_size, -1)  # [batch_size, beam_size]
+        final_probs = torch.exp(final_log_probs)
 
         # 初始化得分矩阵
         scores = torch.zeros(batch_size, self.num_entities, device=device)
 
-        # 处理每个查询
+        # 填充得分（使用scatter_add聚合相同实体的得分）
         for i in range(batch_size):
-            h = all_h[i].item()
-            r = all_r[i].item()
+            entities = final_entities[i]
+            probs = final_probs[i]
+            for j in range(entities.size(0)):
+                e = entities[j].item()
+                if e < self.num_entities:  # 排除PAD
+                    scores[i, e] = max(scores[i, e].item(), probs[j].item())
 
-            # 多路径采样
-            entity_visit_count = defaultdict(int)
-
-            for _ in range(num_samples):
-                # 用策略网络采样一条路径
-                with torch.no_grad():
-                    path, final_entity = self.policy_network.rollout(
-                        start_entity=h,
-                        query_relation=r,
-                        graph=self.graph,
-                        model=self,
-                        max_steps=3
-                    )
-
-                entity_visit_count[final_entity] += 1
-
-            # 聚合：简单投票
-            for entity, count in entity_visit_count.items():
-                scores[i, entity] = count / num_samples
-
-        # mask全为True（策略网络可以潜在到达任意实体）
+        # mask全为True
         mask = torch.ones_like(scores).bool()
 
         return scores, mask
+
+    def _tile_along_beam(self, tensor, beam_size):
+        """
+        沿beam维度复制tensor
+
+        参数：
+            tensor: [batch_size, ...] 或 [num_layers, batch_size, ...]
+            beam_size: beam大小
+
+        返回：
+            tiled: [batch_size * beam_size, ...] 或 [num_layers, batch_size * beam_size, ...]
+        """
+        if tensor.dim() == 2:
+            # [batch_size, dim] -> [batch_size * beam_size, dim]
+            batch_size, dim = tensor.size()
+            return tensor.unsqueeze(1).expand(batch_size, beam_size, dim).reshape(batch_size * beam_size, dim)
+        elif tensor.dim() == 3:
+            # LSTM state: [num_layers, batch_size, hidden_dim]
+            num_layers, batch_size, hidden_dim = tensor.size()
+            return tensor.unsqueeze(2).expand(num_layers, batch_size, beam_size, hidden_dim).reshape(num_layers, batch_size * beam_size, hidden_dim)
+        else:
+            raise ValueError(f"Unsupported tensor dimension: {tensor.dim()}")
 
     def compute_policy_loss(self, query_batch, num_rollouts=1):
         """

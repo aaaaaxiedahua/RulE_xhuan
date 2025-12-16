@@ -932,7 +932,7 @@ class PolicyTrainer(object):
     @torch.no_grad()
     def evaluate(self, split, args, use_fusion=False):
         """
-        使用策略网络推理进行评估
+        使用Beam Search策略网络推理进行评估
 
         参数：
             split: 'valid' 或 'test'
@@ -942,14 +942,19 @@ class PolicyTrainer(object):
         返回：
             mrr: Mean Reciprocal Rank
         """
-        logging.info('>>>>> PolicyTrainer: 评估 {} (策略网络推理)'.format(split))
+        # 获取beam search参数
+        beam_size = args.beam_size if hasattr(args, 'beam_size') else 100
+        max_path_length = args.max_path_length if hasattr(args, 'max_path_length') else 3
+        dev_batch_size = args.dev_batch_size if hasattr(args, 'dev_batch_size') else 64
+
+        logging.info('>>>>> PolicyTrainer: 评估 {} (Beam Search, beam_size={}, batch_size={})'.format(
+            split, beam_size, dev_batch_size))
 
         test_set = getattr(self, "%s_set" % split)
-        dataloader = DataLoader(test_set, batch_size=1, num_workers=self.num_worker)
+        dataloader = DataLoader(test_set, batch_size=dev_batch_size, num_workers=self.num_worker)
 
         self.model.eval()
 
-        num_policy_samples = args.num_policy_samples if hasattr(args, 'num_policy_samples') else 10
         alpha = args.alpha if hasattr(args, 'alpha') else 0.5
         beta = args.beta if hasattr(args, 'beta') else 0.5
 
@@ -961,10 +966,12 @@ class PolicyTrainer(object):
 
         for batch in dataloader:
             all_h, all_r, all_t, flag = batch
-            all_h = all_h.squeeze(0)
-            all_r = all_r.squeeze(0)
-            all_t = all_t.squeeze(0)
-            flag = flag.squeeze(0)
+
+            # 处理batch维度（可能需要squeeze或不需要）
+            if all_h.dim() > 1:
+                all_h = all_h.squeeze(1) if all_h.size(1) == 1 else all_h
+                all_r = all_r.squeeze(1) if all_r.size(1) == 1 else all_r
+                all_t = all_t.squeeze(1) if all_t.size(1) == 1 else all_t
 
             if self.device.type == "cuda":
                 all_h = all_h.cuda(device=self.device)
@@ -972,8 +979,12 @@ class PolicyTrainer(object):
                 all_t = all_t.cuda(device=self.device)
                 flag = flag.cuda(device=self.device)
 
-            # 策略网络推理
-            policy_scores, _ = self.model.forward_policy(all_h, all_r, num_samples=num_policy_samples)
+            # 策略网络推理：使用Beam Search
+            policy_scores, _ = self.model.forward_policy_beam(
+                all_h, all_r,
+                beam_size=beam_size,
+                max_steps=max_path_length
+            )
 
             if use_fusion:
                 # 融合KGE和策略网络评分
