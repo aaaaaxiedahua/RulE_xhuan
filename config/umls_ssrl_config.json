@@ -1,15 +1,15 @@
 {
-    "_comment": "========== RulE-SSRL拆分方案配置 for UMLS ==========",
-    "_comment_mode": "三阶段流程: Phase1预训练 -> Phase2策略网络训练 -> Phase3融合测试",
+    "_comment": "========== RulE-SSRL Configuration for UMLS ==========",
+    "_comment_mode": "Three-phase pipeline: Phase1 Pre-training -> Phase2 Policy Network Training -> Phase3 Fusion Testing",
 
-    "_comment_data": "========== 数据配置 ==========",
+    "_comment_data": "========== Data Configuration ==========",
     "data_path": "../data/umls",
     "rule_file": "../data/umls/mined_rules.txt",
     "cuda": true,
     "cpu_num": 10,
     "seed": 800,
 
-    "_comment_phase1": "========== Phase 1: 预训练配置 (只有KGE + Rule) ==========",
+    "_comment_phase1": "========== Phase 1: Pre-training (KGE + Rule Embedding) ==========",
     "batch_size": 256,
     "negative_sample_size": 512,
     "rule_batch_size": 256,
@@ -34,7 +34,7 @@
     "save_path": "umls_SSRL",
     "weight_decay": 0,
 
-    "_comment_grounding": "========== Grounding配置 (原始RulE模式使用) ==========",
+    "_comment_grounding": "========== Grounding Configuration (Original RulE Mode) ==========",
     "mlp_rule_dim": 100,
     "smoothing": 0.2,
     "batch_per_epoch": 1000000,
@@ -43,7 +43,7 @@
     "g_lr": 0.0001,
     "num_iters": 20,
 
-    "_comment_phase2": "========== Phase 2: 策略网络训练配置 ==========",
+    "_comment_phase2": "========== Phase 2: Policy Network Training (Random Rollout) ==========",
     "use_policy_network": true,
     "max_num_actions": 200,
     "policy_hidden_dim": 128,
@@ -54,7 +54,7 @@
     "max_path_length": 4,
     "policy_num_rollouts": 3,
 
-    "_comment_phase3": "========== Phase 3: 测试配置 (KGE + Policy 融合) ==========",
+    "_comment_phase3": "========== Phase 3: Testing (KGE + Policy Fusion with Beam Search) ==========",
     "use_kge_fusion": true,
     "beam_size": 20,
     "dev_batch_size": 64,
