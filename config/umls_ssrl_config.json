@@ -53,6 +53,7 @@
     "policy_log_steps": 5,
     "max_path_length": 4,
     "policy_num_rollouts": 3,
+    "policy_eval_every": 3,
 
     "_comment_phase3": "========== Phase 3: Testing (KGE + Policy Fusion with Beam Search) ==========",
     "use_kge_fusion": true,

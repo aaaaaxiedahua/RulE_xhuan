@@ -109,6 +109,8 @@ def parse_args(args=None):
                        help='策略网络训练日志频率')
     parser.add_argument('--policy_num_rollouts', default=1, type=int,
                        help='策略网络训练时每个查询采样的路径数')
+    parser.add_argument('--policy_eval_every', default=1, type=int,
+                       help='策略网络训练时每多少轮验证一次')
 
     # Phase 3: 推理参数
     parser.add_argument('--num_policy_samples', default=10, type=int,

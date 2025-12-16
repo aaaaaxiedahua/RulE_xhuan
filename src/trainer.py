@@ -873,9 +873,11 @@ class PolicyTrainer(object):
         policy_num_iters = args.policy_num_iters if hasattr(args, 'policy_num_iters') else 20
         policy_log_steps = args.policy_log_steps if hasattr(args, 'policy_log_steps') else 100
         policy_num_rollouts = args.policy_num_rollouts if hasattr(args, 'policy_num_rollouts') else 1
+        policy_eval_every = args.policy_eval_every if hasattr(args, 'policy_eval_every') else 1
 
         logging.info('训练轮数: {}'.format(policy_num_iters))
         logging.info('采样路径数: {}'.format(policy_num_rollouts))
+        logging.info('验证频率: 每 {} 轮验证一次'.format(policy_eval_every))
 
         # Step 5: 训练循环
         best_mrr = 0.0
@@ -909,18 +911,19 @@ class PolicyTrainer(object):
                     logging.info('Iter {}, Batch {}, Avg Loss: {:.6f}'.format(
                         iter_num, batch_id + 1, avg_loss))
 
-            # 每轮结束后验证
+            # 每轮结束后记录
             avg_loss = total_loss / batch_count if batch_count > 0 else 0
             logging.info('Iteration {} 完成, 平均损失: {:.6f}'.format(iter_num, avg_loss))
 
-            # 验证
-            logging.info('验证中...')
-            mrr = self.evaluate('valid', args)
+            # 按频率验证（每 policy_eval_every 轮验证一次，或最后一轮）
+            if iter_num % policy_eval_every == 0 or iter_num == policy_num_iters:
+                logging.info('验证中...')
+                mrr = self.evaluate('valid', args)
 
-            if mrr > best_mrr:
-                best_mrr = mrr
-                self.save(args, os.path.join(args.save_path, 'policy_checkpoint'))
-                logging.info('新的最佳MRR: {:.6f}, 已保存checkpoint'.format(mrr))
+                if mrr > best_mrr:
+                    best_mrr = mrr
+                    self.save(args, os.path.join(args.save_path, 'policy_checkpoint'))
+                    logging.info('新的最佳MRR: {:.6f}, 已保存checkpoint'.format(mrr))
 
         logging.info('>>>>> Phase 2 完成! 最佳验证MRR: {:.6f}'.format(best_mrr))
 
