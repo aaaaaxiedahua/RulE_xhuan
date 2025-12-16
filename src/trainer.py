@@ -947,11 +947,13 @@ class PolicyTrainer(object):
         max_path_length = args.max_path_length if hasattr(args, 'max_path_length') else 3
         dev_batch_size = args.dev_batch_size if hasattr(args, 'dev_batch_size') else 64
 
-        logging.info('>>>>> PolicyTrainer: 评估 {} (Beam Search, beam_size={}, batch_size={})'.format(
-            split, beam_size, dev_batch_size))
+        logging.info('>>>>> PolicyTrainer: 评估 {} (Beam Search, beam_size={})'.format(
+            split, beam_size))
 
         test_set = getattr(self, "%s_set" % split)
-        dataloader = DataLoader(test_set, batch_size=dev_batch_size, num_workers=self.num_worker)
+        # 注意：ValidDataset/TestDataset内部已经按g_batch_size分好batch了
+        # 所以这里DataLoader的batch_size必须是1
+        dataloader = DataLoader(test_set, batch_size=1, num_workers=self.num_worker)
 
         self.model.eval()
 
@@ -967,11 +969,11 @@ class PolicyTrainer(object):
         for batch in dataloader:
             all_h, all_r, all_t, flag = batch
 
-            # 处理batch维度（可能需要squeeze或不需要）
-            if all_h.dim() > 1:
-                all_h = all_h.squeeze(1) if all_h.size(1) == 1 else all_h
-                all_r = all_r.squeeze(1) if all_r.size(1) == 1 else all_r
-                all_t = all_t.squeeze(1) if all_t.size(1) == 1 else all_t
+            # DataLoader batch_size=1 会在dim=0加一维，需要squeeze掉
+            all_h = all_h.squeeze(0)
+            all_r = all_r.squeeze(0)
+            all_t = all_t.squeeze(0)
+            flag = flag.squeeze(0)
 
             if self.device.type == "cuda":
                 all_h = all_h.cuda(device=self.device)
