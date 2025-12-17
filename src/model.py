@@ -8,7 +8,8 @@ from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
     def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset,
-                 use_policy_network=False, policy_hidden_dim=256):
+                 use_policy_network=False, policy_hidden_dim=256,
+                 rule_bonus_coef=0.1, rule_bonus_default=0.05):
         """
         RulE模型初始化
 
@@ -16,6 +17,8 @@ class RulE(torch.nn.Module):
             ... (原有参数)
             use_policy_network: 是否使用策略网络（RulE-SSRL模式）
             policy_hidden_dim: 策略网络隐藏层维度
+            rule_bonus_coef: 推理阶段规则加成系数（从配置读取）
+            rule_bonus_default: 推理阶段默认规则加成（从配置读取）
         """
         super(RulE, self).__init__()
         self.graph = graph
@@ -113,7 +116,9 @@ class RulE(torch.nn.Module):
                 hidden_dim=policy_hidden_dim,     # 策略隐藏维度
                 max_num_actions=graph.max_num_actions,  # 使用KG的max_num_actions
                 num_layers=1,
-                dropout=0.1
+                dropout=0.1,
+                rule_bonus_coef=rule_bonus_coef,  # 从配置传入
+                rule_bonus_default=rule_bonus_default  # 从配置传入
             )
         else:
             self.policy_network = None
@@ -657,7 +662,7 @@ class RulE(torch.nn.Module):
         else:
             raise ValueError(f"Unsupported tensor dimension: {tensor.dim()}")
 
-    def compute_policy_loss(self, query_batch, num_rollouts=1):
+    def compute_policy_loss(self, query_batch, num_rollouts=1, lambda_rule=0.3):
         """
         计算规则监督的策略损失
 
@@ -667,6 +672,7 @@ class RulE(torch.nn.Module):
         参数：
             query_batch: [batch_size, 3] (h, r, t)三元组张量
             num_rollouts: 每个查询采样的路径数量
+            lambda_rule: 规则权重系数（从配置文件读取）
 
         返回：
             loss: 标量张量
@@ -679,7 +685,8 @@ class RulE(torch.nn.Module):
             graph=self.graph,
             model=self,
             device=self.device,
-            num_rollouts=num_rollouts
+            num_rollouts=num_rollouts,
+            lambda_rule=lambda_rule
         )
 
     # ========== 策略网络辅助方法 ==========

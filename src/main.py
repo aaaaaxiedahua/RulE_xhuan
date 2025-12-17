@@ -191,7 +191,9 @@ def main():
         device,
         args.data_path,
         use_policy_network=args.use_policy_network if hasattr(args, 'use_policy_network') else False,
-        policy_hidden_dim=args.policy_hidden_dim if hasattr(args, 'policy_hidden_dim') else 256
+        policy_hidden_dim=args.policy_hidden_dim if hasattr(args, 'policy_hidden_dim') else 256,
+        rule_bonus_coef=args.rule_bonus_coef if hasattr(args, 'rule_bonus_coef') else 0.1,
+        rule_bonus_default=args.rule_bonus_default if hasattr(args, 'rule_bonus_default') else 0.05
     )
     RulE_model.set_rules(rules)
 

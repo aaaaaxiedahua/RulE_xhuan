@@ -27,7 +27,8 @@ class RuleGuidedPolicyNetwork(nn.Module):
     """
 
     def __init__(self, entity_dim, relation_dim, rule_dim, hidden_dim,
-                 max_num_actions=200, num_layers=1, dropout=0.1):
+                 max_num_actions=200, num_layers=1, dropout=0.1,
+                 rule_bonus_coef=0.1, rule_bonus_default=0.05):
         """
         初始化策略网络
 
@@ -39,6 +40,8 @@ class RuleGuidedPolicyNetwork(nn.Module):
             max_num_actions: 最大动作数（固定大小，参考SSRL）
             num_layers: LSTM层数
             dropout: Dropout比率
+            rule_bonus_coef: 推理阶段规则加成系数（默认0.1）
+            rule_bonus_default: 推理阶段默认规则加成（默认0.05）
         """
         super(RuleGuidedPolicyNetwork, self).__init__()
 
@@ -48,6 +51,10 @@ class RuleGuidedPolicyNetwork(nn.Module):
         self.hidden_dim = hidden_dim
         self.max_num_actions = max_num_actions
         self.num_layers = num_layers
+
+        # 推理阶段规则加成参数（从配置文件读取）
+        self.rule_bonus_coef = rule_bonus_coef
+        self.rule_bonus_default = rule_bonus_default
 
         # 动作嵌入维度：关系 + 实体
         self.action_dim = relation_dim + entity_dim
@@ -291,10 +298,10 @@ class RuleGuidedPolicyNetwork(nn.Module):
                 # 归一化匹配次数，乘以规则权重
                 # 匹配的动作获得更高加成
                 normalized_match = weighted_match / total_rule_quality
-                rule_bonus[b, :] = rule_weight[b, 0] * normalized_match * 0.5  # 规则匹配加成系数
+                rule_bonus[b, :] = rule_weight[b, 0] * normalized_match * self.rule_bonus_coef  # 使用配置参数
             else:
                 # 没有适用的规则（current_step超出规则长度），使用默认加成
-                rule_bonus[b, :] = rule_weight[b, 0] * 0.1
+                rule_bonus[b, :] = rule_weight[b, 0] * self.rule_bonus_default  # 使用配置参数
 
         return rule_bonus
 
@@ -387,12 +394,12 @@ class PolicyNetworkTrainingHelper:
 
     @staticmethod
     def compute_rule_supervised_loss(policy_network, query_batch, graph, model, device,
-                                    path_length=3, num_rollouts=1):
+                                    path_length=3, num_rollouts=1, lambda_rule=0.3):
         """
-        计算一批查询的规则监督损失（规则引导版本）
+        计算一批查询的规则监督损失（目标导向版本）
 
-        核心创新：使用规则体中期望的关系作为监督信号，而不是目标实体。
-        改进：使用预训练的规则质量权重 (rules_weight_emb) 进行加权监督。
+        核心思想：reward = target + λ * rule
+        改进：目标实体为主要监督（满分1.0），规则匹配为辅助监督（λ×质量）
 
         参数:
             policy_network: RuleGuidedPolicyNetwork实例
@@ -402,6 +409,7 @@ class PolicyNetworkTrainingHelper:
             device: torch设备
             path_length: 路径长度
             num_rollouts: 每个查询的rollout数量
+            lambda_rule: 规则权重系数（从配置文件读取，默认0.3）
 
         返回:
             loss: 标量张量
@@ -465,11 +473,16 @@ class PolicyNetworkTrainingHelper:
                 query_relation_ids=query_relation_tensor
             )
 
-            # ========== 规则引导监督（核心创新 + 规则质量加权） ==========
-            # 使用规则体中当前步期望的关系作为监督信号
-            # 改进：使用 rules_weight_emb 对不同规则进行加权
+            # ========== 改进：目标导向监督（目标主导 + 规则辅助） ==========
+            # 核心思想：reward = target + λ * rule
+            # 目标实体奖励（满分1.0）+ 规则匹配奖励（0.3×质量）
 
-            target_mask = torch.zeros(expanded_batch_size, policy_network.max_num_actions, device=device)
+            # Part 1: 计算目标实体奖励（直接奖励）
+            target_entity_reward = (next_entities == torch.from_numpy(target_entities).unsqueeze(1).to(device)).float()
+            # target_entity_reward: [batch, max_actions], 值为 {0, 1}
+
+            # Part 2: 计算规则匹配奖励（规则打分）
+            rule_match_reward = torch.zeros(expanded_batch_size, policy_network.max_num_actions, device=device)
             has_rule_supervision = False
 
             for b in range(expanded_batch_size):
@@ -489,7 +502,7 @@ class PolicyNetworkTrainingHelper:
                     if step < len(r_body):
                         expected_rel = r_body[step]  # 当前步期望的关系
 
-                        # ===== 改进：获取规则质量权重 =====
+                        # 获取规则质量权重
                         if has_rule_quality:
                             rule_emb = model.rules_weight_emb[rule_id]  # [hidden_dim]
                             rule_quality = torch.norm(rule_emb).item()
@@ -497,44 +510,37 @@ class PolicyNetworkTrainingHelper:
                         else:
                             rule_quality = 1.0  # 退化为原来的等权重
 
-                        # 找到关系匹配的动作作为正样本（加权）
+                        # 找到关系匹配的动作，累加规则质量
                         match_mask = (next_relations[b] == expected_rel).float()
-                        target_mask[b] += rule_quality * match_mask  # 加权累加
+                        rule_match_reward[b] += rule_quality * match_mask  # 加权累加
                         if match_mask.sum() > 0:
                             has_rule_supervision = True
 
-            # 如果有规则监督信号，计算损失
-            if has_rule_supervision and target_mask.sum() > 0:
-                # 归一化目标分布
-                row_sums = target_mask.sum(dim=1, keepdim=True)
-                # 避免除零：只对有正样本的行归一化
-                valid_rows = (row_sums > 0).float()
-                target_dist = target_mask / (row_sums + 1e-10)
+            # Part 3: 组合奖励（目标主导 + 规则辅助）
+            # 使用传入的 lambda_rule 参数（从配置文件读取）
+            total_reward = target_entity_reward + lambda_rule * rule_match_reward
+            # 说明：
+            # - 找到目标 → 奖励 = 1.0（满分保底）
+            # - 匹配规则 → 奖励 = lambda_rule × rule_quality（额外加成）
+            # - 目标+规则 → 奖励 = 1.0 + lambda_rule×quality（最佳情况）
 
-                # 只对有监督的样本计算损失
-                if valid_rows.sum() > 0:
-                    # KL散度损失
-                    step_loss = F.kl_div(logits, target_dist, reduction='none')
-                    # 只计算有监督的样本的损失
-                    step_loss = (step_loss.sum(dim=1) * valid_rows.squeeze()).sum() / (valid_rows.sum() + 1e-10)
-                    total_loss += step_loss
-                    valid_steps += 1
+            # Part 4: 过滤无效动作并归一化
+            valid_mask = (next_entities != graph.ePAD).float()
+            total_reward = total_reward * valid_mask
 
-            # ========== 补充：目标实体监督（辅助信号） ==========
-            # 如果能直接到达目标实体，也作为正样本（与规则监督结合）
-            target_entity_mask = (next_entities == torch.from_numpy(target_entities).unsqueeze(1).to(device)).float()
-            if target_entity_mask.sum() > 0:
-                # 合并规则监督和目标实体监督
-                combined_mask = target_mask + target_entity_mask * 0.5  # 目标实体权重稍低
-                row_sums = combined_mask.sum(dim=1, keepdim=True)
-                valid_rows = (row_sums > 0).float()
+            reward_sum = total_reward.sum(dim=1, keepdim=True)
 
-                if valid_rows.sum() > 0:
-                    combined_dist = combined_mask / (row_sums + 1e-10)
-                    aux_loss = F.kl_div(logits, combined_dist, reduction='none')
-                    aux_loss = (aux_loss.sum(dim=1) * valid_rows.squeeze()).sum() / (valid_rows.sum() + 1e-10)
-                    total_loss += aux_loss * 0.3  # 辅助损失权重
-                    valid_steps += 0.3
+            if reward_sum.sum() > 0:
+                # 有奖励信号：归一化为概率分布
+                valid_rows = (reward_sum > 0).float()
+                reward_dist = total_reward / (reward_sum + 1e-10)
+
+                # 计算KL散度损失
+                step_loss = F.kl_div(logits, reward_dist, reduction='none')
+                step_loss = (step_loss.sum(dim=1) * valid_rows.squeeze()).sum() / (valid_rows.sum() + 1e-10)
+
+                total_loss += step_loss
+                valid_steps += 1
 
             # 执行动作
             chosen_entities = next_entities[torch.arange(expanded_batch_size, device=device), action_idx]

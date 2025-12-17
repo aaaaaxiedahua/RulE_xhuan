@@ -896,8 +896,13 @@ class PolicyTrainer(object):
 
                 optimizer.zero_grad()
 
-                # 计算策略损失
-                loss = self.model.compute_policy_loss(query_batch, num_rollouts=policy_num_rollouts)
+                # 计算策略损失（传入lambda_rule参数）
+                lambda_rule = args.lambda_rule if hasattr(args, 'lambda_rule') else 0.3
+                loss = self.model.compute_policy_loss(
+                    query_batch,
+                    num_rollouts=policy_num_rollouts,
+                    lambda_rule=lambda_rule
+                )
 
                 loss.backward()
                 optimizer.step()

@@ -55,6 +55,14 @@
     "policy_num_rollouts": 3,
     "policy_eval_every": 3,
 
+    "_comment_reward": "========== Reward Weights (Training & Inference) ==========",
+    "lambda_rule": 0.3,
+    "_lambda_rule_desc": "Training: Rule reward weight in 'reward = target + lambda_rule * rule'. Range: 0.2-0.5. Higher = more rule guidance.",
+    "rule_bonus_coef": 0.1,
+    "_rule_bonus_coef_desc": "Inference: Rule bonus coefficient in 'final_score = base_score + rule_bonus_coef * rule_match'. Range: 0.05-0.3. Lower = less rule influence.",
+    "rule_bonus_default": 0.05,
+    "_rule_bonus_default_desc": "Inference: Default rule bonus when no rule applies. Range: 0.01-0.1. Should be smaller than rule_bonus_coef.",
+
     "_comment_phase3": "========== Phase 3: Testing (KGE + Policy Fusion with Beam Search) ==========",
     "use_kge_fusion": true,
     "beam_size": 15,
