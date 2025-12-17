@@ -48,15 +48,17 @@
     "max_num_actions": 200,
     "policy_hidden_dim": 256,
     "policy_num_iters": 20,
-    "policy_batch_size": 32,
+    "policy_batch_size": 64,
     "policy_lr": 0.0001,
     "policy_log_steps": 100,
-    "max_path_length": 3,
-    "policy_num_rollouts": 1,
+    "max_path_length": 4,
+    "policy_num_rollouts": 3,
+    "policy_eval_every": 3,
 
     "_comment_phase3": "========== Phase 3: 测试配置 (KGE + Policy 融合) ==========",
     "use_kge_fusion": true,
-    "num_policy_samples": 10,
-    "alpha": 0.5,
-    "beta": 0.5
+    "beam_size": 30,
+    "dev_batch_size": 64,
+    "alpha": 1,
+    "beta": 2
 }
