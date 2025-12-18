@@ -56,7 +56,7 @@
     "policy_eval_every": 3,
 
     "_comment_reward": "========== Reward Weights (Training & Inference) ==========",
-    "lambda_rule": 0.3,
+    "lambda_rule": 0.2,
     "_lambda_rule_desc": "Training: Rule reward weight in 'reward = target + lambda_rule * rule'. Range: 0.2-0.5. Higher = more rule guidance.",
     "rule_bonus_coef": 0.1,
     "_rule_bonus_coef_desc": "Inference: Rule bonus coefficient in 'final_score = base_score + rule_bonus_coef * rule_match'. Range: 0.05-0.3. Lower = less rule influence.",

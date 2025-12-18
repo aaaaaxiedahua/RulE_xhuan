@@ -43,17 +43,39 @@
     "g_lr": 0.0001,
     "num_iters": 20,
 
-    "_comment_phase2": "========== Phase 2: Policy Network Training (Random Rollout) ==========",
+    "_comment_phase2": "========== Phase 2: Policy Network Training ==========",
     "use_policy_network": true,
     "max_num_actions": 200,
     "policy_hidden_dim": 128,
+
+    "_comment_method_switch": "Method Selection (false=KL Divergence, true=Policy Gradient)",
+    "use_policy_gradient": false,
+
+    "_comment_common": "Common Parameters (Both Methods)",
     "policy_num_iters": 10,
     "policy_batch_size": 32,
     "policy_lr": 0.0001,
     "policy_log_steps": 5,
-    "max_path_length": 4,
-    "policy_num_rollouts": 3,
     "policy_eval_every": 3,
+    "max_path_length": 4,
+    "lambda_rule": 0.2,
+
+    "_comment_kl_params": "KL Divergence Specific Parameters",
+    "kl_num_rollouts": 3,
+
+    "_comment_pg_params": "Policy Gradient Specific Parameters",
+    "pg_num_rollouts": 5,
+    "gamma": 0.99,
+    "baseline": "avg_reward_normalized",
+    "entropy_weight": 0.01,
+    "grad_clip_norm": 5.0,
+    "use_lr_scheduler": true,
+    "lr_decay_factor": 0.5,
+    "lr_decay_steps": 10,
+
+    "_comment_inference": "Inference Parameters",
+    "rule_bonus_coef": 0.1,
+    "rule_bonus_default": 0.05,
 
     "_comment_phase3": "========== Phase 3: Testing (KGE + Policy Fusion with Beam Search) ==========",
     "use_kge_fusion": true,

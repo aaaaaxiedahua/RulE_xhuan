@@ -664,7 +664,7 @@ class RulE(torch.nn.Module):
 
     def compute_policy_loss(self, query_batch, num_rollouts=1, lambda_rule=0.3):
         """
-        计算规则监督的策略损失
+        计算规则监督的策略损失（方案2: KL散度）
 
         这是RulE-SSRL的核心创新：用规则作为软标签
         引导策略学习，替代SSRL基于BFS的标签。
@@ -687,6 +687,46 @@ class RulE(torch.nn.Module):
             device=self.device,
             num_rollouts=num_rollouts,
             lambda_rule=lambda_rule
+        )
+
+    def compute_policy_gradient_loss(self, query_batch, num_rollouts=5,
+                                    lambda_rule=0.3, gamma=0.99,
+                                    baseline='avg_reward_normalized',
+                                    entropy_weight=0.01, path_length=3):
+        """
+        计算Policy Gradient损失（方案3: Policy Gradient + 规则塑形）
+
+        与方案2的区别：
+        - 方案2: 每步归一化为概率，用KL散度模仿
+        - 方案3: 最后给主要奖励，用Policy Gradient更新
+
+        参数：
+            query_batch: [batch_size, 3] (h, r, t)三元组张量
+            num_rollouts: 每个查询采样的路径数量（建议5-10）
+            lambda_rule: 规则塑形系数（0.1-0.3）
+            gamma: 折扣因子（0.95-0.99）
+            baseline: 'n/a', 'avg_reward', 'avg_reward_normalized'
+            entropy_weight: 熵正则化权重（0.01-0.05）
+            path_length: 路径长度（从配置文件读取）
+
+        返回：
+            loss: 标量张量
+            metrics: 统计字典
+        """
+        from policy_network import PolicyNetworkTrainingHelper
+
+        return PolicyNetworkTrainingHelper.compute_policy_gradient_loss_with_rule_shaping(
+            policy_network=self.policy_network,
+            query_batch=query_batch,
+            graph=self.graph,
+            model=self,
+            device=self.device,
+            path_length=path_length,
+            num_rollouts=num_rollouts,
+            lambda_rule=lambda_rule,
+            gamma=gamma,
+            baseline=baseline,
+            entropy_weight=entropy_weight
         )
 
     # ========== 策略网络辅助方法 ==========

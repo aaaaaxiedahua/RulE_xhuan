@@ -99,6 +99,11 @@ def parse_args(args=None):
                        help='策略网络隐藏层维度')
 
     # Phase 2: 策略网络训练参数
+    # 方法选择
+    parser.add_argument('--use_policy_gradient', action='store_true', default=False,
+                       help='使用Policy Gradient (true) 或 KL散度 (false)')
+
+    # 公共参数
     parser.add_argument('--policy_num_iters', default=20, type=int,
                        help='策略网络训练轮数')
     parser.add_argument('--policy_batch_size', default=32, type=int,
@@ -107,10 +112,32 @@ def parse_args(args=None):
                        help='策略网络学习率')
     parser.add_argument('--policy_log_steps', default=100, type=int,
                        help='策略网络训练日志频率')
-    parser.add_argument('--policy_num_rollouts', default=1, type=int,
-                       help='策略网络训练时每个查询采样的路径数')
     parser.add_argument('--policy_eval_every', default=1, type=int,
                        help='策略网络训练时每多少轮验证一次')
+    parser.add_argument('--lambda_rule', default=0.2, type=float,
+                       help='规则奖励权重')
+
+    # KL散度特有参数
+    parser.add_argument('--kl_num_rollouts', default=3, type=int,
+                       help='KL散度方法的采样路径数')
+
+    # Policy Gradient特有参数
+    parser.add_argument('--pg_num_rollouts', default=5, type=int,
+                       help='Policy Gradient方法的采样路径数')
+    parser.add_argument('--gamma', default=0.99, type=float,
+                       help='折扣因子')
+    parser.add_argument('--baseline', default='avg_reward_normalized', type=str,
+                       help='Baseline类型')
+    parser.add_argument('--entropy_weight', default=0.01, type=float,
+                       help='熵正则化权重')
+    parser.add_argument('--grad_clip_norm', default=5.0, type=float,
+                       help='梯度裁剪阈值')
+    parser.add_argument('--use_lr_scheduler', action='store_true', default=False,
+                       help='是否使用学习率衰减')
+    parser.add_argument('--lr_decay_factor', default=0.5, type=float,
+                       help='学习率衰减因子')
+    parser.add_argument('--lr_decay_steps', default=10, type=int,
+                       help='学习率衰减步数')
 
     # Phase 3: 推理参数
     parser.add_argument('--num_policy_samples', default=10, type=int,
@@ -123,6 +150,10 @@ def parse_args(args=None):
                        help='Beam Search beam width')
     parser.add_argument('--dev_batch_size', default=64, type=int,
                        help='Validation/Test batch size')
+    parser.add_argument('--rule_bonus_coef', default=0.1, type=float,
+                       help='规则匹配的奖励系数')
+    parser.add_argument('--rule_bonus_default', default=0.05, type=float,
+                       help='无规则匹配时的默认奖励')
 
     return parser.parse_args(args)
 

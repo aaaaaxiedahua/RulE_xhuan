@@ -826,7 +826,7 @@ class PolicyTrainer(object):
 
     def train(self, args):
         """
-        策略网络训练主循环
+        策略网络训练主循环（支持方案2 KL散度 和 方案3 Policy Gradient）
 
         参数：
             args: 配置参数，需要包含：
@@ -834,9 +834,16 @@ class PolicyTrainer(object):
                 - policy_batch_size: 批大小
                 - policy_lr: 学习率
                 - policy_log_steps: 日志频率
-                - num_policy_samples: 验证时K采样次数
+                - use_policy_gradient: 是否使用Policy Gradient（方案3）
+                - gamma, baseline, entropy_weight: 方案3参数
         """
-        logging.info('>>>>> Phase 2: 策略网络训练')
+        # 检查使用哪种方法
+        use_pg = args.use_policy_gradient if hasattr(args, 'use_policy_gradient') else False
+
+        if use_pg:
+            logging.info('>>>>> Phase 2: 策略网络训练（方案3: Policy Gradient + 规则塑形）')
+        else:
+            logging.info('>>>>> Phase 2: 策略网络训练（方案2: KL散度 + 规则监督）')
 
         # Step 1: 冻结预训练嵌入
         logging.info('冻结预训练嵌入: entity, relation, rule')
@@ -855,6 +862,7 @@ class PolicyTrainer(object):
 
         policy_lr = args.policy_lr if hasattr(args, 'policy_lr') else 0.0001
         optimizer = torch.optim.Adam(policy_params, lr=policy_lr)
+        current_lr = policy_lr
 
         # Step 3: 数据加载
         from data import QueryDataset
@@ -872,12 +880,43 @@ class PolicyTrainer(object):
         # Step 4: 训练参数
         policy_num_iters = args.policy_num_iters if hasattr(args, 'policy_num_iters') else 20
         policy_log_steps = args.policy_log_steps if hasattr(args, 'policy_log_steps') else 100
-        policy_num_rollouts = args.policy_num_rollouts if hasattr(args, 'policy_num_rollouts') else 1
+
+        # 根据方法选择不同的 rollouts 参数
+        if use_pg:
+            policy_num_rollouts = args.pg_num_rollouts if hasattr(args, 'pg_num_rollouts') else 5
+        else:
+            policy_num_rollouts = args.kl_num_rollouts if hasattr(args, 'kl_num_rollouts') else 3
+
         policy_eval_every = args.policy_eval_every if hasattr(args, 'policy_eval_every') else 1
+
+        # 方案3额外参数
+        lambda_rule = args.lambda_rule if hasattr(args, 'lambda_rule') else 0.3
+        gamma = args.gamma if hasattr(args, 'gamma') else 0.99
+        baseline = args.baseline if hasattr(args, 'baseline') else 'avg_reward_normalized'
+        entropy_weight = args.entropy_weight if hasattr(args, 'entropy_weight') else 0.01
+        grad_clip_norm = args.grad_clip_norm if hasattr(args, 'grad_clip_norm') else 5.0
+        max_path_length = args.max_path_length if hasattr(args, 'max_path_length') else 3
+
+        # 学习率调度参数
+        use_lr_scheduler = args.use_lr_scheduler if hasattr(args, 'use_lr_scheduler') else False
+        lr_decay_factor = args.lr_decay_factor if hasattr(args, 'lr_decay_factor') else 0.5
+        lr_decay_steps = args.lr_decay_steps if hasattr(args, 'lr_decay_steps') else 10
 
         logging.info('训练轮数: {}'.format(policy_num_iters))
         logging.info('采样路径数: {}'.format(policy_num_rollouts))
         logging.info('验证频率: 每 {} 轮验证一次'.format(policy_eval_every))
+
+        if use_pg:
+            logging.info('方案3参数:')
+            logging.info('  - lambda_rule: {}'.format(lambda_rule))
+            logging.info('  - gamma: {}'.format(gamma))
+            logging.info('  - baseline: {}'.format(baseline))
+            logging.info('  - entropy_weight: {}'.format(entropy_weight))
+            logging.info('  - grad_clip_norm: {}'.format(grad_clip_norm))
+            logging.info('  - use_lr_scheduler: {}'.format(use_lr_scheduler))
+            if use_lr_scheduler:
+                logging.info('  - lr_decay_factor: {}'.format(lr_decay_factor))
+                logging.info('  - lr_decay_steps: {}'.format(lr_decay_steps))
 
         # Step 5: 训练循环
         best_mrr = 0.0
@@ -887,6 +926,9 @@ class PolicyTrainer(object):
 
             self.model.train()
             total_loss = 0.0
+            total_reward = 0.0
+            total_success = 0.0
+            total_entropy = 0.0
             batch_count = 0
 
             for batch_id, query_batch in enumerate(query_dataloader):
@@ -896,15 +938,35 @@ class PolicyTrainer(object):
 
                 optimizer.zero_grad()
 
-                # 计算策略损失（传入lambda_rule参数）
-                lambda_rule = args.lambda_rule if hasattr(args, 'lambda_rule') else 0.3
-                loss = self.model.compute_policy_loss(
-                    query_batch,
-                    num_rollouts=policy_num_rollouts,
-                    lambda_rule=lambda_rule
-                )
+                # 根据方法选择损失函数
+                if use_pg:
+                    # 方案3: Policy Gradient
+                    loss, metrics = self.model.compute_policy_gradient_loss(
+                        query_batch,
+                        num_rollouts=policy_num_rollouts,
+                        lambda_rule=lambda_rule,
+                        gamma=gamma,
+                        baseline=baseline,
+                        entropy_weight=entropy_weight,
+                        path_length=max_path_length
+                    )
+                    total_reward += metrics['reward_avg']
+                    total_success += metrics['success_rate']
+                    total_entropy += metrics['entropy']
+                else:
+                    # 方案2: KL散度（原方法）
+                    loss = self.model.compute_policy_loss(
+                        query_batch,
+                        num_rollouts=policy_num_rollouts,
+                        lambda_rule=lambda_rule
+                    )
 
                 loss.backward()
+
+                # 梯度裁剪（方案3必须，方案2可选）
+                if use_pg:
+                    torch.nn.utils.clip_grad_norm_(policy_params, max_norm=grad_clip_norm)
+
                 optimizer.step()
 
                 total_loss += loss.item()
@@ -913,12 +975,33 @@ class PolicyTrainer(object):
                 # 日志
                 if (batch_id + 1) % policy_log_steps == 0:
                     avg_loss = total_loss / batch_count
-                    logging.info('Iter {}, Batch {}, Avg Loss: {:.6f}'.format(
-                        iter_num, batch_id + 1, avg_loss))
+                    if use_pg:
+                        avg_reward = total_reward / batch_count
+                        avg_success = total_success / batch_count
+                        avg_entropy = total_entropy / batch_count
+                        logging.info('Iter {}, Batch {}, Loss: {:.4f}, Reward: {:.4f}, Success: {:.2%}, Entropy: {:.4f}'.format(
+                            iter_num, batch_id + 1, avg_loss, avg_reward, avg_success, avg_entropy))
+                    else:
+                        logging.info('Iter {}, Batch {}, Avg Loss: {:.6f}'.format(
+                            iter_num, batch_id + 1, avg_loss))
 
             # 每轮结束后记录
             avg_loss = total_loss / batch_count if batch_count > 0 else 0
-            logging.info('Iteration {} 完成, 平均损失: {:.6f}'.format(iter_num, avg_loss))
+            if use_pg:
+                avg_reward = total_reward / batch_count if batch_count > 0 else 0
+                avg_success = total_success / batch_count if batch_count > 0 else 0
+                avg_entropy = total_entropy / batch_count if batch_count > 0 else 0
+                logging.info('Iteration {} 完成 - Loss: {:.4f}, Reward: {:.4f}, Success: {:.2%}, Entropy: {:.4f}'.format(
+                    iter_num, avg_loss, avg_reward, avg_success, avg_entropy))
+            else:
+                logging.info('Iteration {} 完成, 平均损失: {:.6f}'.format(iter_num, avg_loss))
+
+            # 学习率调度
+            if use_lr_scheduler and (iter_num % lr_decay_steps == 0):
+                current_lr = current_lr * lr_decay_factor
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = current_lr
+                logging.info('学习率衰减到: {:.6f}'.format(current_lr))
 
             # 按频率验证（每 policy_eval_every 轮验证一次，或最后一轮）
             if iter_num % policy_eval_every == 0 or iter_num == policy_num_iters:

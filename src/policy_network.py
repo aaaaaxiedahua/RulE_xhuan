@@ -553,3 +553,199 @@ class PolicyNetworkTrainingHelper:
             return torch.tensor(0.0, device=device, requires_grad=True)
 
         return total_loss / valid_steps
+
+    @staticmethod
+    def compute_policy_gradient_loss_with_rule_shaping(
+        policy_network, query_batch, graph, model, device,
+        path_length=3, num_rollouts=5, lambda_rule=0.3, gamma=0.99,
+        baseline='avg_reward_normalized', entropy_weight=0.01
+    ):
+        """
+        方案3：Policy Gradient + 规则塑形奖励
+
+        核心思想：
+        1. 主要奖励：只在最后检查是否到达目标（1或0）
+        2. 塑形奖励：每步遵循规则的额外奖励（lambda×质量）
+        3. 累积折扣：反向传播奖励到每一步
+        4. Baseline：减小方差
+        5. Entropy：鼓励探索
+
+        参数:
+            policy_network: RuleGuidedPolicyNetwork实例
+            query_batch: [batch_size, 3] 查询三元组 (h, r, t)
+            graph: KnowledgeGraph实例
+            model: RulE模型实例
+            device: torch设备
+            path_length: 路径长度
+            num_rollouts: 每个查询的rollout数量（至少5，用于baseline）
+            lambda_rule: 规则塑形系数（0.1-0.3）
+            gamma: 折扣因子（0.95-0.99）
+            baseline: 'n/a', 'avg_reward', 'avg_reward_normalized'
+            entropy_weight: 熵正则化权重（0.01-0.05）
+
+        返回:
+            loss: 标量张量
+            metrics: 统计字典
+        """
+        import torch.nn.functional as F
+
+        batch_size = query_batch.size(0)
+
+        # 提取查询
+        start_entities = query_batch[:, 0].cpu().numpy()
+        query_relations = query_batch[:, 1].cpu().numpy()
+        target_entities = query_batch[:, 2].cpu().numpy()
+
+        # 扩展为多个rollout
+        if num_rollouts > 1:
+            start_entities = np.repeat(start_entities, num_rollouts)
+            query_relations = np.repeat(query_relations, num_rollouts)
+            target_entities = np.repeat(target_entities, num_rollouts)
+            expanded_batch_size = batch_size * num_rollouts
+        else:
+            expanded_batch_size = batch_size
+
+        # ========== Step 1: 执行Rollout ==========
+        current_entities = start_entities.copy()
+        lstm_state = policy_network.get_init_state(expanded_batch_size, device)
+        prev_relation = torch.full((expanded_batch_size,), graph.rPAD, dtype=torch.long, device=device)
+
+        query_relation_tensor = torch.from_numpy(query_relations).long().to(device)
+        query_embedding = model.get_relation_embedding_by_id(query_relation_tensor)
+
+        has_rule_quality = hasattr(model, 'rules_weight_emb') and model.rules_weight_emb is not None
+
+        # 存储路径信息
+        log_action_probs = []  # 每步的log概率
+        entropies = []          # 每步的熵
+        shaping_rewards = []    # 每步的规则塑形奖励
+
+        for step in range(path_length):
+            # 获取动作空间
+            next_actions = graph.array_store[current_entities, :, :].copy()
+            next_entities_np = next_actions[:, :, 0]
+            next_relations_np = next_actions[:, :, 1]
+
+            next_entities = torch.from_numpy(next_entities_np).long().to(device)
+            next_relations = torch.from_numpy(next_relations_np).long().to(device)
+            current_entities_tensor = torch.from_numpy(current_entities).long().to(device)
+
+            # 前向传播
+            logits, lstm_state, action_idx = policy_network.step(
+                next_relations=next_relations,
+                next_entities=next_entities,
+                lstm_state=lstm_state,
+                prev_relation=prev_relation,
+                query_embedding=query_embedding,
+                current_entities=current_entities_tensor,
+                rule_model=model,
+                current_step=step,
+                query_relation_ids=query_relation_tensor
+            )
+
+            # 记录采样动作的log概率
+            action_log_prob = logits[torch.arange(expanded_batch_size, device=device), action_idx]
+            log_action_probs.append(action_log_prob)
+
+            # 计算熵（鼓励探索）
+            probs = torch.exp(logits)
+            entropy = -(probs * logits).sum(dim=-1)  # [expanded_batch_size]
+            entropies.append(entropy)
+
+            # ========== 计算规则塑形奖励（当前步）==========
+            step_shaping_reward = torch.zeros(expanded_batch_size, device=device)
+            chosen_relations = next_relations[torch.arange(expanded_batch_size, device=device), action_idx]
+
+            for b in range(expanded_batch_size):
+                query_rel = query_relations[b]
+
+                if not hasattr(model, 'relation2rules') or query_rel >= len(model.relation2rules):
+                    continue
+
+                rules = model.relation2rules[query_rel]
+                if len(rules) == 0:
+                    continue
+
+                chosen_rel = chosen_relations[b].item()
+
+                # 检查当前步的关系是否匹配规则
+                for rule_id, (r_head, r_body) in rules:
+                    if step < len(r_body):
+                        expected_rel = r_body[step]
+
+                        if chosen_rel == expected_rel:
+                            # 匹配！给予塑形奖励
+                            if has_rule_quality:
+                                rule_emb = model.rules_weight_emb[rule_id]
+                                rule_quality = torch.norm(rule_emb).item()
+                                rule_quality = max(rule_quality, 0.1)
+                            else:
+                                rule_quality = 1.0
+
+                            step_shaping_reward[b] += lambda_rule * rule_quality
+                            break  # 匹配一条规则即可
+
+            shaping_rewards.append(step_shaping_reward)
+
+            # 执行动作
+            chosen_entities = next_entities[torch.arange(expanded_batch_size, device=device), action_idx]
+            current_entities = chosen_entities.cpu().numpy()
+            prev_relation = chosen_relations
+
+        # ========== Step 2: 计算主要奖励（最终目标）==========
+        final_entities = torch.from_numpy(current_entities).long().to(device)
+        target_entities_tensor = torch.from_numpy(target_entities).long().to(device)
+
+        primary_reward = (final_entities == target_entities_tensor).float()  # {0, 1}
+
+        # ========== Step 3: 计算累积折扣奖励 ==========
+        cumulative_rewards = [torch.zeros(expanded_batch_size, device=device) for _ in range(path_length)]
+        cumulative_rewards[-1] = primary_reward + shaping_rewards[-1]
+
+        # 反向累积（从最后一步向前）
+        for t in range(path_length - 2, -1, -1):
+            cumulative_rewards[t] = shaping_rewards[t] + gamma * cumulative_rewards[t + 1]
+
+        # 转换为张量 [expanded_batch_size, path_length]
+        cumulative_rewards_tensor = torch.stack(cumulative_rewards, dim=1)
+
+        # ========== Step 4: Baseline稳定化（减小方差）==========
+        if baseline != 'n/a' and num_rollouts > 1:
+            # 重塑为 [batch_size, num_rollouts, path_length]
+            cumulative_3d = cumulative_rewards_tensor.view(batch_size, num_rollouts, path_length)
+
+            if baseline == 'avg_reward':
+                # 减去每个查询的平均奖励
+                baseline_vals = cumulative_3d.mean(dim=1, keepdim=True)
+                cumulative_3d = cumulative_3d - baseline_vals
+
+            elif baseline == 'avg_reward_normalized':
+                # 减均值 + 归一化标准差
+                mean = cumulative_3d.mean(dim=1, keepdim=True)
+                std = cumulative_3d.std(dim=1, keepdim=True) + 1e-8
+                cumulative_3d = (cumulative_3d - mean) / std
+
+            # 重新展平
+            cumulative_rewards_tensor = cumulative_3d.view(expanded_batch_size, path_length)
+
+        # ========== Step 5: 计算Policy Gradient损失 ==========
+        pg_loss = 0.0
+        for t in range(path_length):
+            pg_loss += -(log_action_probs[t] * cumulative_rewards_tensor[:, t]).mean()
+
+        # ========== Step 6: Entropy正则化（鼓励探索）==========
+        entropy_loss = torch.stack(entropies).mean()
+
+        # 总损失 = PG损失 - 熵奖励
+        total_loss = pg_loss - entropy_weight * entropy_loss
+
+        # ========== 统计信息 ==========
+        metrics = {
+            'reward_avg': primary_reward.mean().item(),
+            'success_rate': (primary_reward > 0.5).float().mean().item(),
+            'entropy': entropy_loss.item(),
+            'pg_loss': pg_loss.item(),
+            'avg_cumulative_reward': cumulative_rewards_tensor[:, 0].mean().item(),
+        }
+
+        return total_loss, metrics
