@@ -606,6 +606,10 @@ class PolicyNetworkTrainingHelper:
             expanded_batch_size = batch_size
 
         # ========== Step 1: 执行Rollout ==========
+        import logging
+        logging.info('[DEBUG] 开始Rollout, batch_size={}, num_rollouts={}, path_length={}'.format(
+            batch_size, num_rollouts, path_length))
+
         current_entities = start_entities.copy()
         lstm_state = policy_network.get_init_state(expanded_batch_size, device)
         prev_relation = torch.full((expanded_batch_size,), graph.rPAD, dtype=torch.long, device=device)
@@ -621,8 +625,11 @@ class PolicyNetworkTrainingHelper:
         shaping_rewards = []    # 每步的规则塑形奖励
 
         for step in range(path_length):
+            logging.info('[DEBUG] Step {}/{}'.format(step+1, path_length))
             # 获取动作空间
+            logging.info('[DEBUG] 开始获取动作空间...')
             next_actions = graph.array_store[current_entities, :, :].copy()
+            logging.info('[DEBUG] 动作空间获取完成, shape={}'.format(next_actions.shape))
             next_entities_np = next_actions[:, :, 0]
             next_relations_np = next_actions[:, :, 1]
 
@@ -653,10 +660,14 @@ class PolicyNetworkTrainingHelper:
             entropies.append(entropy)
 
             # ========== 计算规则塑形奖励（当前步）==========
+            logging.info('[DEBUG] 开始计算规则塑形奖励...')
             step_shaping_reward = torch.zeros(expanded_batch_size, device=device)
             chosen_relations = next_relations[torch.arange(expanded_batch_size, device=device), action_idx]
 
             for b in range(expanded_batch_size):
+                if b % 100 == 0 and b > 0:
+                    logging.info('[DEBUG] 规则匹配进度: {}/{}'.format(b, expanded_batch_size))
+
                 query_rel = query_relations[b]
 
                 if not hasattr(model, 'relation2rules') or query_rel >= len(model.relation2rules):
@@ -685,6 +696,7 @@ class PolicyNetworkTrainingHelper:
                             step_shaping_reward[b] += lambda_rule * rule_quality
                             break  # 匹配一条规则即可
 
+            logging.info('[DEBUG] 规则塑形奖励计算完成')
             shaping_rewards.append(step_shaping_reward)
 
             # 执行动作
