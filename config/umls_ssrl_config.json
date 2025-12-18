@@ -55,7 +55,7 @@
     "policy_num_iters": 10,
     "policy_batch_size": 32,
     "policy_lr": 0.0001,
-    "policy_log_steps": 5,
+    "policy_log_steps": 1,
     "policy_eval_every": 3,
     "max_path_length": 4,
     "lambda_rule": 0.2,
