@@ -254,9 +254,21 @@ class RuleGuidedPolicyNetwork(nn.Module):
         # 检查是否有预计算的规则质量权重
         has_rule_quality = hasattr(rule_model, 'rules_weight_emb') and rule_model.rules_weight_emb is not None
 
+        # ⚡ 性能优化：预先转换为numpy避免重复.item()调用
+        if isinstance(query_relation_ids, torch.Tensor):
+            query_relation_ids_np = query_relation_ids.cpu().numpy()
+        else:
+            query_relation_ids_np = query_relation_ids
+
+        # ⚡ 性能优化：预先计算所有规则的质量（避免循环中重复计算）
+        if has_rule_quality:
+            rules_quality_cache = torch.norm(rule_model.rules_weight_emb, dim=1).clamp(min=0.1).cpu().numpy()
+        else:
+            rules_quality_cache = None
+
         # 规则匹配打分：检查候选动作的关系是否匹配规则体当前步期望的关系
         for b in range(batch_size):
-            query_rel = query_relation_ids[b].item() if isinstance(query_relation_ids, torch.Tensor) else query_relation_ids[b]
+            query_rel = query_relation_ids_np[b]  # ⚡ 直接从numpy读取，无需.item()
 
             # 获取该查询关系对应的所有规则
             if not hasattr(rule_model, 'relation2rules') or query_rel >= len(rule_model.relation2rules):
@@ -281,11 +293,9 @@ class RuleGuidedPolicyNetwork(nn.Module):
                     expected_rel = r_body[current_step]  # 当前步期望的关系
 
                     # ===== 改进：获取规则质量权重 =====
-                    if has_rule_quality:
-                        # 使用预训练的规则质量嵌入的范数作为权重
-                        rule_emb = rule_model.rules_weight_emb[rule_id]  # [hidden_dim]
-                        rule_quality = torch.norm(rule_emb).item()
-                        rule_quality = max(rule_quality, 0.1)  # 避免为0
+                    if rules_quality_cache is not None:
+                        # ⚡ 从预计算的缓存中读取，避免重复计算和.item()
+                        rule_quality = float(rules_quality_cache[rule_id])
                     else:
                         rule_quality = 1.0  # 退化为原来的等权重
 
@@ -664,11 +674,20 @@ class PolicyNetworkTrainingHelper:
             step_shaping_reward = torch.zeros(expanded_batch_size, device=device)
             chosen_relations = next_relations[torch.arange(expanded_batch_size, device=device), action_idx]
 
+            # ⚡ 性能优化：预先计算规则质量缓存
+            if has_rule_quality:
+                rules_quality_cache = torch.norm(model.rules_weight_emb, dim=1).clamp(min=0.1).cpu().numpy()
+            else:
+                rules_quality_cache = None
+
+            # ⚡ 性能优化：转换为numpy避免重复.item()
+            chosen_relations_np = chosen_relations.cpu().numpy()
+
             for b in range(expanded_batch_size):
                 if b % 100 == 0 and b > 0:
                     logging.info('[DEBUG] 规则匹配进度: {}/{}'.format(b, expanded_batch_size))
 
-                query_rel = query_relations[b]
+                query_rel = query_relations[b]  # query_relations已经是numpy数组
 
                 if not hasattr(model, 'relation2rules') or query_rel >= len(model.relation2rules):
                     continue
@@ -677,7 +696,7 @@ class PolicyNetworkTrainingHelper:
                 if len(rules) == 0:
                     continue
 
-                chosen_rel = chosen_relations[b].item()
+                chosen_rel = chosen_relations_np[b]  # ⚡ 直接从numpy读取
 
                 # 检查当前步的关系是否匹配规则
                 for rule_id, (r_head, r_body) in rules:
@@ -686,10 +705,9 @@ class PolicyNetworkTrainingHelper:
 
                         if chosen_rel == expected_rel:
                             # 匹配！给予塑形奖励
-                            if has_rule_quality:
-                                rule_emb = model.rules_weight_emb[rule_id]
-                                rule_quality = torch.norm(rule_emb).item()
-                                rule_quality = max(rule_quality, 0.1)
+                            if rules_quality_cache is not None:
+                                # ⚡ 从缓存读取，避免重复计算
+                                rule_quality = float(rules_quality_cache[rule_id])
                             else:
                                 rule_quality = 1.0
 
