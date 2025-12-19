@@ -6,9 +6,66 @@ from layers import MLP, FuncToNodeSum
 
 from torch.nn.utils.rnn import pad_sequence
 
+
+class QueryConditionedAttention(nn.Module):
+    """
+    方案一：Query-Conditioned Rule Attention
+    根据查询(h, r)动态计算每条规则的重要性权重
+    """
+    def __init__(self, hidden_dim, attention_hidden_dim=64, dropout=0.1):
+        super(QueryConditionedAttention, self).__init__()
+
+        # 查询编码器：将[h_emb, r_emb]编码为query_vector
+        # 输入: hidden_dim*2 (实体) + hidden_dim (关系) = hidden_dim*3
+        self.query_encoder = MLP(
+            input_dim=hidden_dim * 3,
+            hidden_dims=[attention_hidden_dim],
+            dropout=dropout
+        )
+
+        # 注意力网络：计算query和rule的匹配分数
+        # 输入: attention_hidden_dim (query) + hidden_dim (rule)
+        self.attention_net = MLP(
+            input_dim=attention_hidden_dim + hidden_dim,
+            hidden_dims=[attention_hidden_dim, 1],
+            dropout=dropout
+        )
+
+    def forward(self, h_emb, r_emb, rule_embs):
+        """
+        计算attention权重
+
+        Args:
+            h_emb: 头实体embedding [batch, hidden_dim*2]
+            r_emb: 关系embedding [batch, hidden_dim]
+            rule_embs: 规则embeddings [num_rules, hidden_dim]
+
+        Returns:
+            attention_scores: [batch, num_rules, 1] 范围在(0, 1)之间
+        """
+        batch_size = h_emb.size(0)
+        num_rules = rule_embs.size(0)
+
+        # 1. 编码查询：拼接头实体和关系
+        query = torch.cat([h_emb, r_emb], dim=-1)  # [batch, hidden_dim*3]
+        query_vec = self.query_encoder(query)  # [batch, attention_hidden_dim]
+
+        # 2. 扩展到所有规则
+        query_exp = query_vec.unsqueeze(1).expand(batch_size, num_rules, -1)  # [batch, num_rules, attention_hidden_dim]
+        rule_exp = rule_embs.unsqueeze(0).expand(batch_size, -1, -1)  # [batch, num_rules, hidden_dim]
+
+        # 3. 拼接query和rule特征
+        attn_input = torch.cat([query_exp, rule_exp], dim=-1)  # [batch, num_rules, attention_hidden_dim + hidden_dim]
+
+        # 4. 计算attention分数（使用sigmoid，每条规则独立打分）
+        attention_scores = torch.sigmoid(self.attention_net(attn_input))  # [batch, num_rules, 1]
+
+        return attention_scores
+
+
 class RulE(torch.nn.Module):
     def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset,
-                 num_samples=5, lambda_0=1.0):
+                 num_samples=5, lambda_0=1.0, use_query_attention=False, attention_hidden_dim=64, attention_dropout=0.1):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -19,6 +76,7 @@ class RulE(torch.nn.Module):
         self.hidden_dim = hidden_dim
         self.num_samples = num_samples
         self.lambda_0 = lambda_0
+        self.use_query_attention = use_query_attention
         # self.entity_dim = hidden_dim * 2 
         # self.relation_dim = hidden_dim
 
@@ -33,9 +91,21 @@ class RulE(torch.nn.Module):
         self.rule_to_entity = FuncToNodeSum(self.mlp_rule_dim)
 
         if "FB15k-237" in dataset or "wn18rr" in dataset or "YAGO3-10" in dataset:
-            self.score_model = MLP(self.mlp_rule_dim, [128, 1]) 
+            self.score_model = MLP(self.mlp_rule_dim, [128, 1])
         else:
-            self.score_model = MLP(self.mlp_rule_dim, [1]) 
+            self.score_model = MLP(self.mlp_rule_dim, [1])
+
+        # 方案一：Query-Conditioned Attention
+        if self.use_query_attention:
+            self.query_attention = QueryConditionedAttention(
+                hidden_dim=hidden_dim,
+                attention_hidden_dim=attention_hidden_dim,
+                dropout=attention_dropout
+            )
+            logging.info(f'Query-Conditioned Attention enabled: attention_hidden_dim={attention_hidden_dim}, dropout={attention_dropout}')
+        else:
+            self.query_attention = None
+            logging.info('Query-Conditioned Attention disabled')
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
         
@@ -466,7 +536,23 @@ class RulE(torch.nn.Module):
         else:
             mlp_feature = self.mlp_feature[rule_index]
 
-        output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
+        # 方案一：计算 Query-Conditioned Attention 权重
+        attention_weights = None
+        if self.use_query_attention and self.query_attention is not None:
+            # 获取头实体和关系的embedding
+            h_emb = self.entity_embedding(all_h)  # [batch, hidden_dim*2]
+
+            # 处理关系ID（考虑正向和反向）
+            r_id = query_r % self.num_relations
+            r_emb = self.relation_embedding(r_id).unsqueeze(0).expand(all_h.size(0), -1)  # [batch, hidden_dim]
+
+            # 获取规则embedding
+            rule_embeddings = self.rule_emb(rule_index)  # [num_selected_rules, hidden_dim]
+
+            # 计算attention权重
+            attention_weights = self.query_attention(h_emb, r_emb, rule_embeddings)  # [batch, num_selected_rules, 1]
+
+        output = self.rule_to_entity(rule_count, rule_emb, mlp_feature, attention_weights)
 
 
         # rel = self.relation_embedding(all_r[0]%self.num_relations)

@@ -92,6 +92,11 @@ def parse_args(args=None):
     parser.add_argument('--lambda_0', default=1.0, type=float, help='方差目标计算基础参数')
     parser.add_argument('--lambda_uncertainty', default=0.01, type=float, help='不确定性损失总体权重')
 
+    # 方案一：Query-Conditioned Attention 超参数
+    parser.add_argument('--use_query_attention', default=False, type=lambda x: (str(x).lower() == 'true'), help='是否启用Query-Conditioned Attention')
+    parser.add_argument('--attention_hidden_dim', default=64, type=int, help='attention网络隐藏层维度')
+    parser.add_argument('--attention_dropout', default=0.1, type=float, help='attention网络dropout率')
+
     return parser.parse_args(args)
 
 def main():
@@ -135,7 +140,10 @@ def main():
         device = torch.device('cpu')
 
     RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path,
-                      num_samples=args.num_samples, lambda_0=args.lambda_0)
+                      num_samples=args.num_samples, lambda_0=args.lambda_0,
+                      use_query_attention=args.use_query_attention,
+                      attention_hidden_dim=args.attention_hidden_dim,
+                      attention_dropout=args.attention_dropout)
     RulE_model.set_rules(rules)
 
     

@@ -39,5 +39,9 @@
     "beta_kl": 0.001,
     "beta_sigma": 0.01,
     "lambda_0": 1.0,
-    "lambda_uncertainty": 0.01
+    "lambda_uncertainty": 0.01,
+
+    "use_query_attention": true,
+    "attention_hidden_dim": 64,
+    "attention_dropout": 0.1
 }

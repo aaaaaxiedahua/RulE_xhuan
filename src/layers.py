@@ -59,8 +59,8 @@ class FuncToNodeSum(nn.Module):
         #     param.requires_grad = False
         
     
-    def forward(self, A_fn, x_f, mlp_rule_feature):
-        
+    def forward(self, A_fn, x_f, mlp_rule_feature, attention_weights=None):
+
         weight = torch.transpose(A_fn, 0, 1).unsqueeze(-1)
         message = x_f.unsqueeze(0)
 
@@ -68,8 +68,16 @@ class FuncToNodeSum(nn.Module):
         weighted_features = torch.matmul(feature, mlp_rule_feature)
         weighted_features_norm = self.layer_norm(weighted_features)
         weighted_features_relu = torch.relu(weighted_features_norm)
-        output = weighted_features_relu.mean(1)
-        
+
+        # 方案一：Query-Conditioned Attention
+        if attention_weights is not None:
+            # attention_weights: [batch, num_rules, 1]
+            # weighted_features_relu: [batch, num_rules, mlp_dim]
+            output = (weighted_features_relu * attention_weights).sum(1)
+        else:
+            # 保持原始的简单平均
+            output = weighted_features_relu.mean(1)
+
         return output
 
 
