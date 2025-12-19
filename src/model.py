@@ -239,6 +239,7 @@ class RulE(torch.nn.Module):
         r_body_sum = body_emb.sum(dim=1)                                   # [num_rules, hidden_dim]
 
         features = torch.cat([R_i, r_body_sum], dim=-1)                    # [num_rules, rule_dim + hidden_dim]
+
         return features
 
     def compute_ruleE(self, sample, mode='single'):
@@ -423,28 +424,55 @@ class RulE(torch.nn.Module):
         assert (all_r != query_r).sum() == 0
         device = all_r.device
 
+        # 🔍 日志1: forward入口
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / 1e9
+            print(f"    [model.forward] 入口: {allocated:.2f}GB, query_r={query_r}, batch_size={all_h.shape[0]}")
+
         if device.type == "cuda":
             self.rule_features = self.rule_features.cuda(device)
 
         rule_index = list()
         rule_count = list()
-        
-        
+
         mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
-        for index, (r_head, r_body) in self.relation2rules[query_r]:
+
+        # 🔍 日志2: 遍历规则前
+        num_rules_for_relation = len(self.relation2rules[query_r])
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / 1e9
+            print(f"    [model.forward] 遍历规则前: {allocated:.2f}GB, 该关系的规则数={num_rules_for_relation}")
+
+        for idx, (index, (r_head, r_body)) in enumerate(self.relation2rules[query_r]):
 
             assert r_head == query_r
 
+            # 🔍 日志3: 执行grounding前（高危区域）
+            if device.type == "cuda" and idx == 0:  # 只在第一条规则打印
+                allocated = torch.cuda.memory_allocated(device) / 1e9
+                print(f"    [model.forward] ⚠️ 第一条规则grounding前: {allocated:.2f}GB, rule_body长度={len(r_body)}")
+
             count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
-            
+
+            # 🔍 日志4: 单条规则grounding后
+            if device.type == "cuda" and idx == 0:
+                allocated = torch.cuda.memory_allocated(device) / 1e9
+                print(f"    [model.forward] 第一条规则grounding后: {allocated:.2f}GB, count shape={count.shape}, count非零数={(count>0).sum().item()}")
+
             mask += count
 
             rule_index.append(index)
             rule_count.append(count)
 
+        # 🔍 日志5: 所有规则遍历完成
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / 1e9
+            print(f"    [model.forward] 所有规则遍历完成: {allocated:.2f}GB, mask非零总数={mask.sum().item()}")
 
         if mask.sum().item() == 0:
             # return mask + self.bias.unsqueeze(0), (1 - mask).bool(), torch.zeros_like(rule_loss)
+            if device.type == "cuda":
+                print(f"    [model.forward] ⚠️ 无grounding结果，提前返回")
             return mask + self.bias.unsqueeze(0), (1 - mask).bool()
 
 
@@ -454,7 +482,12 @@ class RulE(torch.nn.Module):
         rule_count = torch.stack(rule_count, dim=0)
 
         rule_count = rule_count.reshape(rule_index.size(0), -1)[:, candidate_set]
-        
+
+        # 🔍 日志6: 候选实体集构建后
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / 1e9
+            print(f"    [model.forward] 候选集构建: {allocated:.2f}GB, candidate_set大小={candidate_set.shape[0]}, rule_count shape={rule_count.shape}")
+
         rule_emb = self.rules_weight_emb[rule_index]
 
         # grounding 阶段：优先使用预训练后预计算的规则置信度 μ 作为标量权重
@@ -466,7 +499,17 @@ class RulE(torch.nn.Module):
         else:
             mlp_feature = self.mlp_feature[rule_index]
 
+        # 🔍 日志7: 规则特征准备后
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / 1e9
+            print(f"    [model.forward] 规则特征准备: {allocated:.2f}GB, mlp_feature shape={mlp_feature.shape}")
+
         output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
+
+        # 🔍 日志8: rule_to_entity后（⚠️ 可能显存峰值）
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / 1e9
+            print(f"    [model.forward] ⚠️ rule_to_entity后: {allocated:.2f}GB, output shape={output.shape}")
 
 
         # rel = self.relation_embedding(all_r[0]%self.num_relations)
@@ -484,7 +527,7 @@ class RulE(torch.nn.Module):
         score = score + self.bias.unsqueeze(0)
         # kge_score = self.compute_g_KGE(all_h, all_r)
         # kge_score_map = self.map(score, kge_score)
-        
+
         # beta = torch.sigmoid(self.beta[all_r[0]])
         # score = score + self.bias.unsqueeze(0)
         # betax = self.beta[all_r[0]][0]
@@ -494,6 +537,11 @@ class RulE(torch.nn.Module):
         # score = self.beta[all_r[0]] * score +  kge_score
 
         mask = torch.ones_like(mask).bool()
+
+        # 🔍 日志9: forward返回前
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / 1e9
+            print(f"    [model.forward] 返回前: {allocated:.2f}GB, score shape={score.shape}")
 
         return score, mask
 
