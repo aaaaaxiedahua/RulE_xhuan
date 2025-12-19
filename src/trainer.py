@@ -566,12 +566,6 @@ class GroundTrainer(object):
             # self.model.beta.data = self.model.beta / self.model.beta.sum(dim=-1,keepdim=True)
             # self.model.beta.requires_grad = True
 
-            # 🔍 日志1: Grounding训练步开始
-            if self.device.type == "cuda" and batch_id % print_every == 0:
-                allocated = torch.cuda.memory_allocated(self.device) / 1e9
-                reserved = torch.cuda.memory_reserved(self.device) / 1e9
-                print(f"\n[Grounding显存] Batch {batch_id} 开始: {allocated:.2f}GB / {reserved:.2f}GB")
-
             all_h, all_r, all_t, target, edges_to_remove = batch
             all_h = all_h.squeeze(0)
             all_r = all_r.squeeze(0)
@@ -579,11 +573,6 @@ class GroundTrainer(object):
             target = target.squeeze(0)
             edges_to_remove = edges_to_remove.squeeze(0)
             target_t = torch.nn.functional.one_hot(all_t, self.train_set.graph.entity_size)
-
-            # 🔍 日志2: 数据维度信息
-            if self.device.type == "cuda" and batch_id % print_every == 0:
-                print(f"[Grounding数据] all_h:{all_h.shape}, all_r:{all_r.shape}, all_t:{all_t.shape}, edges_to_remove:{edges_to_remove.shape}")
-                print(f"[Grounding数据] batch中三元组数量: {all_h.shape[0]}, 实体总数: {self.train_set.graph.entity_size}")
 
             if self.device.type == "cuda":
                 all_h = all_h.cuda(device=self.device)
@@ -593,60 +582,19 @@ class GroundTrainer(object):
                 edges_to_remove = edges_to_remove.cuda(device=self.device)
                 target_t = target_t.cuda(device=self.device)
 
-                # 🔍 日志3: 数据加载到GPU后
-                if batch_id % print_every == 0:
-                    allocated = torch.cuda.memory_allocated(self.device) / 1e9
-                    reserved = torch.cuda.memory_reserved(self.device) / 1e9
-                    print(f"[Grounding显存] 数据加载后: {allocated:.2f}GB / {reserved:.2f}GB")
-
             target = target * smoothing + target_t * (1 - smoothing)
 
-            # 🔍 日志4: 调用model.forward前（⚠️ grounding显存爆炸高危区）
-            if self.device.type == "cuda" and batch_id % print_every == 0:
-                allocated = torch.cuda.memory_allocated(self.device) / 1e9
-                reserved = torch.cuda.memory_reserved(self.device) / 1e9
-                print(f"[Grounding显存] ⚠️ model.forward 调用前: {allocated:.2f}GB / {reserved:.2f}GB")
-                query_r = all_r[0].item()
-                num_rules_for_relation = len(model.relation2rules[query_r])
-                print(f"[Grounding规则] 关系 {query_r} 对应规则数: {num_rules_for_relation}")
-
             grounding_rule_score, mask = model(all_h, all_r, edges_to_remove)
-
-            # 🔍 日志5: model.forward后
-            if self.device.type == "cuda" and batch_id % print_every == 0:
-                allocated = torch.cuda.memory_allocated(self.device) / 1e9
-                reserved = torch.cuda.memory_reserved(self.device) / 1e9
-                print(f"[Grounding显存] model.forward 调用后: {allocated:.2f}GB / {reserved:.2f}GB")
-                print(f"[Grounding结果] grounding_score shape={grounding_rule_score.shape}, mask shape={mask.shape}, mask.sum={mask.sum().item()}")
 
             if mask.sum().item() != 0:
                 rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
 
                 loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
 
-                # 🔍 日志6: 反向传播前
-                if self.device.type == "cuda" and batch_id % print_every == 0:
-                    allocated = torch.cuda.memory_allocated(self.device) / 1e9
-                    reserved = torch.cuda.memory_reserved(self.device) / 1e9
-                    print(f"[Grounding显存] backward 前: {allocated:.2f}GB / {reserved:.2f}GB, loss={loss.item():.6f}")
-
                 loss.backward()
-
-                # 🔍 日志7: 反向传播后
-                if self.device.type == "cuda" and batch_id % print_every == 0:
-                    allocated = torch.cuda.memory_allocated(self.device) / 1e9
-                    reserved = torch.cuda.memory_reserved(self.device) / 1e9
-                    print(f"[Grounding显存] backward 后: {allocated:.2f}GB / {reserved:.2f}GB")
 
                 optimizer.step()
                 optimizer.zero_grad()
-
-                # 🔍 日志8: 优化器更新后
-                if self.device.type == "cuda" and batch_id % print_every == 0:
-                    allocated = torch.cuda.memory_allocated(self.device) / 1e9
-                    reserved = torch.cuda.memory_reserved(self.device) / 1e9
-                    print(f"[Grounding显存] optimizer.step 后: {allocated:.2f}GB / {reserved:.2f}GB")
-                    print("="*80)
 
                 total_loss += loss.item()
                 total_size += mask.sum().item()
