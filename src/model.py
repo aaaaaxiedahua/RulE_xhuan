@@ -536,8 +536,7 @@ class RulE(torch.nn.Module):
         else:
             mlp_feature = self.mlp_feature[rule_index]
 
-        # 方案一：计算 Query-Conditioned Attention 权重
-        attention_weights = None
+        # 方案一：计算 Query-Conditioned Attention 权重，并应用到 mlp_feature
         if self.use_query_attention and self.query_attention is not None:
             # 获取头实体和关系的embedding
             h_emb = self.entity_embedding(all_h)  # [batch, hidden_dim*2]
@@ -553,7 +552,13 @@ class RulE(torch.nn.Module):
             # 计算attention权重
             attention_weights = self.query_attention(h_emb, r_emb, rule_embeddings)  # [batch, num_selected_rules, 1]
 
-        output = self.rule_to_entity(rule_count, rule_emb, mlp_feature, attention_weights)
+            # 对batch维度平均，得到每条规则的平均attention权重
+            attention_avg = attention_weights.mean(0)  # [num_selected_rules, 1]
+
+            # 将attention权重应用到mlp_feature
+            mlp_feature = mlp_feature * attention_avg  # [num_selected_rules, mlp_rule_dim]
+
+        output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
 
 
         # rel = self.relation_embedding(all_r[0]%self.num_relations)
