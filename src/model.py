@@ -544,7 +544,8 @@ class RulE(torch.nn.Module):
 
             # 处理关系ID（考虑正向和反向）
             r_id = query_r % self.num_relations
-            r_emb = self.relation_embedding(r_id).unsqueeze(0).expand(all_h.size(0), -1)  # [batch, hidden_dim]
+            r_id_tensor = torch.tensor([r_id], dtype=torch.long, device=device)
+            r_emb = self.relation_embedding(r_id_tensor).expand(all_h.size(0), -1)  # [batch, hidden_dim]
 
             # 获取规则embedding
             rule_embeddings = self.rule_emb(rule_index)  # [num_selected_rules, hidden_dim]
