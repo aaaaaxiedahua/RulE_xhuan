@@ -541,9 +541,18 @@ class GroundTrainer(object):
         checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding.pt'))
         self.model.load_state_dict(checkpoint['model'])
         
-        test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
-        test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
-        test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+        # test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+        # test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
+        # test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+        best_valid_mrr = self.evaluate('valid', args.alpha, expectation=True)
+        best_test_mrr = self.evaluate('test', args.alpha, expectation=True)
+        best_test_kge_mrr = self.evaluate_t('test_kge', args.alpha, expectation=True)
+
+        logging.info('-------------------------')
+        logging.info('| Best Valid MRR: {:.6f}'.format(best_valid_mrr))
+        logging.info('| Best Test MRR : {:.6f}'.format(best_test_mrr))
+        logging.info('| Test+KGE MRR  : {:.6f}'.format(best_test_kge_mrr))
+        logging.info('-------------------------')
 
 
        

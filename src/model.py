@@ -536,27 +536,40 @@ class RulE(torch.nn.Module):
         else:
             mlp_feature = self.mlp_feature[rule_index]
 
-        # 方案一：计算 Query-Conditioned Attention 权重，并应用到 mlp_feature
+        # 方案一：Query-Conditioned Attention（真正做到 query-specific）
+        # 注意：当前 forward 的一个 batch 包含同一关系 r 下的多个 head 实体 h，
+        #      因此不能把 attention 在 batch 维度求平均；否则会退化成“batch-conditioned”，
+        #      反而会把不同 query 的偏好混在一起。
+        #
+        # 实现方式：对每个 query(b) 计算规则权重 a_bi，然后把对应列的 grounding count 乘上 a_bi。
         if self.use_query_attention and self.query_attention is not None:
-            # 获取头实体和关系的embedding
-            h_emb = self.entity_embedding(all_h)  # [batch, hidden_dim*2]
+            # 头实体 embedding: [batch, hidden_dim*2]
+            h_emb = self.entity_embedding(all_h)
 
-            # 处理关系ID（考虑正向和反向）
+            # 关系 embedding（包含正反向符号）: [batch, hidden_dim]
             r_id = query_r % self.num_relations
+            r_flag = -1.0 if (query_r // self.num_relations) > 0 else 1.0
             r_id_tensor = torch.tensor([r_id], dtype=torch.long, device=device)
-            r_emb = self.relation_embedding(r_id_tensor).expand(all_h.size(0), -1)  # [batch, hidden_dim]
+            r_base = self.relation_embedding(r_id_tensor).squeeze(0) * r_flag
+            r_emb = r_base.expand(all_h.size(0), -1)
 
-            # 获取规则embedding
-            rule_embeddings = self.rule_emb(rule_index)  # [num_selected_rules, hidden_dim]
+            # 规则 embedding: [num_selected_rules, hidden_dim]
+            rule_embeddings = self.rule_emb(rule_index)
 
-            # 计算attention权重
-            attention_weights = self.query_attention(h_emb, r_emb, rule_embeddings)  # [batch, num_selected_rules, 1]
+            # attention: [batch, num_selected_rules] in (0, 1)
+            attention = self.query_attention(h_emb, r_emb, rule_embeddings).squeeze(-1)
 
-            # 对batch维度平均，得到每条规则的平均attention权重
-            attention_avg = attention_weights.mean(0)  # [num_selected_rules, 1]
+            # 让每个 query 的 attention 均值为 1，避免整体缩放导致训练不稳定
+            attention = attention / (attention.mean(dim=1, keepdim=True) + 1e-9)
 
-            # 将attention权重应用到mlp_feature
-            mlp_feature = mlp_feature * attention_avg  # [num_selected_rules, mlp_rule_dim]
+            # candidate_set 是 batch*entity 的扁平索引；还原到 query 维度
+            candidate_query_idx = candidate_set // self.graph.entity_size  # [num_candidates]
+
+            # 为每个 candidate 取到所属 query 的 attention: [num_candidates, num_selected_rules]
+            attention_for_candidates = attention.index_select(0, candidate_query_idx)
+
+            # 把 attention 应用到 grounding count: [num_selected_rules, num_candidates]
+            rule_count = rule_count * attention_for_candidates.transpose(0, 1)
 
         output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
 
