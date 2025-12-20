@@ -63,51 +63,12 @@ class QueryConditionedAttention(nn.Module):
         return attention_scores
 
 
-class QueryConditionedFusionGate(nn.Module):
-    """
-    方案四：Query-Conditioned Fusion Gate（学习 alpha(h,r) >= 0）
-    alpha(h,r) 用于融合：final = grounding_logits + alpha(h,r) * kge_score
-    """
-    def __init__(self, hidden_dim, gate_hidden_dim=64, dropout=0.0, alpha_init=3.0, alpha_max=10.0):
-        super(QueryConditionedFusionGate, self).__init__()
-
-        self.alpha_max = float(alpha_max)
-
-        self.gate_mlp = MLP(
-            input_dim=hidden_dim * 3,
-            hidden_dims=[gate_hidden_dim, 1],
-            dropout=dropout
-        )
-
-        # initialize so that alpha(h,r) ~= alpha_init at start
-        alpha_init = float(alpha_init)
-        inv_softplus = math.log(math.exp(alpha_init) - 1.0) if alpha_init > 1e-6 else -20.0
-        self.alpha_bias = nn.Parameter(torch.tensor(inv_softplus, dtype=torch.float))
-
-    def forward(self, h_emb, r_emb):
-        """
-        Args:
-            h_emb: [batch, hidden_dim*2]
-            r_emb: [batch, hidden_dim]
-        Returns:
-            alpha: [batch, 1], in (0, alpha_max]
-        """
-        q = torch.cat([h_emb, r_emb], dim=-1)  # [batch, hidden_dim*3]
-        raw = self.gate_mlp(q)  # [batch, 1]
-        alpha = torch.nn.functional.softplus(raw + self.alpha_bias)
-        if self.alpha_max > 0:
-            alpha = torch.clamp(alpha, max=self.alpha_max)
-        return alpha
-
-
 class RulE(torch.nn.Module):
     def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset,
                  num_samples=5, lambda_0=1.0,
                  use_query_attention=False, attention_hidden_dim=64, attention_dropout=0.1,
                  use_hierarchical_agg=False, quality_thresholds=(0.4, 0.7),
-                 hierarchical_hidden_dim=64, hierarchical_dropout=0.1,
-                 use_fusion_gate=False, fusion_gate_hidden_dim=64, fusion_gate_dropout=0.0,
-                 fusion_alpha_init=3.0, fusion_alpha_max=10.0):
+                 hierarchical_hidden_dim=64, hierarchical_dropout=0.1):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -120,7 +81,6 @@ class RulE(torch.nn.Module):
         self.lambda_0 = lambda_0
         self.use_query_attention = use_query_attention
         self.use_hierarchical_agg = use_hierarchical_agg
-        self.use_fusion_gate = use_fusion_gate
         # self.entity_dim = hidden_dim * 2 
         # self.relation_dim = hidden_dim
 
@@ -171,24 +131,6 @@ class RulE(torch.nn.Module):
             self.num_quality_groups = 0
             self.hierarchical_gate = None
             logging.info('Hierarchical Rule Aggregation disabled')
-
-        # 方案四：Query-Conditioned Fusion Gate（学习 alpha(h,r)）
-        if self.use_fusion_gate:
-            self.fusion_gate = QueryConditionedFusionGate(
-                hidden_dim=hidden_dim,
-                gate_hidden_dim=fusion_gate_hidden_dim,
-                dropout=fusion_gate_dropout,
-                alpha_init=fusion_alpha_init,
-                alpha_max=fusion_alpha_max
-            )
-            logging.info(
-                'Query-Conditioned Fusion Gate enabled: '
-                f'hidden_dim={fusion_gate_hidden_dim}, dropout={fusion_gate_dropout}, '
-                f'alpha_init={fusion_alpha_init}, alpha_max={fusion_alpha_max}'
-            )
-        else:
-            self.fusion_gate = None
-            logging.info('Query-Conditioned Fusion Gate disabled')
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
         
@@ -265,16 +207,6 @@ class RulE(torch.nn.Module):
         r_id = all_r % self.num_relations
         r_emb = self.relation_embedding(r_id) * relations_flag
         return h_emb, r_emb
-
-    def compute_fusion_alpha(self, all_h, all_r):
-        """
-        Compute alpha(h,r) for fusion gate, if enabled.
-        Returns None when fusion gate is disabled.
-        """
-        if not self.use_fusion_gate or self.fusion_gate is None:
-            return None
-        h_emb, r_emb = self.get_query_embeddings(all_h, all_r)
-        return self.fusion_gate(h_emb, r_emb)
 
     # def add_param(self):
 
@@ -625,13 +557,6 @@ class RulE(torch.nn.Module):
             rule_count.append(count)
 
         if mask.sum().item() == 0:
-            # no grounding evidence; if fusion enabled, fall back to KGE for this query
-            if self.use_fusion_gate and self.fusion_gate is not None:
-                alpha = self.compute_fusion_alpha(all_h, all_r)  # [batch, 1]
-                kge_score = self.compute_g_KGE(all_h, all_r)
-                score = alpha * kge_score + self.bias.unsqueeze(0)
-                mask = torch.ones_like(mask).bool()
-                return score, mask
             return mask + self.bias.unsqueeze(0), (1 - mask).bool()
 
 
@@ -657,7 +582,6 @@ class RulE(torch.nn.Module):
         need_query_repr = (
             (self.use_query_attention and self.query_attention is not None)
             or (self.use_hierarchical_agg and self.hierarchical_gate is not None)
-            or (self.use_fusion_gate and self.fusion_gate is not None)
         )
         if need_query_repr:
             h_emb, r_emb = self.get_query_embeddings(all_h, all_r)
@@ -728,12 +652,6 @@ class RulE(torch.nn.Module):
         score.scatter_(0, candidate_set, output)
         score = score.view(all_h.size(0), self.graph.entity_size)
         score = score + self.bias.unsqueeze(0)
-
-        # 方案四：融合 KGE（query-conditioned alpha）
-        if self.use_fusion_gate and self.fusion_gate is not None:
-            alpha = self.fusion_gate(h_emb, r_emb)  # [batch, 1]
-            kge_score = self.compute_g_KGE(all_h, all_r)
-            score = score + alpha * kge_score
         # kge_score = self.compute_g_KGE(all_h, all_r)
         # kge_score_map = self.map(score, kge_score)
 
