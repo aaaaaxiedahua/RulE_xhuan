@@ -46,9 +46,11 @@
     "hierarchical_hidden_dim": 64,
     "hierarchical_dropout": 0.1,
 
-    "use_fusion_gate": true,
-    "fusion_gate_hidden_dim": 64,
-    "fusion_gate_dropout": 0.0,
-    "fusion_alpha_init": 2.0,
-    "fusion_alpha_max": 5.0
+    "use_dynamic_alpha": true,
+    "dynamic_alpha_min": 0.0,
+    "dynamic_alpha_max": 2.0,
+    "dynamic_alpha_margin_weight": 5.0,
+    "dynamic_alpha_entropy_weight": 2.0,
+    "dynamic_alpha_bias": 0.0,
+    "dynamic_alpha_topk": 50
 }

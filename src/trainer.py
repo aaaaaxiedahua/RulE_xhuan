@@ -2,6 +2,7 @@
 from utils import *
 import torch
 from torch import nn
+import math
 
 from torch.utils.data import DataLoader
 from itertools import islice
@@ -741,6 +742,9 @@ class GroundTrainer(object):
         concat_all_t = []
         concat_flag = []
         concat_mask = []
+        concat_alpha = []
+        concat_margin_ratio = []
+        concat_entropy = []
         
         for batch in tqdm(dataloader):
 
@@ -757,10 +761,50 @@ class GroundTrainer(object):
                 flag = flag.cuda(device=self.device)
 
             # logits, mask = model.forward_weight(all_h, all_r, None)
-            logits, mask = model(all_h, all_r, None)
-
+            grounding_logits, mask = model(all_h, all_r, None)
             kge_score = model.compute_g_KGE(all_h, all_r)
-            logits = logits + alpha * kge_score
+
+            use_dynamic_alpha = bool(getattr(self.args, "use_dynamic_alpha", False))
+            if use_dynamic_alpha:
+                alpha_min = float(getattr(self.args, "dynamic_alpha_min", 0.0))
+                alpha_max = float(getattr(self.args, "dynamic_alpha_max", alpha))
+                margin_weight = float(getattr(self.args, "dynamic_alpha_margin_weight", 5.0))
+                entropy_weight = float(getattr(self.args, "dynamic_alpha_entropy_weight", 2.0))
+                bias = float(getattr(self.args, "dynamic_alpha_bias", 0.0))
+                topk = int(getattr(self.args, "dynamic_alpha_topk", 50))
+
+                entity_size = grounding_logits.size(1)
+                topk = max(2, min(topk, entity_size))
+
+                if flag.dtype != torch.bool:
+                    flag = flag.bool()
+
+                masked_g = grounding_logits.masked_fill(~flag, float("-inf"))
+                all_false = (~flag).all(dim=1)
+                if all_false.any():
+                    masked_g[all_false] = grounding_logits[all_false]
+
+                top2_vals = masked_g.topk(2, dim=1).values  # [batch, 2]
+                top1 = top2_vals[:, 0]
+                top2 = top2_vals[:, 1]
+                margin = top1 - top2
+                margin_ratio = margin / (top1.abs() + 1e-9)
+
+                topk_vals = masked_g.topk(topk, dim=1).values  # [batch, topk]
+                probs = torch.softmax(topk_vals, dim=1)
+                entropy = -(probs * torch.log(probs + 1e-12)).sum(dim=1)
+                entropy = entropy / max(1e-9, math.log(topk))
+
+                confidence = torch.sigmoid(margin_weight * margin_ratio - entropy_weight * entropy + bias)
+                alpha_vec = alpha_min + (alpha_max - alpha_min) * (1.0 - confidence)
+                alpha_vec = alpha_vec.clamp(min=min(alpha_min, alpha_max), max=max(alpha_min, alpha_max))
+
+                logits = grounding_logits + alpha_vec.unsqueeze(1) * kge_score
+                concat_alpha.append(alpha_vec.detach().cpu())
+                concat_margin_ratio.append(margin_ratio.detach().cpu())
+                concat_entropy.append(entropy.detach().cpu())
+            else:
+                logits = grounding_logits + alpha * kge_score
 
             concat_logits.append(logits)
             concat_all_h.append(all_h)
@@ -775,6 +819,21 @@ class GroundTrainer(object):
         concat_all_t = torch.cat(concat_all_t, dim=0)
         concat_flag = torch.cat(concat_flag, dim=0)
         concat_mask = torch.cat(concat_mask, dim=0)
+
+        if bool(getattr(self.args, "use_dynamic_alpha", False)) and len(concat_alpha) > 0:
+            alpha_all = torch.cat(concat_alpha, dim=0)
+            margin_all = torch.cat(concat_margin_ratio, dim=0)
+            entropy_all = torch.cat(concat_entropy, dim=0)
+            logging.info(
+                'Dynamic alpha (heuristic): '
+                f'mean={alpha_all.mean().item():.6f}, std={alpha_all.std().item():.6f}, '
+                f'min={alpha_all.min().item():.6f}, max={alpha_all.max().item():.6f}'
+            )
+            logging.info(
+                'Dynamic alpha features: '
+                f'margin_ratio_mean={margin_all.mean().item():.6f}, '
+                f'entropy_mean={entropy_all.mean().item():.6f}'
+            )
         
         ranks = []
         for k in range(concat_all_t.size(0)):
