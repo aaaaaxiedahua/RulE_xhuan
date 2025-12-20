@@ -9,6 +9,7 @@ from data import Iterator, RuleDataset, KGETrainDataset, BidirectionalOneShotIte
 import torch.nn.functional as F
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import math
 
 class PreTrainer(object):
 
@@ -549,7 +550,10 @@ class GroundTrainer(object):
         logging.info('-------------------------')
         logging.info('| Best Valid MRR: {:.6f}'.format(best_valid_mrr))
         logging.info('| Best Test MRR : {:.6f}'.format(best_test_mrr))
-        logging.info('| Test+KGE MRR  : {:.6f}'.format(best_test_kge_mrr))
+        if getattr(self.model, "use_fusion_gate", False):
+            logging.info('| Test+Fusion MRR: {:.6f}'.format(best_test_kge_mrr))
+        else:
+            logging.info('| Test+KGE MRR  : {:.6f}'.format(best_test_kge_mrr))
         logging.info('-------------------------')
 
 
@@ -565,6 +569,9 @@ class GroundTrainer(object):
 
         total_loss = 0.0
         total_size = 0.0
+        alpha_sum = 0.0
+        alpha_sumsq = 0.0
+        alpha_n = 0
 
         for batch_id, batch in enumerate(islice(train_dataloader, batch_per_epoch)):
             # 归一化
@@ -605,14 +612,32 @@ class GroundTrainer(object):
 
                 total_loss += loss.item()
                 total_size += mask.sum().item()
+
+                if getattr(model, "use_fusion_gate", False):
+                    alpha = model.compute_fusion_alpha(all_h, all_r)
+                    if alpha is not None:
+                        alpha_sum += float(alpha.sum().item())
+                        alpha_sumsq += float((alpha * alpha).sum().item())
+                        alpha_n += int(alpha.numel())
             
             if (batch_id + 1) % print_every == 0:
-                
-                
-                logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
+                if getattr(model, "use_fusion_gate", False) and alpha_n > 0:
+                    alpha_mean = alpha_sum / alpha_n
+                    alpha_var = max(alpha_sumsq / alpha_n - alpha_mean * alpha_mean, 0.0)
+                    alpha_std = math.sqrt(alpha_var)
+                    logging.info(
+                        'loss:    {} {} {:.6f} {:.1f} | alpha_mean={:.4f} alpha_std={:.4f}'.format(
+                            batch_id + 1, len(train_dataloader), loss, total_size / print_every, alpha_mean, alpha_std
+                        )
+                    )
+                else:
+                    logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
                 
                 total_loss = 0.0
                 total_size = 0.0
+                alpha_sum = 0.0
+                alpha_sumsq = 0.0
+                alpha_n = 0
                 # self.save(args, os.path.join(args.save_path, 'grounding.pt'))
         
 
@@ -632,6 +657,11 @@ class GroundTrainer(object):
         concat_all_t = []
         concat_flag = []
         concat_mask = []
+        alpha_sum = 0.0
+        alpha_sumsq = 0.0
+        alpha_min = None
+        alpha_max = None
+        alpha_n = 0
         
         for batch in tqdm(dataloader):
 
@@ -649,6 +679,18 @@ class GroundTrainer(object):
 
             # logits, mask = model.forward_weight(all_h, all_r, None)
             logits, mask = model(all_h, all_r, None)
+
+            if getattr(model, "use_fusion_gate", False):
+                alpha = model.compute_fusion_alpha(all_h, all_r)
+                if alpha is not None:
+                    a = alpha.view(-1)
+                    alpha_sum += float(a.sum().item())
+                    alpha_sumsq += float((a * a).sum().item())
+                    alpha_n += int(a.numel())
+                    a_min = float(a.min().item())
+                    a_max = float(a.max().item())
+                    alpha_min = a_min if alpha_min is None else min(alpha_min, a_min)
+                    alpha_max = a_max if alpha_max is None else max(alpha_max, a_max)
 
             # kge_score = model.compute_g_KGE(all_h,all_r)
             # logits += alpha * kge_score
@@ -722,6 +764,16 @@ class GroundTrainer(object):
         logging.info('Hit10: {:.6f}'.format(hit10))
         logging.info('MR   : {:.6f}'.format(mr))
         logging.info('MRR  : {:.6f}'.format(mrr))
+
+        if getattr(model, "use_fusion_gate", False) and alpha_n > 0:
+            alpha_mean = alpha_sum / alpha_n
+            alpha_var = max(alpha_sumsq / alpha_n - alpha_mean * alpha_mean, 0.0)
+            alpha_std = math.sqrt(alpha_var)
+            logging.info(
+                'FusionGate alpha stats: mean={:.4f} std={:.4f} min={:.4f} max={:.4f}'.format(
+                    alpha_mean, alpha_std, float(alpha_min), float(alpha_max)
+                )
+            )
     
         
         return mrr
@@ -761,9 +813,11 @@ class GroundTrainer(object):
             # logits, mask = model.forward_weight(all_h, all_r, None)
             logits, mask = model(all_h, all_r, None)
 
-            kge_score = model.compute_g_KGE(all_h,all_r)
-            
-            logits = logits + alpha * kge_score
+            # If fusion gate is enabled, model() already returns fused logits.
+            # Keep backward compatibility: only add fixed alpha*KGE when fusion gate is disabled.
+            if not getattr(model, "use_fusion_gate", False):
+                kge_score = model.compute_g_KGE(all_h,all_r)
+                logits = logits + alpha * kge_score
 
             concat_logits.append(logits)
             concat_all_h.append(all_h)

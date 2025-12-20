@@ -44,5 +44,11 @@
     "use_hierarchical_agg": true,
     "quality_thresholds": [0.4, 0.7],
     "hierarchical_hidden_dim": 64,
-    "hierarchical_dropout": 0.1
+    "hierarchical_dropout": 0.1,
+
+    "use_fusion_gate": true,
+    "fusion_gate_hidden_dim": 64,
+    "fusion_gate_dropout": 0.0,
+    "fusion_alpha_init": 2.0,
+    "fusion_alpha_max": 5.0
 }

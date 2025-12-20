@@ -104,6 +104,13 @@ def parse_args(args=None):
     parser.add_argument('--hierarchical_hidden_dim', default=64, type=int, help='层间gate网络隐藏层维度')
     parser.add_argument('--hierarchical_dropout', default=0.1, type=float, help='层间gate网络dropout率')
 
+    # 方案四：Query-Conditioned Fusion Gate（学习 alpha(h,r)）
+    parser.add_argument('--use_fusion_gate', default=False, type=lambda x: (str(x).lower() == 'true'), help='是否启用查询感知融合门控')
+    parser.add_argument('--fusion_gate_hidden_dim', default=64, type=int, help='融合门控MLP隐藏层维度')
+    parser.add_argument('--fusion_gate_dropout', default=0.0, type=float, help='融合门控dropout率（小数据集建议先设0）')
+    parser.add_argument('--fusion_alpha_init', default=3.0, type=float, help='alpha(h,r)初始值（兼容原固定alpha）')
+    parser.add_argument('--fusion_alpha_max', default=10.0, type=float, help='alpha(h,r)上限（防止发散）')
+
     return parser.parse_args(args)
 
 def main():
@@ -154,7 +161,12 @@ def main():
                       use_hierarchical_agg=args.use_hierarchical_agg,
                       quality_thresholds=args.quality_thresholds,
                       hierarchical_hidden_dim=args.hierarchical_hidden_dim,
-                      hierarchical_dropout=args.hierarchical_dropout)
+                      hierarchical_dropout=args.hierarchical_dropout,
+                      use_fusion_gate=args.use_fusion_gate,
+                      fusion_gate_hidden_dim=args.fusion_gate_hidden_dim,
+                      fusion_gate_dropout=args.fusion_gate_dropout,
+                      fusion_alpha_init=args.fusion_alpha_init,
+                      fusion_alpha_max=args.fusion_alpha_max)
     RulE_model.set_rules(rules)
 
     
