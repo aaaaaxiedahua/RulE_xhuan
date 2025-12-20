@@ -34,10 +34,15 @@
     "g_batch_size": 16,
     "g_lr": 0.0001,
     "weight_decay": 0,
-    "num_iters": 20,
+    "num_iters": 15,
     "num_samples": 5,
     "beta_kl": 0.001,
-    "beta_sigma": 0.01,
+    "beta_sigma": 0.001,
     "lambda_0": 1.0,
-    "lambda_uncertainty": 0.01
+    "lambda_uncertainty": 0.001,
+
+    "use_hierarchical_agg": true,
+    "quality_thresholds": [0.4, 0.7],
+    "hierarchical_hidden_dim": 64,
+    "hierarchical_dropout": 0.1
 }

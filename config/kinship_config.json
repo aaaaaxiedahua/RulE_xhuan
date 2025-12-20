@@ -34,7 +34,7 @@
     "g_batch_size": 32,
     "g_lr": 0.0005,
     "weight_decay": 0,
-    "num_iters": 10,
+    "num_iters": 5,
     "num_samples": 5,
     "beta_kl": 0.001,
     "beta_sigma": 0.0005,
@@ -43,5 +43,10 @@
 
     "use_query_attention": true,
     "attention_hidden_dim": 64,
-    "attention_dropout": 0.1
+    "attention_dropout": 0.1,
+
+    "use_hierarchical_agg": true,
+    "quality_thresholds": [0.4, 0.7],
+    "hierarchical_hidden_dim": 64,
+    "hierarchical_dropout": 0.1
 }

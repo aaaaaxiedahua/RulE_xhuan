@@ -487,6 +487,9 @@ class GroundTrainer(object):
         with torch.no_grad():
             features = self.model.get_uncertainty_features(self.device)
             self.model.rule_mu = self.model.mu_network(features)   # [num_rules, 1]
+            # cache min/max for quality normalization (used by hierarchical aggregation)
+            self.model.rule_mu_min = self.model.rule_mu.min()
+            self.model.rule_mu_max = self.model.rule_mu.max()
             logging.info(
                 'Pre-computed rule_mu for grounding: '
                 f'mean={self.model.rule_mu.mean().item():.6f}, '
@@ -499,8 +502,7 @@ class GroundTrainer(object):
         logging.info('>>>>> RulE: Grounding-Training')
         
 
-        best_valid_mrr = 0.0 
-        test_mrr = 0.0
+        best_valid_mrr = 0.0
 
         warm_up_steps = args.num_iters // 2
         current_learning_rate = float(args.g_lr)
@@ -533,10 +535,6 @@ class GroundTrainer(object):
                 # test_mrr = test_mrr_iter
                 self.save(args, os.path.join(args.save_path, 'grounding.pt'))
         
-
-        logging.info('-------------------------')
-        logging.info('| Final Test MRR: {:.6f}'.format(test_mrr))
-        logging.info('-------------------------')
 
         checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding.pt'))
         self.model.load_state_dict(checkpoint['model'])

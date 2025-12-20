@@ -65,7 +65,10 @@ class QueryConditionedAttention(nn.Module):
 
 class RulE(torch.nn.Module):
     def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset,
-                 num_samples=5, lambda_0=1.0, use_query_attention=False, attention_hidden_dim=64, attention_dropout=0.1):
+                 num_samples=5, lambda_0=1.0,
+                 use_query_attention=False, attention_hidden_dim=64, attention_dropout=0.1,
+                 use_hierarchical_agg=False, quality_thresholds=(0.4, 0.7),
+                 hierarchical_hidden_dim=64, hierarchical_dropout=0.1):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -77,6 +80,7 @@ class RulE(torch.nn.Module):
         self.num_samples = num_samples
         self.lambda_0 = lambda_0
         self.use_query_attention = use_query_attention
+        self.use_hierarchical_agg = use_hierarchical_agg
         # self.entity_dim = hidden_dim * 2 
         # self.relation_dim = hidden_dim
 
@@ -106,6 +110,27 @@ class RulE(torch.nn.Module):
         else:
             self.query_attention = None
             logging.info('Query-Conditioned Attention disabled')
+
+        # 方案三：Hierarchical Rule Aggregation（分层规则聚合）
+        if self.use_hierarchical_agg:
+            thresholds = tuple(sorted(float(x) for x in quality_thresholds))
+            self.quality_thresholds = thresholds
+            self.num_quality_groups = len(self.quality_thresholds) + 1
+            self.hierarchical_gate = MLP(
+                input_dim=hidden_dim * 3,
+                hidden_dims=[hierarchical_hidden_dim, self.num_quality_groups],
+                dropout=hierarchical_dropout
+            )
+            logging.info(
+                'Hierarchical Rule Aggregation enabled: '
+                f'groups={self.num_quality_groups}, thresholds={self.quality_thresholds}, '
+                f'hidden_dim={hierarchical_hidden_dim}, dropout={hierarchical_dropout}'
+            )
+        else:
+            self.quality_thresholds = None
+            self.num_quality_groups = 0
+            self.hierarchical_gate = None
+            logging.info('Hierarchical Rule Aggregation disabled')
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
         
@@ -519,6 +544,7 @@ class RulE(torch.nn.Module):
 
 
         candidate_set = torch.nonzero(mask.view(-1), as_tuple=True)[0]
+        candidate_query_idx = candidate_set // self.graph.entity_size  # [num_candidates]
 
         rule_index = torch.tensor(rule_index, dtype=torch.long, device=device)
         rule_count = torch.stack(rule_count, dim=0)
@@ -536,13 +562,11 @@ class RulE(torch.nn.Module):
         else:
             mlp_feature = self.mlp_feature[rule_index]
 
-        # 方案一：Query-Conditioned Attention（真正做到 query-specific）
-        # 注意：当前 forward 的一个 batch 包含同一关系 r 下的多个 head 实体 h，
-        #      因此不能把 attention 在 batch 维度求平均；否则会退化成“batch-conditioned”，
-        #      反而会把不同 query 的偏好混在一起。
-        #
-        # 实现方式：对每个 query(b) 计算规则权重 a_bi，然后把对应列的 grounding count 乘上 a_bi。
-        if self.use_query_attention and self.query_attention is not None:
+        need_query_repr = (
+            (self.use_query_attention and self.query_attention is not None)
+            or (self.use_hierarchical_agg and self.hierarchical_gate is not None)
+        )
+        if need_query_repr:
             # 头实体 embedding: [batch, hidden_dim*2]
             h_emb = self.entity_embedding(all_h)
 
@@ -553,25 +577,57 @@ class RulE(torch.nn.Module):
             r_base = self.relation_embedding(r_id_tensor).squeeze(0) * r_flag
             r_emb = r_base.expand(all_h.size(0), -1)
 
-            # 规则 embedding: [num_selected_rules, hidden_dim]
-            rule_embeddings = self.rule_emb(rule_index)
+        # 方案一：Query-Conditioned Attention（真正做到 query-specific）
+        if self.use_query_attention and self.query_attention is not None:
+            rule_embeddings = self.rule_emb(rule_index)  # [num_selected_rules, hidden_dim]
+            attention = self.query_attention(h_emb, r_emb, rule_embeddings).squeeze(-1)  # [batch, num_selected_rules]
+            attention = attention / (attention.mean(dim=1, keepdim=True) + 1e-9)  # stabilize
+            attention_for_candidates = attention.index_select(0, candidate_query_idx)  # [num_candidates, num_selected_rules]
+            rule_count = rule_count * attention_for_candidates.transpose(0, 1)         # [num_selected_rules, num_candidates]
 
-            # attention: [batch, num_selected_rules] in (0, 1)
-            attention = self.query_attention(h_emb, r_emb, rule_embeddings).squeeze(-1)
+        # 方案三：Hierarchical Rule Aggregation（分层规则聚合）
+        if self.use_hierarchical_agg and self.hierarchical_gate is not None:
+            # 计算每条规则的质量分数 q∈(0,1)，优先使用预计算的 rule_mu
+            if hasattr(self, 'rule_mu'):
+                mu_sel = self.rule_mu[rule_index].squeeze(-1)  # [num_selected_rules]
+                if hasattr(self, 'rule_mu_min') and hasattr(self, 'rule_mu_max'):
+                    mu_min = self.rule_mu_min.to(device=device, dtype=mu_sel.dtype)
+                    mu_max = self.rule_mu_max.to(device=device, dtype=mu_sel.dtype)
+                else:
+                    mu_all = self.rule_mu.squeeze(-1)
+                    mu_min = mu_all.min().to(device=device, dtype=mu_sel.dtype)
+                    mu_max = mu_all.max().to(device=device, dtype=mu_sel.dtype)
+                q = (mu_sel - mu_min) / (mu_max - mu_min + 1e-9)  # min-max normalize to [0,1]
+            else:
+                q = torch.ones(rule_index.size(0), device=device)
 
-            # 让每个 query 的 attention 均值为 1，避免整体缩放导致训练不稳定
-            attention = attention / (attention.mean(dim=1, keepdim=True) + 1e-9)
+            thresholds = torch.tensor(self.quality_thresholds, device=device, dtype=q.dtype)
+            group_ids = torch.bucketize(q, thresholds, right=False)  # [num_selected_rules], 0..G-1
 
-            # candidate_set 是 batch*entity 的扁平索引；还原到 query 维度
-            candidate_query_idx = candidate_set // self.graph.entity_size  # [num_candidates]
+            # 层间 gate：对每个 query 输出每层权重（softmax）
+            query_vec = torch.cat([h_emb, r_emb], dim=-1)  # [batch, hidden_dim*3]
+            group_logits = self.hierarchical_gate(query_vec)  # [batch, G]
+            group_weights = torch.softmax(group_logits, dim=-1)  # [batch, G]
+            group_weights_for_candidates = group_weights.index_select(0, candidate_query_idx)  # [num_candidates, G]
 
-            # 为每个 candidate 取到所属 query 的 attention: [num_candidates, num_selected_rules]
-            attention_for_candidates = attention.index_select(0, candidate_query_idx)
+            # 分层聚合：先层内 rule_to_entity，再层间加权求和
+            final_feature = torch.zeros(candidate_set.size(0), self.mlp_rule_dim, device=device)
+            for g in range(self.num_quality_groups):
+                g_mask = group_ids == g
+                if g_mask.sum().item() == 0:
+                    continue
 
-            # 把 attention 应用到 grounding count: [num_selected_rules, num_candidates]
-            rule_count = rule_count * attention_for_candidates.transpose(0, 1)
+                g_rule_count = rule_count[g_mask]
+                g_rule_emb = rule_emb[g_mask]
+                g_mlp_feature = mlp_feature[g_mask]
 
-        output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
+                g_feature = self.rule_to_entity(g_rule_count, g_rule_emb, g_mlp_feature)  # [num_candidates, mlp_rule_dim]
+                g_weight = group_weights_for_candidates[:, g].unsqueeze(-1)               # [num_candidates, 1]
+                final_feature = final_feature + g_feature * g_weight
+
+            output = final_feature
+        else:
+            output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
 
 
         # rel = self.relation_embedding(all_r[0]%self.num_relations)

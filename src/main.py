@@ -97,6 +97,13 @@ def parse_args(args=None):
     parser.add_argument('--attention_hidden_dim', default=64, type=int, help='attention网络隐藏层维度')
     parser.add_argument('--attention_dropout', default=0.1, type=float, help='attention网络dropout率')
 
+    # 方案三：Hierarchical Rule Aggregation（分层规则聚合）
+    parser.add_argument('--use_hierarchical_agg', default=False, type=lambda x: (str(x).lower() == 'true'), help='是否启用分层规则聚合')
+    parser.add_argument('--quality_thresholds', default=(0.4, 0.7), type=lambda s: tuple(float(x) for x in str(s).split(',')),
+                        help='规则质量分层阈值，逗号分隔，如 "0.4,0.7" (对应 low/mid/high 三层)')
+    parser.add_argument('--hierarchical_hidden_dim', default=64, type=int, help='层间gate网络隐藏层维度')
+    parser.add_argument('--hierarchical_dropout', default=0.1, type=float, help='层间gate网络dropout率')
+
     return parser.parse_args(args)
 
 def main():
@@ -143,7 +150,11 @@ def main():
                       num_samples=args.num_samples, lambda_0=args.lambda_0,
                       use_query_attention=args.use_query_attention,
                       attention_hidden_dim=args.attention_hidden_dim,
-                      attention_dropout=args.attention_dropout)
+                      attention_dropout=args.attention_dropout,
+                      use_hierarchical_agg=args.use_hierarchical_agg,
+                      quality_thresholds=args.quality_thresholds,
+                      hierarchical_hidden_dim=args.hierarchical_hidden_dim,
+                      hierarchical_dropout=args.hierarchical_dropout)
     RulE_model.set_rules(rules)
 
     
