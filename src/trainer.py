@@ -626,6 +626,11 @@ class GroundTrainer(object):
         model.eval()
         if not hasattr(model, "rules_weight_emb"):
             model.eval_compute_rule_weight(self.device)
+        if not hasattr(model, "rule_mu"):
+            features = model.get_uncertainty_features(self.device)
+            model.rule_mu = model.mu_network(features)
+            model.rule_mu_min = model.rule_mu.min()
+            model.rule_mu_max = model.rule_mu.max()
         concat_logits = []
         concat_all_h = []
         concat_all_r = []
@@ -739,6 +744,11 @@ class GroundTrainer(object):
         model.eval()
         if not hasattr(model, "rules_weight_emb"):
             model.eval_compute_rule_weight(self.device)
+        if not hasattr(model, "rule_mu"):
+            features = model.get_uncertainty_features(self.device)
+            model.rule_mu = model.mu_network(features)
+            model.rule_mu_min = model.rule_mu.min()
+            model.rule_mu_max = model.rule_mu.max()
         concat_logits = []
         concat_all_h = []
         concat_all_r = []
