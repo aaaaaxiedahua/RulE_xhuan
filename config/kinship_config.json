@@ -50,7 +50,7 @@
     "hierarchical_hidden_dim": 64,
     "hierarchical_dropout": 0.1,
 
-    "calibrate_gate": false,
+    "calibrate_gate": true,
     "gate_epochs": 5,
     "gate_lr": 0.001,
     "gate_weight_decay": 0.0,
@@ -61,5 +61,7 @@
     "gate_dropout": 0.1,
     "gate_log_steps": 100,
     "gate_alpha_min": 0.0,
-    "gate_alpha_max": 4.0
+    "gate_alpha_max": 4.0,
+    "gate_alpha_reg": 0.01,
+    "gate_alpha_target": 0.5
 }

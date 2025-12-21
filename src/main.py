@@ -120,6 +120,10 @@ def parse_args(args=None):
     parser.add_argument('--gate_alpha_min', default=0.0, type=float)
     parser.add_argument('--gate_alpha_max', default=None, type=float,
                         help='gate输出alpha上界；若不设置则使用alpha(固定融合)作为上界')
+    parser.add_argument('--gate_alpha_reg', default=0.0, type=float,
+                        help='alpha正则系数(抑制alpha贴边/退化为恒定权重); 0表示不启用')
+    parser.add_argument('--gate_alpha_target', default=None, type=float,
+                        help='alpha正则目标(单位区间[0,1]，对应alpha_min..alpha_max的归一化位置); 默认0.5')
 
     return parser.parse_args(args)
 
@@ -283,6 +287,8 @@ def main():
             weight_decay=float(getattr(args, 'gate_weight_decay', 0.0)),
             epochs=int(getattr(args, 'gate_epochs', 5)),
             log_steps=int(getattr(args, 'gate_log_steps', 100)),
+            alpha_reg=float(getattr(args, 'gate_alpha_reg', 0.0)),
+            alpha_target=getattr(args, 'gate_alpha_target', None),
         )
         gate_trainer.train()
 

@@ -61,15 +61,22 @@ def _sample_negative_tails(positive_mask, num_negatives):
 
 def _grounding_stats_from_logits(grounding_logits, flag_mask, topk=50):
     """
-    Compute (margin_ratio, entropy) from grounding logits, masked by flag_mask (True means allowed).
-    """
-    if flag_mask.dtype != torch.bool:
-        flag_mask = flag_mask.bool()
+    Compute (margin_ratio, entropy) from grounding logits.
 
-    masked = grounding_logits.masked_fill(~flag_mask, float("-inf"))
-    all_false = (~flag_mask).all(dim=1)
-    if all_false.any():
-        masked[all_false] = grounding_logits[all_false]
+    If flag_mask is provided, it is only used to mask logits before taking top-k.
+    NOTE: For calibration features, passing a filtered-eval mask can leak information
+    (it depends on the set of known true tails). Prefer flag_mask=None.
+    """
+    if flag_mask is None:
+        masked = grounding_logits
+    else:
+        if flag_mask.dtype != torch.bool:
+            flag_mask = flag_mask.bool()
+
+        masked = grounding_logits.masked_fill(~flag_mask, float("-inf"))
+        all_false = (~flag_mask).all(dim=1)
+        if all_false.any():
+            masked[all_false] = grounding_logits[all_false]
 
     top2 = masked.topk(2, dim=1).values
     top1 = top2[:, 0]
@@ -109,6 +116,8 @@ class GateTrainer:
         weight_decay=0.0,
         epochs=5,
         log_steps=100,
+        alpha_reg=0.0,
+        alpha_target=None,
     ):
         self.model = model
         self.device = device
@@ -126,6 +135,8 @@ class GateTrainer:
         self.weight_decay = float(weight_decay)
         self.epochs = int(epochs)
         self.log_steps = int(log_steps)
+        self.alpha_reg = float(alpha_reg)
+        self.alpha_target = alpha_target
 
         self.gate = CalibrationGate(
             hidden_dim=self.model.hidden_dim,
@@ -145,8 +156,14 @@ class GateTrainer:
             "[Gate] initialized: "
             f"use_stats={self.gate.use_stats}, alpha_range=[{self.gate.alpha_min}, {self.gate.alpha_max}], "
             f"neg_size={self.neg_size}, topk={self.topk}, epochs={self.epochs}, lr={self.lr}, "
-            f"weight_decay={self.weight_decay}, params={gate_params}"
+            f"weight_decay={self.weight_decay}, alpha_reg={self.alpha_reg}, params={gate_params}"
         )
+
+    def _alpha_unit(self, alpha_vec):
+        denom = (self.gate.alpha_max - self.gate.alpha_min)
+        denom = denom if abs(denom) > 1e-12 else 1e-12
+        unit = (alpha_vec - self.gate.alpha_min) / denom
+        return unit.clamp(1e-6, 1.0 - 1e-6)
 
     def _iter_train_batches(self):
         self.train_set.make_batches()
@@ -191,7 +208,7 @@ class GateTrainer:
             h_emb, r_emb = self.model.get_query_embeddings(all_h, all_r)
 
             if self.gate.use_stats:
-                margin_ratio, entropy = _grounding_stats_from_logits(grounding_logits, flag, topk=self.topk)
+                margin_ratio, entropy = _grounding_stats_from_logits(grounding_logits, None, topk=self.topk)
                 alpha_vec = self.gate(h_emb, r_emb, margin_ratio, entropy)
             else:
                 alpha_vec = self.gate(h_emb, r_emb)
@@ -288,9 +305,8 @@ class GateTrainer:
                     grounding_logits, _ = self.model(all_h, all_r, edges_to_remove)
                     h_emb, r_emb = self.model.get_query_embeddings(all_h, all_r)
 
-                    flag = ~positive_mask
                     if self.gate.use_stats:
-                        margin_ratio, entropy = _grounding_stats_from_logits(grounding_logits, flag, topk=self.topk)
+                        margin_ratio, entropy = _grounding_stats_from_logits(grounding_logits, None, topk=self.topk)
                     else:
                         margin_ratio = entropy = None
 
@@ -312,6 +328,14 @@ class GateTrainer:
 
                 labels = torch.zeros(final_scores.size(0), dtype=torch.long, device=self.device)
                 loss = F.cross_entropy(final_scores, labels)
+                if self.alpha_reg > 0:
+                    alpha_unit = self._alpha_unit(alpha_vec)
+                    if self.alpha_target is None:
+                        target = 0.5
+                    else:
+                        target = float(self.alpha_target)
+                    target = max(0.0, min(1.0, target))
+                    loss = loss + self.alpha_reg * ((alpha_unit - target) ** 2).mean()
 
                 optimizer.zero_grad()
                 loss.backward()
