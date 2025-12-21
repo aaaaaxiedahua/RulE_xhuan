@@ -124,6 +124,10 @@ def parse_args(args=None):
                         help='alpha正则系数(抑制alpha贴边/退化为恒定权重); 0表示不启用')
     parser.add_argument('--gate_alpha_target', default=None, type=float,
                         help='alpha正则目标(单位区间[0,1]，对应alpha_min..alpha_max的归一化位置); 默认0.5')
+    parser.add_argument('--gate_score_norm', default='none', type=str,
+                        help='融合前对grounding/kge分数做归一化: none|zscore')
+    parser.add_argument('--gate_norm_eps', default=1e-6, type=float,
+                        help='score归一化的epsilon，防止除0')
 
     return parser.parse_args(args)
 
@@ -289,6 +293,8 @@ def main():
             log_steps=int(getattr(args, 'gate_log_steps', 100)),
             alpha_reg=float(getattr(args, 'gate_alpha_reg', 0.0)),
             alpha_target=getattr(args, 'gate_alpha_target', None),
+            score_norm=str(getattr(args, 'gate_score_norm', 'none')),
+            norm_eps=float(getattr(args, 'gate_norm_eps', 1e-6)),
         )
         gate_trainer.train()
 

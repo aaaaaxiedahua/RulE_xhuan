@@ -118,6 +118,8 @@ class GateTrainer:
         log_steps=100,
         alpha_reg=0.0,
         alpha_target=None,
+        score_norm="none",
+        norm_eps=1e-6,
     ):
         self.model = model
         self.device = device
@@ -137,6 +139,8 @@ class GateTrainer:
         self.log_steps = int(log_steps)
         self.alpha_reg = float(alpha_reg)
         self.alpha_target = alpha_target
+        self.score_norm = str(score_norm).lower() if score_norm is not None else "none"
+        self.norm_eps = float(norm_eps)
 
         self.gate = CalibrationGate(
             hidden_dim=self.model.hidden_dim,
@@ -156,8 +160,18 @@ class GateTrainer:
             "[Gate] initialized: "
             f"use_stats={self.gate.use_stats}, alpha_range=[{self.gate.alpha_min}, {self.gate.alpha_max}], "
             f"neg_size={self.neg_size}, topk={self.topk}, epochs={self.epochs}, lr={self.lr}, "
-            f"weight_decay={self.weight_decay}, alpha_reg={self.alpha_reg}, params={gate_params}"
+            f"weight_decay={self.weight_decay}, alpha_reg={self.alpha_reg}, "
+            f"score_norm={self.score_norm}, params={gate_params}"
         )
+
+    def _normalize_scores(self, scores):
+        if self.score_norm in (None, "", "none", "off"):
+            return scores
+        if self.score_norm not in ("zscore", "standard", "standardize"):
+            raise ValueError(f"Unknown score_norm: {self.score_norm}")
+        mean = scores.mean(dim=1, keepdim=True)
+        std = scores.std(dim=1, keepdim=True, unbiased=False).clamp(min=self.norm_eps)
+        return (scores - mean) / std
 
     def _alpha_unit(self, alpha_vec):
         denom = (self.gate.alpha_max - self.gate.alpha_min)
@@ -204,6 +218,8 @@ class GateTrainer:
 
             grounding_logits, _ = self.model(all_h, all_r, None)
             kge_score = self.model.compute_g_KGE(all_h, all_r)
+            grounding_logits = self._normalize_scores(grounding_logits)
+            kge_score = self._normalize_scores(kge_score)
 
             h_emb, r_emb = self.model.get_query_embeddings(all_h, all_r)
 
@@ -316,6 +332,8 @@ class GateTrainer:
                 with torch.no_grad():
                     kge_scores = self.model.compute_kge_for_tails(all_h, all_r, tail_ids)
                     grounding_scores = grounding_logits.gather(1, tail_ids)
+                    grounding_scores = self._normalize_scores(grounding_scores)
+                    kge_scores = self._normalize_scores(kge_scores)
 
                 alpha_vec = self.gate(h_emb, r_emb, margin_ratio, entropy) if self.gate.use_stats else self.gate(h_emb, r_emb)
                 final_scores = grounding_scores + alpha_vec.unsqueeze(1) * kge_scores
