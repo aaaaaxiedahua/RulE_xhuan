@@ -624,6 +624,8 @@ class GroundTrainer(object):
         model = self.model
 
         model.eval()
+        if not hasattr(model, "rules_weight_emb"):
+            model.eval_compute_rule_weight(self.device)
         concat_logits = []
         concat_all_h = []
         concat_all_r = []
@@ -735,6 +737,8 @@ class GroundTrainer(object):
         model = self.model
 
         model.eval()
+        if not hasattr(model, "rules_weight_emb"):
+            model.eval_compute_rule_weight(self.device)
         concat_logits = []
         concat_all_h = []
         concat_all_r = []
