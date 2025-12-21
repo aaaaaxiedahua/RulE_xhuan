@@ -529,49 +529,6 @@ class ValidDataset(Dataset):
 
         return all_h, all_r, all_t, mask
 
-class ValidDatasetHR2OO(Dataset):
-    """
-    Valid dataset for filtered ranking without leaking test facts.
-
-    Uses graph.hr2oo (train + valid) to build the filtered mask.
-    Keeps the original ValidDataset (hr2ooo) unchanged for backwards compatibility.
-    """
-    def __init__(self, graph, batch_size):
-        self.graph = graph
-        self.batch_size = batch_size
-
-        facts = self.graph.valid_facts
-
-        r2instances = [[] for r in range(self.graph.relation_size * 2)]
-        for h, r, t in facts:
-            r2instances[r].append((h, r, t))
-
-        self.batches = list()
-        for r, instances in enumerate(r2instances):
-            random.shuffle(instances)
-            for k in range(0, len(instances), self.batch_size):
-                start = k
-                end = min(k + self.batch_size, len(instances))
-                self.batches.append(instances[start:end])
-
-    def __len__(self):
-        return len(self.batches)
-
-    def __getitem__(self, idx):
-        data = self.batches[idx]
-
-        all_h = torch.LongTensor([_[0] for _ in data])
-        all_r = torch.LongTensor([_[1] for _ in data])
-        all_t = torch.LongTensor([_[2] for _ in data])
-
-        mask = torch.ones(len(data), self.graph.entity_size).bool()
-        for k, (h, r, t) in enumerate(data):
-            hr_index = self.graph.encode_hr(h, r)
-            t_index = torch.LongTensor(self.graph.hr2oo[hr_index])
-            mask[k][t_index] = 0
-
-        return all_h, all_r, all_t, mask
-
 class TestDataset(Dataset):
     def __init__(self, graph, batch_size):
         self.graph = graph

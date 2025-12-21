@@ -2,7 +2,7 @@
 import logging, os, datetime
 import argparse
 import torch
-from data import KnowledgeGraph, TrainDataset, ValidDataset, ValidDatasetHR2OO, TestDataset, RuleDataset, KGETrainDataset
+from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDataset, KGETrainDataset
 from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
 from trainer import GroundTrainer, PreTrainer
@@ -158,7 +158,7 @@ def main():
     # for grounding dataset
     graph = KnowledgeGraph(args.data_path)
     train_set = TrainDataset(graph, args.g_batch_size)
-    valid_set = ValidDatasetHR2OO(graph, args.g_batch_size)
+    valid_set = ValidDataset(graph, args.g_batch_size)
     test_set = TestDataset(graph, args.g_batch_size)
     test_kge_set = TestDataset(graph, 16)
     ruleset = RuleDataset(graph.relation_size, args.rule_file, args.rule_negative_size)
