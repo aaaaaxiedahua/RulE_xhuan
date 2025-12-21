@@ -6,6 +6,7 @@ from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDa
 from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
 from trainer import GroundTrainer, PreTrainer
+from gate_trainer import GateTrainer
 
 # torch.cuda.set_device(1)
 
@@ -103,6 +104,22 @@ def parse_args(args=None):
                         help='规则质量分层阈值，逗号分隔，如 "0.4,0.7" (对应 low/mid/high 三层)')
     parser.add_argument('--hierarchical_hidden_dim', default=64, type=int, help='层间gate网络隐藏层维度')
     parser.add_argument('--hierarchical_dropout', default=0.1, type=float, help='层间gate网络dropout率')
+
+    # 方案4-B：Calibration Gate（冻结模型，仅训练融合门控）
+    parser.add_argument('--calibrate_gate', default=False, type=lambda x: (str(x).lower() == 'true'),
+                        help='是否在grounding结束后训练Calibration gate')
+    parser.add_argument('--gate_epochs', default=5, type=int)
+    parser.add_argument('--gate_lr', default=0.001, type=float)
+    parser.add_argument('--gate_weight_decay', default=0.0, type=float)
+    parser.add_argument('--gate_neg_size', default=128, type=int)
+    parser.add_argument('--gate_topk', default=50, type=int)
+    parser.add_argument('--gate_use_stats', default=True, type=lambda x: (str(x).lower() == 'true'))
+    parser.add_argument('--gate_mlp_hidden_dim', default=256, type=int)
+    parser.add_argument('--gate_dropout', default=0.1, type=float)
+    parser.add_argument('--gate_log_steps', default=100, type=int)
+    parser.add_argument('--gate_alpha_min', default=0.0, type=float)
+    parser.add_argument('--gate_alpha_max', default=None, type=float,
+                        help='gate输出alpha上界；若不设置则使用alpha(固定融合)作为上界')
 
     return parser.parse_args(args)
 
@@ -222,6 +239,64 @@ def main():
     
     ground_trainer.train(args)
     
+    # (1) Grounding结束后：加载最优grounding断点（grounding.pt）
+    grounding_ckpt_path = os.path.join(args.save_path, 'grounding.pt')
+    grounding_ckpt = torch.load(grounding_ckpt_path, map_location=device)
+    RulE_model.load_state_dict(grounding_ckpt['model'])
+
+    # (2) 固定alpha：最终推理评测
+    logging.info('>>>>> Fixed-alpha inference after grounding checkpoint load')
+    best_valid_mrr = ground_trainer.evaluate('valid', args.alpha, expectation=True)
+    best_test_mrr = ground_trainer.evaluate('test', args.alpha, expectation=True)
+    best_test_kge_mrr = ground_trainer.evaluate_t('test_kge', args.alpha, expectation=True)
+    logging.info('-------------------------')
+    logging.info('| Fixed-alpha Valid MRR: {:.6f}'.format(best_valid_mrr))
+    logging.info('| Fixed-alpha Test  MRR: {:.6f}'.format(best_test_mrr))
+    logging.info('| Fixed-alpha Test+KGE : {:.6f}'.format(best_test_kge_mrr))
+    logging.info('-------------------------')
+
+    # (3) 测试后训练新模块：Calibration Gate（冻结grounding+KGE）
+    if bool(getattr(args, 'calibrate_gate', False)):
+        gate_alpha_min = float(getattr(args, 'gate_alpha_min', 0.0))
+        gate_alpha_max = getattr(args, 'gate_alpha_max', None)
+        if gate_alpha_max is None:
+            gate_alpha_max = float(getattr(args, 'alpha', 3.0))
+
+        logging.info('>>>>> Calibration Gate: Training (freeze grounding+KGE)')
+        gate_trainer = GateTrainer(
+            model=RulE_model,
+            train_set=train_set,
+            valid_set=valid_set,
+            test_set=test_set,
+            test_kge_set=test_kge_set,
+            device=device,
+            save_path=args.save_path,
+            num_worker=args.cpu_num,
+            alpha_min=gate_alpha_min,
+            alpha_max=float(gate_alpha_max),
+            use_stats=bool(getattr(args, 'gate_use_stats', True)),
+            mlp_hidden_dim=int(getattr(args, 'gate_mlp_hidden_dim', 256)),
+            dropout=float(getattr(args, 'gate_dropout', 0.1)),
+            topk=int(getattr(args, 'gate_topk', 50)),
+            neg_size=int(getattr(args, 'gate_neg_size', 128)),
+            lr=float(getattr(args, 'gate_lr', 0.001)),
+            weight_decay=float(getattr(args, 'gate_weight_decay', 0.0)),
+            epochs=int(getattr(args, 'gate_epochs', 5)),
+            log_steps=int(getattr(args, 'gate_log_steps', 100)),
+        )
+        gate_trainer.train()
+
+        # (4) 新模块训练完：加载最优gate断点并最终推理评测
+        gate_ckpt_path = os.path.join(args.save_path, 'gate.pt')
+        gate_ckpt = torch.load(gate_ckpt_path, map_location=device)
+        gate_trainer.gate.load_state_dict(gate_ckpt['gate'])
+        logging.info(f'Loaded gate checkpoint from {gate_ckpt_path}')
+
+        logging.info('>>>>> Gate inference: final evaluation')
+        gate_trainer.evaluate('valid')
+        gate_trainer.evaluate('test')
+        gate_trainer.evaluate('test_kge')
+
     # return test_mrr
 
 

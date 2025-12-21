@@ -46,11 +46,16 @@
     "hierarchical_hidden_dim": 64,
     "hierarchical_dropout": 0.1,
 
-    "use_dynamic_alpha": true,
-    "dynamic_alpha_min": 0.0,
-    "dynamic_alpha_max": 2.0,
-    "dynamic_alpha_margin_weight": 5.0,
-    "dynamic_alpha_entropy_weight": 2.0,
-    "dynamic_alpha_bias": 0.0,
-    "dynamic_alpha_topk": 50
+    "calibrate_gate": false,
+    "gate_epochs": 5,
+    "gate_lr": 0.001,
+    "gate_weight_decay": 0.0,
+    "gate_neg_size": 128,
+    "gate_topk": 50,
+    "gate_use_stats": true,
+    "gate_mlp_hidden_dim": 256,
+    "gate_dropout": 0.1,
+    "gate_log_steps": 100,
+    "gate_alpha_min": 0.0,
+    "gate_alpha_max": 3.0
 }

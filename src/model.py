@@ -430,6 +430,29 @@ class RulE(torch.nn.Module):
 
         return self.RotatE(head,relation,tail)
 
+    def compute_kge_for_tails(self, all_h, all_r, tail_ids):
+        """
+        Compute RotatE scores for given (h, r) queries and candidate tails.
+
+        Args:
+            all_h: [batch]
+            all_r: [batch] (supports inverse relations via r // num_relations)
+            tail_ids: [batch, num_candidates]
+
+        Returns:
+            score: [batch, num_candidates]
+        """
+        relations_flag = torch.pow(-1, all_r // self.num_relations).unsqueeze(-1)
+        r_id = all_r % self.num_relations
+
+        head = self.entity_embedding(all_h).unsqueeze(1)
+        relation = (self.relation_embedding(r_id) * relations_flag).unsqueeze(1)
+
+        batch_size, num_candidates = tail_ids.size(0), tail_ids.size(1)
+        tail = self.entity_embedding(tail_ids.view(-1)).view(batch_size, num_candidates, -1)
+
+        return self.RotatE(head, relation, tail)
+
 
     def RotatE(self, head, relation, tail, mode='tail-batch'):
        
