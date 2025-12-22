@@ -113,21 +113,19 @@ def parse_args(args=None):
     parser.add_argument('--gate_weight_decay', default=0.0, type=float)
     parser.add_argument('--gate_neg_size', default=128, type=int)
     parser.add_argument('--gate_topk', default=50, type=int)
-    parser.add_argument('--gate_use_stats', default=True, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--gate_mlp_hidden_dim', default=256, type=int)
-    parser.add_argument('--gate_dropout', default=0.1, type=float)
+    parser.add_argument('--gate_mlp_hidden_dim', default=32, type=int,
+                        help='gate隐藏层维度(用于lambda-mix gate)')
+    parser.add_argument('--gate_dropout', default=0.3, type=float,
+                        help='gate dropout(用于lambda-mix gate)')
     parser.add_argument('--gate_log_steps', default=100, type=int)
-    parser.add_argument('--gate_alpha_min', default=0.0, type=float)
-    parser.add_argument('--gate_alpha_max', default=None, type=float,
-                        help='gate输出alpha上界；若不设置则使用alpha(固定融合)作为上界')
-    parser.add_argument('--gate_alpha_reg', default=0.0, type=float,
-                        help='alpha正则系数(抑制alpha贴边/退化为恒定权重); 0表示不启用')
-    parser.add_argument('--gate_alpha_target', default=None, type=float,
-                        help='alpha正则目标(单位区间[0,1]，对应alpha_min..alpha_max的归一化位置); 默认0.5')
     parser.add_argument('--gate_score_norm', default='none', type=str,
                         help='融合前对grounding/kge分数做归一化: none|zscore')
     parser.add_argument('--gate_norm_eps', default=1e-6, type=float,
                         help='score归一化的epsilon，防止除0')
+    parser.add_argument('--gate_patience', default=2, type=int,
+                        help='early stop耐心值(单位epoch)')
+    parser.add_argument('--gate_min_improvement', default=0.001, type=float,
+                        help='early stop最小提升阈值(valid MRR)')
 
     return parser.parse_args(args)
 
@@ -265,12 +263,7 @@ def main():
 
     # (3) 测试后训练新模块：Calibration Gate（冻结grounding+KGE）
     if bool(getattr(args, 'calibrate_gate', False)):
-        gate_alpha_min = float(getattr(args, 'gate_alpha_min', 0.0))
-        gate_alpha_max = getattr(args, 'gate_alpha_max', None)
-        if gate_alpha_max is None:
-            gate_alpha_max = float(getattr(args, 'alpha', 3.0))
-
-        logging.info('>>>>> Calibration Gate: Training (freeze grounding+KGE)')
+        logging.info('>>>>> Calibration Gate (lambda-mix): Training (freeze grounding+KGE)')
         gate_trainer = GateTrainer(
             model=RulE_model,
             train_set=train_set,
@@ -280,10 +273,8 @@ def main():
             device=device,
             save_path=args.save_path,
             num_worker=args.cpu_num,
-            alpha_min=gate_alpha_min,
-            alpha_max=float(gate_alpha_max),
-            use_stats=bool(getattr(args, 'gate_use_stats', True)),
-            mlp_hidden_dim=int(getattr(args, 'gate_mlp_hidden_dim', 256)),
+            feature_dim=6,
+            hidden_dim=int(getattr(args, 'gate_mlp_hidden_dim', 32)),
             dropout=float(getattr(args, 'gate_dropout', 0.1)),
             topk=int(getattr(args, 'gate_topk', 50)),
             neg_size=int(getattr(args, 'gate_neg_size', 128)),
@@ -291,10 +282,10 @@ def main():
             weight_decay=float(getattr(args, 'gate_weight_decay', 0.0)),
             epochs=int(getattr(args, 'gate_epochs', 5)),
             log_steps=int(getattr(args, 'gate_log_steps', 100)),
-            alpha_reg=float(getattr(args, 'gate_alpha_reg', 0.0)),
-            alpha_target=getattr(args, 'gate_alpha_target', None),
             score_norm=str(getattr(args, 'gate_score_norm', 'none')),
             norm_eps=float(getattr(args, 'gate_norm_eps', 1e-6)),
+            patience=int(getattr(args, 'gate_patience', 2)),
+            min_improvement=float(getattr(args, 'gate_min_improvement', 0.001)),
         )
         gate_trainer.train()
 

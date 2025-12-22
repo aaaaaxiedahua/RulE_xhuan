@@ -59,39 +59,45 @@ def _sample_negative_tails(positive_mask, num_negatives):
     return negatives
 
 
-def _grounding_stats_from_logits(grounding_logits, flag_mask, topk=50):
+def _stats_from_logits(logits, topk=50):
     """
-    Compute (margin_ratio, entropy) from grounding logits.
-
-    If flag_mask is provided, it is only used to mask logits before taking top-k.
-    NOTE: For calibration features, passing a filtered-eval mask can leak information
-    (it depends on the set of known true tails). Prefer flag_mask=None.
+    Compute (margin_ratio, entropy, top1) from logits.
     """
-    if flag_mask is None:
-        masked = grounding_logits
-    else:
-        if flag_mask.dtype != torch.bool:
-            flag_mask = flag_mask.bool()
-
-        masked = grounding_logits.masked_fill(~flag_mask, float("-inf"))
-        all_false = (~flag_mask).all(dim=1)
-        if all_false.any():
-            masked[all_false] = grounding_logits[all_false]
-
-    top2 = masked.topk(2, dim=1).values
+    top2 = logits.topk(2, dim=1).values
     top1 = top2[:, 0]
     top2v = top2[:, 1]
     margin = top1 - top2v
     margin_ratio = margin / (top1.abs() + 1e-9)
 
-    entity_size = masked.size(1)
+    entity_size = logits.size(1)
     k = max(2, min(int(topk), int(entity_size)))
-    topk_vals = masked.topk(k, dim=1).values
+    topk_vals = logits.topk(k, dim=1).values
     probs = torch.softmax(topk_vals, dim=1)
     entropy = -(probs * torch.log(probs + 1e-12)).sum(dim=1)
     entropy = entropy / max(1e-9, math.log(k))
 
-    return margin_ratio, entropy
+    return margin_ratio, entropy, top1
+
+
+def _build_features(g_scores, k_scores, topk=50):
+    """
+    Build 6-dim stats-only features for each query.
+
+    Features:
+        [g_margin, g_entropy, k_margin, k_entropy, consistency, top1_gap]
+    """
+    g_margin, g_entropy, g_top1 = _stats_from_logits(g_scores, topk=topk)
+    k_margin, k_entropy, k_top1 = _stats_from_logits(k_scores, topk=topk)
+
+    g_argmax = g_scores.argmax(dim=1)
+    k_argmax = k_scores.argmax(dim=1)
+    consistency = (g_argmax == k_argmax).float()
+
+    top1_gap = k_top1 - g_top1
+
+    return torch.stack(
+        [g_margin, g_entropy, k_margin, k_entropy, consistency, top1_gap], dim=1
+    )
 
 
 class GateTrainer:
@@ -105,21 +111,19 @@ class GateTrainer:
         device,
         save_path,
         num_worker=0,
-        alpha_min=0.0,
-        alpha_max=3.0,
-        use_stats=True,
-        mlp_hidden_dim=256,
-        dropout=0.1,
+        feature_dim=6,
+        hidden_dim=32,
+        dropout=0.3,
         topk=50,
         neg_size=128,
         lr=1e-3,
         weight_decay=0.0,
         epochs=5,
         log_steps=100,
-        alpha_reg=0.0,
-        alpha_target=None,
         score_norm="none",
         norm_eps=1e-6,
+        patience=2,
+        min_improvement=0.001,
     ):
         self.model = model
         self.device = device
@@ -137,18 +141,15 @@ class GateTrainer:
         self.weight_decay = float(weight_decay)
         self.epochs = int(epochs)
         self.log_steps = int(log_steps)
-        self.alpha_reg = float(alpha_reg)
-        self.alpha_target = alpha_target
         self.score_norm = str(score_norm).lower() if score_norm is not None else "none"
         self.norm_eps = float(norm_eps)
+        self.patience = int(patience)
+        self.min_improvement = float(min_improvement)
 
         self.gate = CalibrationGate(
-            hidden_dim=self.model.hidden_dim,
-            use_stats=use_stats,
-            mlp_hidden_dim=mlp_hidden_dim,
+            feature_dim=int(feature_dim),
+            hidden_dim=int(hidden_dim),
             dropout=dropout,
-            alpha_min=alpha_min,
-            alpha_max=alpha_max,
         ).to(self.device)
 
         for p in self.model.parameters():
@@ -158,10 +159,10 @@ class GateTrainer:
         gate_params = sum(p.numel() for p in self.gate.parameters())
         logging.info(
             "[Gate] initialized: "
-            f"use_stats={self.gate.use_stats}, alpha_range=[{self.gate.alpha_min}, {self.gate.alpha_max}], "
+            f"fusion=mix(lambda), feature_dim={self.gate.feature_dim}, hidden_dim={self.gate.hidden_dim}, "
             f"neg_size={self.neg_size}, topk={self.topk}, epochs={self.epochs}, lr={self.lr}, "
-            f"weight_decay={self.weight_decay}, alpha_reg={self.alpha_reg}, "
-            f"score_norm={self.score_norm}, params={gate_params}"
+            f"weight_decay={self.weight_decay}, dropout={dropout}, score_norm={self.score_norm}, "
+            f"patience={self.patience}, min_improvement={self.min_improvement}, params={gate_params}"
         )
 
     def _normalize_scores(self, scores):
@@ -172,12 +173,6 @@ class GateTrainer:
         mean = scores.mean(dim=1, keepdim=True)
         std = scores.std(dim=1, keepdim=True, unbiased=False).clamp(min=self.norm_eps)
         return (scores - mean) / std
-
-    def _alpha_unit(self, alpha_vec):
-        denom = (self.gate.alpha_max - self.gate.alpha_min)
-        denom = denom if abs(denom) > 1e-12 else 1e-12
-        unit = (alpha_vec - self.gate.alpha_min) / denom
-        return unit.clamp(1e-6, 1.0 - 1e-6)
 
     def _iter_train_batches(self):
         self.train_set.make_batches()
@@ -193,7 +188,7 @@ class GateTrainer:
             )
 
     @torch.no_grad()
-    def evaluate(self, split, alpha_fallback=3.0):
+    def evaluate(self, split):
         if split == "test_kge":
             dataset = self.test_kge_set
         else:
@@ -207,7 +202,7 @@ class GateTrainer:
         concat_logits = []
         concat_all_t = []
         concat_flag = []
-        concat_alpha = []
+        concat_lambda = []
 
         for batch in tqdm(dataloader):
             all_h, all_r, all_t, flag = batch
@@ -221,28 +216,24 @@ class GateTrainer:
             grounding_logits = self._normalize_scores(grounding_logits)
             kge_score = self._normalize_scores(kge_score)
 
-            h_emb, r_emb = self.model.get_query_embeddings(all_h, all_r)
-
-            if self.gate.use_stats:
-                margin_ratio, entropy = _grounding_stats_from_logits(grounding_logits, None, topk=self.topk)
-                alpha_vec = self.gate(h_emb, r_emb, margin_ratio, entropy)
-            else:
-                alpha_vec = self.gate(h_emb, r_emb)
-
-            if torch.isnan(alpha_vec).any() or torch.isinf(alpha_vec).any():
-                alpha_vec = torch.full_like(all_h.float(), float(alpha_fallback))
-
-            logits = grounding_logits + alpha_vec.unsqueeze(1) * kge_score
+            features = _build_features(grounding_logits, kge_score, topk=self.topk)
+            lambda_vec = self.gate(features)
+            lambda_vec = torch.nan_to_num(lambda_vec, nan=0.5, posinf=0.5, neginf=0.5).clamp(
+                0.0, 1.0
+            )
+            logits = (1.0 - lambda_vec.unsqueeze(1)) * grounding_logits + lambda_vec.unsqueeze(
+                1
+            ) * kge_score
 
             concat_logits.append(logits)
             concat_all_t.append(all_t)
             concat_flag.append(flag)
-            concat_alpha.append(alpha_vec.detach().cpu())
+            concat_lambda.append(lambda_vec.detach().cpu())
 
         concat_logits = torch.cat(concat_logits, dim=0)
         concat_all_t = torch.cat(concat_all_t, dim=0)
         concat_flag = torch.cat(concat_flag, dim=0)
-        alpha_all = torch.cat(concat_alpha, dim=0) if len(concat_alpha) > 0 else None
+        lambda_all = torch.cat(concat_lambda, dim=0) if len(concat_lambda) > 0 else None
 
         ranks = []
         for k in range(concat_all_t.size(0)):
@@ -278,11 +269,11 @@ class GateTrainer:
         logging.info(f"[Gate] {split} MR   : {mr:.6f}")
         logging.info(f"[Gate] {split} MRR  : {mrr:.6f}")
 
-        if alpha_all is not None:
+        if lambda_all is not None:
             logging.info(
-                "[Gate] alpha stats: "
-                f"mean={alpha_all.mean().item():.6f}, std={alpha_all.std().item():.6f}, "
-                f"min={alpha_all.min().item():.6f}, max={alpha_all.max().item():.6f}"
+                "[Gate] lambda stats: "
+                f"mean={lambda_all.mean().item():.6f}, std={lambda_all.std().item():.6f}, "
+                f"min={lambda_all.min().item():.6f}, max={lambda_all.max().item():.6f}"
             )
 
         return mrr
@@ -299,13 +290,12 @@ class GateTrainer:
 
         best_valid_mrr = -1.0
         steps = 0
+        bad_epochs = 0
 
         for epoch in range(1, self.epochs + 1):
             self.gate.train()
             losses = []
-            alpha_samples = []
-            margin_samples = []
-            entropy_samples = []
+            lambda_samples = []
             max_stat_samples = 4096
 
             for all_h, all_r, all_t, target, edges_to_remove in self._iter_train_batches():
@@ -319,12 +309,6 @@ class GateTrainer:
 
                 with torch.no_grad():
                     grounding_logits, _ = self.model(all_h, all_r, edges_to_remove)
-                    h_emb, r_emb = self.model.get_query_embeddings(all_h, all_r)
-
-                    if self.gate.use_stats:
-                        margin_ratio, entropy = _grounding_stats_from_logits(grounding_logits, None, topk=self.topk)
-                    else:
-                        margin_ratio = entropy = None
 
                 neg_tails = _sample_negative_tails(positive_mask, self.neg_size)
                 tail_ids = torch.cat([all_t.unsqueeze(1), neg_tails], dim=1)
@@ -335,25 +319,20 @@ class GateTrainer:
                     grounding_scores = self._normalize_scores(grounding_scores)
                     kge_scores = self._normalize_scores(kge_scores)
 
-                alpha_vec = self.gate(h_emb, r_emb, margin_ratio, entropy) if self.gate.use_stats else self.gate(h_emb, r_emb)
-                final_scores = grounding_scores + alpha_vec.unsqueeze(1) * kge_scores
+                features = _build_features(grounding_scores, kge_scores, topk=min(self.topk, tail_ids.size(1)))
+                lambda_vec = self.gate(features)
+                lambda_vec = torch.nan_to_num(lambda_vec, nan=0.5, posinf=0.5, neginf=0.5).clamp(
+                    0.0, 1.0
+                )
+                final_scores = (1.0 - lambda_vec.unsqueeze(1)) * grounding_scores + lambda_vec.unsqueeze(
+                    1
+                ) * kge_scores
 
-                if len(alpha_samples) < max_stat_samples:
-                    alpha_samples.append(alpha_vec.detach().cpu())
-                    if self.gate.use_stats:
-                        margin_samples.append(margin_ratio.detach().cpu())
-                        entropy_samples.append(entropy.detach().cpu())
+                if len(lambda_samples) < max_stat_samples:
+                    lambda_samples.append(lambda_vec.detach().cpu())
 
                 labels = torch.zeros(final_scores.size(0), dtype=torch.long, device=self.device)
                 loss = F.cross_entropy(final_scores, labels)
-                if self.alpha_reg > 0:
-                    alpha_unit = self._alpha_unit(alpha_vec)
-                    if self.alpha_target is None:
-                        target = 0.5
-                    else:
-                        target = float(self.alpha_target)
-                    target = max(0.0, min(1.0, target))
-                    loss = loss + self.alpha_reg * ((alpha_unit - target) ** 2).mean()
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -364,54 +343,43 @@ class GateTrainer:
 
                 if self.log_steps and steps % self.log_steps == 0:
                     msg = f"[Gate] epoch={epoch} step={steps} loss={sum(losses)/len(losses):.6f}"
-                    if len(alpha_samples) > 0:
-                        alpha_cat = torch.cat(alpha_samples, dim=0)
-                        a = _tensor_stats(alpha_cat)
+                    if len(lambda_samples) > 0:
+                        lambda_cat = torch.cat(lambda_samples, dim=0)
+                        a = _tensor_stats(lambda_cat)
                         msg += (
-                            f" alpha(mean={a['mean']:.4f}, std={a['std']:.4f}, "
+                            f" lambda(mean={a['mean']:.4f}, std={a['std']:.4f}, "
                             f"min={a['min']:.4f}, max={a['max']:.4f})"
                         )
-                        if self.gate.use_stats and len(margin_samples) > 0:
-                            m = _tensor_stats(torch.cat(margin_samples, dim=0))
-                            e = _tensor_stats(torch.cat(entropy_samples, dim=0))
-                            msg += f" margin_mean={m['mean']:.4f} entropy_mean={e['mean']:.4f}"
                     logging.info(msg)
                     losses = []
 
-            if len(alpha_samples) > 0:
-                a = _tensor_stats(torch.cat(alpha_samples, dim=0))
-                if self.gate.use_stats and len(margin_samples) > 0:
-                    m = _tensor_stats(torch.cat(margin_samples, dim=0))
-                    e = _tensor_stats(torch.cat(entropy_samples, dim=0))
-                    logging.info(
-                        "[Gate] epoch=%d train_summary loss=%.6f alpha(mean=%.4f,std=%.4f,min=%.4f,max=%.4f) "
-                        "margin_mean=%.4f entropy_mean=%.4f",
-                        epoch,
-                        (sum(losses) / len(losses)) if len(losses) > 0 else float("nan"),
-                        a["mean"],
-                        a["std"],
-                        a["min"],
-                        a["max"],
-                        m["mean"],
-                        e["mean"],
-                    )
-                else:
-                    logging.info(
-                        "[Gate] epoch=%d train_summary loss=%.6f alpha(mean=%.4f,std=%.4f,min=%.4f,max=%.4f)",
-                        epoch,
-                        (sum(losses) / len(losses)) if len(losses) > 0 else float("nan"),
-                        a["mean"],
-                        a["std"],
-                        a["min"],
-                        a["max"],
-                    )
+            if len(lambda_samples) > 0:
+                a = _tensor_stats(torch.cat(lambda_samples, dim=0))
+                logging.info(
+                    "[Gate] epoch=%d train_summary loss=%.6f lambda(mean=%.4f,std=%.4f,min=%.4f,max=%.4f)",
+                    epoch,
+                    (sum(losses) / len(losses)) if len(losses) > 0 else float("nan"),
+                    a["mean"],
+                    a["std"],
+                    a["min"],
+                    a["max"],
+                )
 
             logging.info(f"[Gate] epoch={epoch} finished, evaluating on valid...")
             valid_mrr = self.evaluate("valid")
-            if valid_mrr > best_valid_mrr:
+            if valid_mrr > best_valid_mrr + self.min_improvement:
                 best_valid_mrr = valid_mrr
                 torch.save({"gate": self.gate.state_dict()}, best_gate_path)
                 logging.info(f"[Gate] saved best gate to {best_gate_path} (valid MRR={best_valid_mrr:.6f})")
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+                if self.patience > 0 and bad_epochs >= self.patience:
+                    logging.info(
+                        f"[Gate] early stopping: no improvement in {bad_epochs} epochs "
+                        f"(best_valid_mrr={best_valid_mrr:.6f})"
+                    )
+                    break
 
         if os.path.exists(best_gate_path):
             state = torch.load(best_gate_path, map_location=self.device)
