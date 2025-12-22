@@ -52,18 +52,15 @@
 
     "calibrate_gate": true,
     "gate_epochs": 5,
-    "gate_lr": 0.0001,
-    "gate_weight_decay": 0.0001,
+    "gate_lr": 0.001,
+    "gate_weight_decay": 0.001,
     "gate_neg_size": 128,
     "gate_topk": 50,
-    "gate_use_stats": true,
-    "gate_mlp_hidden_dim": 256,
-    "gate_dropout": 0.1,
+    "gate_mlp_hidden_dim": 32,
+    "gate_dropout": 0.3,
     "gate_log_steps": 100,
-    "gate_alpha_min": 0.0,
-    "gate_alpha_max": 3.0,
-    "gate_alpha_reg": 0.05,
-    "gate_alpha_target": 0.4,
     "gate_score_norm": "zscore",
-    "gate_norm_eps": 1e-6
+    "gate_norm_eps": 1e-6,
+    "gate_patience": 3,
+    "gate_min_improvement": 0.001
 }
