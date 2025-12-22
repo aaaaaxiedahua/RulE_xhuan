@@ -2,9 +2,11 @@
 import torch
 import torch.nn as nn
 import logging, math
+import torch.nn.functional as F
 from layers import MLP, FuncToNodeSum
 
 from torch.nn.utils.rnn import pad_sequence
+from torch_scatter import scatter
 
 
 class QueryConditionedAttention(nn.Module):
@@ -189,6 +191,16 @@ class RulE(torch.nn.Module):
         # self.linear = torch.nn.Linear(self.rnn_hidden_dim, self.relation_dim)
         
         self.pi = 3.14159262358979323846
+        self.use_soft_grounding = False
+        self.soft_topb = 0
+        self.soft_eta = 0.0
+        self.soft_temp = 1.0
+        self.soft_beam = 0
+        self.soft_only_on_deadend = True
+        self.soft_log_steps = 0
+        self._soft_forward_calls = 0
+        self._soft_pred_edges = None
+        self._soft_pred_cfg = None
 
     def get_query_embeddings(self, all_h, all_r):
         """
@@ -453,6 +465,159 @@ class RulE(torch.nn.Module):
 
         return self.RotatE(head, relation, tail)
 
+    @torch.no_grad()
+    def build_soft_pred_edges(self, topb=50, eta=0.3, temp=1.0):
+        """
+        Precompute KGE-based predicted edges for each relation (including inverses).
+
+        For each relation r in [0, 2*num_relations), stores:
+            (node_out, node_in, weight) where weight = eta * sigmoid(score / temp).
+        Intended for small graphs (e.g., kinship/umls).
+        """
+        device = self.entity_embedding.weight.device
+        entity_size = int(self.num_entities)
+        rel_size = int(self.num_relations * 2)
+
+        topb = int(topb)
+        if topb <= 0:
+            self._soft_pred_edges = None
+            self._soft_pred_cfg = None
+            return
+
+        topb = min(topb, entity_size)
+        eta = float(eta)
+        temp = max(float(temp), 1e-6)
+
+        cfg = (topb, eta, temp)
+        if self._soft_pred_edges is not None and self._soft_pred_cfg == cfg:
+            return
+
+        all_h = torch.arange(entity_size, device=device, dtype=torch.long)
+        soft_edges = []
+
+        for r_id in range(rel_size):
+            all_r = torch.full((entity_size,), r_id, device=device, dtype=torch.long)
+            scores = self.compute_g_KGE(all_h, all_r)  # [E, E]
+            top_vals, top_ids = scores.topk(topb, dim=1)
+
+            weights = eta * torch.sigmoid(top_vals / temp)  # [E, topb]
+            node_in = all_h.unsqueeze(1).expand(-1, topb).reshape(-1)
+            node_out = top_ids.reshape(-1)
+            weight = weights.reshape(-1).to(dtype=torch.float)
+
+            soft_edges.append((node_out, node_in, weight))
+
+        self._soft_pred_edges = soft_edges
+        self._soft_pred_cfg = cfg
+
+    def _pred_propagate(self, x, relation, edges_to_remove=None, query_h=None):
+        """
+        Propagate along precomputed predicted edges for a given relation.
+
+        Args:
+            x: [num_entities, batch, 1] float
+            relation: int
+            edges_to_remove: [batch] edge indices in observed adjacency (optional)
+            query_h: [batch] query heads (optional, for masking predicted (h,t) edges)
+        """
+        if self._soft_pred_edges is None:
+            return torch.zeros_like(x)
+
+        node_out, node_in, weight = self._soft_pred_edges[int(relation)]
+        device = x.device
+        if node_out.device != device:
+            node_out = node_out.to(device)
+            node_in = node_in.to(device)
+            weight = weight.to(device)
+            self._soft_pred_edges[int(relation)] = (node_out, node_in, weight)
+
+        message = x[node_in] * weight.view(-1, 1, 1)
+
+        if edges_to_remove is not None and query_h is not None:
+            obs_index = self.graph.relation2adjacency[int(relation)][0].to(device)
+            obs_t = obs_index[0]
+            removed_t = obs_t[edges_to_remove]
+            removed_h = query_h
+
+            edge_mask = (node_in.unsqueeze(1) == removed_h.unsqueeze(0)) & (
+                node_out.unsqueeze(1) == removed_t.unsqueeze(0)
+            )
+            if edge_mask.any():
+                message = message.clone()
+                message[edge_mask] = 0
+
+        return scatter(message, node_out, dim=0, dim_size=x.size(0))
+
+    def _apply_beam(self, x, beam_size):
+        beam_size = int(beam_size)
+        if beam_size <= 0 or beam_size >= x.size(0):
+            return x
+
+        x2 = x.squeeze(-1).transpose(0, 1)  # [batch, num_entities]
+        _, topk_idx = x2.topk(beam_size, dim=1)
+        keep = torch.zeros_like(x2, dtype=torch.bool)
+        keep.scatter_(1, topk_idx, True)
+        x2 = torch.where(keep, x2, torch.zeros_like(x2))
+        return x2.transpose(0, 1).unsqueeze(-1)
+
+    def soft_grounding_count(self, all_h, query_r, rule_body, edges_to_remove, stats=None):
+        """
+        Soft grounding: propagate over observed edges and optionally add KGE-predicted edges.
+
+        Returns:
+            count: [batch, num_entities] float
+        """
+        device = all_h.device
+        x = F.one_hot(all_h, self.num_entities).transpose(0, 1).unsqueeze(-1).float()
+        if device.type == "cuda":
+            x = x.cuda(device)
+
+        batch_size = int(all_h.size(0))
+        if stats is not None:
+            stats["rules_processed"] = stats.get("rules_processed", 0) + 1
+            stats["rule_steps_processed"] = stats.get("rule_steps_processed", 0) + int(len(rule_body))
+
+        for rel in rule_body:
+            use_remove = edges_to_remove if rel == query_r else None
+
+            x_real = self.graph.propagate(x, rel, use_remove)
+            x_pred = None
+
+            dead = None
+            if self.soft_only_on_deadend:
+                dead = (x_real.sum(dim=0) <= 0).squeeze(-1).squeeze(-1)  # [batch]
+                dead_count = int(dead.sum().item())
+                if dead_count > 0:
+                    x_pred = self._pred_propagate(x, rel, use_remove, query_h=all_h)
+                    x = x_real + dead.view(1, -1, 1).to(dtype=x_real.dtype) * x_pred
+                else:
+                    x = x_real
+            else:
+                x_pred = self._pred_propagate(x, rel, use_remove, query_h=all_h)
+                x = x_real + x_pred
+
+            if stats is not None:
+                stats["step_queries"] = stats.get("step_queries", 0) + batch_size
+                if dead is not None:
+                    dead_count = int(dead.sum().item())
+                else:
+                    dead_count = 0
+                stats["deadend_queries"] = stats.get("deadend_queries", 0) + dead_count
+                if self.soft_only_on_deadend:
+                    stats["pred_used_queries"] = stats.get("pred_used_queries", 0) + dead_count
+                else:
+                    stats["pred_used_queries"] = stats.get("pred_used_queries", 0) + batch_size
+
+                stats["mass_real_sum"] = stats.get("mass_real_sum", 0.0) + float(x_real.sum().item())
+                if x_pred is not None:
+                    stats["mass_pred_sum"] = stats.get("mass_pred_sum", 0.0) + float(x_pred.sum().item())
+                else:
+                    stats["mass_pred_sum"] = stats.get("mass_pred_sum", 0.0)
+
+            x = self._apply_beam(x, self.soft_beam)
+
+        return x.squeeze(-1).transpose(0, 1)
+
 
     def RotatE(self, head, relation, tail, mode='tail-batch'):
        
@@ -563,16 +728,39 @@ class RulE(torch.nn.Module):
         if device.type == "cuda":
             self.rule_features = self.rule_features.cuda(device)
 
+        use_soft = bool(getattr(self, 'use_soft_grounding', False)) and int(
+            getattr(self, 'soft_topb', 0)
+        ) > 0
+        if use_soft:
+            self._soft_forward_calls += 1
+            self.build_soft_pred_edges(
+                topb=int(getattr(self, 'soft_topb', 0)),
+                eta=float(getattr(self, 'soft_eta', 0.0)),
+                temp=float(getattr(self, 'soft_temp', 1.0)),
+            )
+
         rule_index = list()
         rule_count = list()
 
         mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
 
+        collect_soft_stats = (
+            use_soft
+            and int(getattr(self, "soft_log_steps", 0)) > 0
+            and (self._soft_forward_calls % int(getattr(self, "soft_log_steps", 0)) == 0)
+        )
+        soft_stats = {} if collect_soft_stats else None
+
         for idx, (index, (r_head, r_body)) in enumerate(self.relation2rules[query_r]):
 
             assert r_head == query_r
 
-            count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
+            if use_soft:
+                count = self.soft_grounding_count(
+                    all_h, r_head, r_body, edges_to_remove, stats=soft_stats
+                ).float()
+            else:
+                count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
 
             mask += count
 
@@ -581,6 +769,24 @@ class RulE(torch.nn.Module):
 
         if mask.sum().item() == 0:
             return mask + self.bias.unsqueeze(0), (1 - mask).bool()
+
+        if soft_stats is not None and soft_stats.get("step_queries", 0) > 0:
+            step_q = float(soft_stats["step_queries"])
+            dead_rate = float(soft_stats.get("deadend_queries", 0)) / step_q
+            pred_rate = float(soft_stats.get("pred_used_queries", 0)) / step_q
+            real_mass = float(soft_stats.get("mass_real_sum", 0.0))
+            pred_mass = float(soft_stats.get("mass_pred_sum", 0.0))
+            mass_ratio = pred_mass / (real_mass + 1e-9)
+            logging.info(
+                "[SoftGrounding] "
+                f"query_r={int(query_r)} rules={int(soft_stats.get('rules_processed', 0))} "
+                f"rule_steps={int(soft_stats.get('rule_steps_processed', 0))} "
+                f"deadend_rate={dead_rate:.4f} pred_used_rate={pred_rate:.4f} "
+                f"pred/real_mass={mass_ratio:.4f} "
+                f"topB={int(getattr(self, 'soft_topb', 0))} eta={float(getattr(self, 'soft_eta', 0.0))} "
+                f"temp={float(getattr(self, 'soft_temp', 1.0))} beam={int(getattr(self, 'soft_beam', 0))} "
+                f"only_on_deadend={bool(getattr(self, 'soft_only_on_deadend', True))}"
+            )
 
 
         candidate_set = torch.nonzero(mask.view(-1), as_tuple=True)[0]

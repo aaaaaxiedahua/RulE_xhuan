@@ -50,17 +50,11 @@
     "hierarchical_hidden_dim": 64,
     "hierarchical_dropout": 0.1,
 
-    "calibrate_gate": true,
-    "gate_epochs": 5,
-    "gate_lr": 0.001,
-    "gate_weight_decay": 0.001,
-    "gate_neg_size": 128,
-    "gate_topk": 50,
-    "gate_mlp_hidden_dim": 32,
-    "gate_dropout": 0.3,
-    "gate_log_steps": 100,
-    "gate_score_norm": "zscore",
-    "gate_norm_eps": 1e-6,
-    "gate_patience": 3,
-    "gate_min_improvement": 0.001
+    "soft_grounding": true,
+    "soft_topb": 50,
+    "soft_eta": 0.4,
+    "soft_temp": 1.0,
+    "soft_beam": 0,
+    "soft_only_on_deadend": true,
+    "soft_log_steps": 100
 }

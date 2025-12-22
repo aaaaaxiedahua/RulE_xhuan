@@ -495,6 +495,24 @@ class GroundTrainer(object):
                 f'mean={self.model.rule_mu.mean().item():.6f}, '
                 f'std={self.model.rule_mu.std().item():.6f}'
             )
+
+            # Soft-grounding: precompute KGE-predicted soft edges (small graphs)
+            if bool(getattr(self.model, 'use_soft_grounding', False)) and int(
+                getattr(self.model, 'soft_topb', 0)
+            ) > 0:
+                logging.info(
+                    'Building soft predicted edges for grounding: '
+                    f"topB={int(getattr(self.model, 'soft_topb', 0))}, "
+                    f"eta={float(getattr(self.model, 'soft_eta', 0.0))}, "
+                    f"temp={float(getattr(self.model, 'soft_temp', 1.0))}, "
+                    f"only_on_deadend={bool(getattr(self.model, 'soft_only_on_deadend', True))}, "
+                    f"beam={int(getattr(self.model, 'soft_beam', 0))}"
+                )
+                self.model.build_soft_pred_edges(
+                    topb=int(getattr(self.model, 'soft_topb', 0)),
+                    eta=float(getattr(self.model, 'soft_eta', 0.0)),
+                    temp=float(getattr(self.model, 'soft_temp', 1.0)),
+                )
         self.model.train()
 
 

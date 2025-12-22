@@ -41,21 +41,20 @@
     "lambda_0": 1.0,
     "lambda_uncertainty": 0.001,
 
+    "use_query_attention": true,
+    "attention_hidden_dim": 64,
+    "attention_dropout": 0.1,
+    
     "use_hierarchical_agg": true,
     "quality_thresholds": [0.4, 0.7],
     "hierarchical_hidden_dim": 64,
     "hierarchical_dropout": 0.1,
 
-    "calibrate_gate": false,
-    "gate_epochs": 5,
-    "gate_lr": 0.001,
-    "gate_weight_decay": 0.0,
-    "gate_neg_size": 128,
-    "gate_topk": 50,
-    "gate_use_stats": true,
-    "gate_mlp_hidden_dim": 256,
-    "gate_dropout": 0.1,
-    "gate_log_steps": 100,
-    "gate_alpha_min": 0.0,
-    "gate_alpha_max": 3.0
+    "soft_grounding": true,
+    "soft_topb": 50,
+    "soft_eta": 0.3,
+    "soft_temp": 1.0,
+    "soft_beam": 0,
+    "soft_only_on_deadend": true,
+    "soft_log_steps": 100
 }

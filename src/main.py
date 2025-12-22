@@ -6,7 +6,6 @@ from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDa
 from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
 from trainer import GroundTrainer, PreTrainer
-from gate_trainer import GateTrainer
 
 # torch.cuda.set_device(1)
 
@@ -105,27 +104,21 @@ def parse_args(args=None):
     parser.add_argument('--hierarchical_hidden_dim', default=64, type=int, help='层间gate网络隐藏层维度')
     parser.add_argument('--hierarchical_dropout', default=0.1, type=float, help='层间gate网络dropout率')
 
-    # 方案4-B：Calibration Gate（冻结模型，仅训练融合门控）
-    parser.add_argument('--calibrate_gate', default=False, type=lambda x: (str(x).lower() == 'true'),
-                        help='是否在grounding结束后训练Calibration gate')
-    parser.add_argument('--gate_epochs', default=5, type=int)
-    parser.add_argument('--gate_lr', default=0.001, type=float)
-    parser.add_argument('--gate_weight_decay', default=0.0, type=float)
-    parser.add_argument('--gate_neg_size', default=128, type=int)
-    parser.add_argument('--gate_topk', default=50, type=int)
-    parser.add_argument('--gate_mlp_hidden_dim', default=32, type=int,
-                        help='gate隐藏层维度(用于lambda-mix gate)')
-    parser.add_argument('--gate_dropout', default=0.3, type=float,
-                        help='gate dropout(用于lambda-mix gate)')
-    parser.add_argument('--gate_log_steps', default=100, type=int)
-    parser.add_argument('--gate_score_norm', default='none', type=str,
-                        help='融合前对grounding/kge分数做归一化: none|zscore')
-    parser.add_argument('--gate_norm_eps', default=1e-6, type=float,
-                        help='score归一化的epsilon，防止除0')
-    parser.add_argument('--gate_patience', default=2, type=int,
-                        help='early stop耐心值(单位epoch)')
-    parser.add_argument('--gate_min_improvement', default=0.001, type=float,
-                        help='early stop最小提升阈值(valid MRR)')
+    # Soft-grounding: augment rule grounding with KGE-predicted soft edges (kinship/umls friendly)
+    parser.add_argument('--soft_grounding', default=False, type=lambda x: (str(x).lower() == 'true'),
+                        help='是否启用Soft-Grounding(规则传播中加入KGE预测软边)')
+    parser.add_argument('--soft_topb', default=0, type=int,
+                        help='每个(head, relation)保留KGE预测的topB尾实体作为软边(0表示关闭)')
+    parser.add_argument('--soft_eta', default=0.3, type=float,
+                        help='KGE软边权重缩放系数eta(建议0.1~0.5)')
+    parser.add_argument('--soft_temp', default=1.0, type=float,
+                        help='KGE分数->概率的温度参数T(越小越硬)')
+    parser.add_argument('--soft_beam', default=0, type=int,
+                        help='每步传播保留topS中间实体(beam剪枝)，0表示不剪枝')
+    parser.add_argument('--soft_only_on_deadend', default=True, type=lambda x: (str(x).lower() == 'true'),
+                        help='仅在真实边传播断路时才启用预测软边(更稳)')
+    parser.add_argument('--soft_log_steps', default=0, type=int,
+                        help='Soft-grounding统计日志间隔(以forward次数计)，0表示关闭')
 
     return parser.parse_args(args)
 
@@ -179,6 +172,15 @@ def main():
                       hierarchical_hidden_dim=args.hierarchical_hidden_dim,
                       hierarchical_dropout=args.hierarchical_dropout)
     RulE_model.set_rules(rules)
+
+    # Soft-grounding knobs (no dynamic alpha)
+    RulE_model.use_soft_grounding = bool(getattr(args, 'soft_grounding', False))
+    RulE_model.soft_topb = int(getattr(args, 'soft_topb', 0))
+    RulE_model.soft_eta = float(getattr(args, 'soft_eta', 0.0))
+    RulE_model.soft_temp = float(getattr(args, 'soft_temp', 1.0))
+    RulE_model.soft_beam = int(getattr(args, 'soft_beam', 0))
+    RulE_model.soft_only_on_deadend = bool(getattr(args, 'soft_only_on_deadend', True))
+    RulE_model.soft_log_steps = int(getattr(args, 'soft_log_steps', 0))
 
     
     # For pre-training 
@@ -246,59 +248,20 @@ def main():
     ground_trainer.train(args)
     
     # (1) Grounding结束后：加载最优grounding断点（grounding.pt）
-    grounding_ckpt_path = os.path.join(args.save_path, 'grounding.pt')
-    grounding_ckpt = torch.load(grounding_ckpt_path, map_location=device)
-    RulE_model.load_state_dict(grounding_ckpt['model'])
+    # grounding_ckpt_path = os.path.join(args.save_path, 'grounding.pt')
+    # grounding_ckpt = torch.load(grounding_ckpt_path, map_location=device)
+    # RulE_model.load_state_dict(grounding_ckpt['model'])
 
     # (2) 固定alpha：最终推理评测
-    logging.info('>>>>> Fixed-alpha inference after grounding checkpoint load')
-    best_valid_mrr = ground_trainer.evaluate('valid', args.alpha, expectation=True)
-    best_test_mrr = ground_trainer.evaluate('test', args.alpha, expectation=True)
-    best_test_kge_mrr = ground_trainer.evaluate_t('test_kge', args.alpha, expectation=True)
-    logging.info('-------------------------')
-    logging.info('| Fixed-alpha Valid MRR: {:.6f}'.format(best_valid_mrr))
-    logging.info('| Fixed-alpha Test  MRR: {:.6f}'.format(best_test_mrr))
-    logging.info('| Fixed-alpha Test+KGE : {:.6f}'.format(best_test_kge_mrr))
-    logging.info('-------------------------')
-
-    # (3) 测试后训练新模块：Calibration Gate（冻结grounding+KGE）
-    if bool(getattr(args, 'calibrate_gate', False)):
-        logging.info('>>>>> Calibration Gate (lambda-mix): Training (freeze grounding+KGE)')
-        gate_trainer = GateTrainer(
-            model=RulE_model,
-            train_set=train_set,
-            valid_set=valid_set,
-            test_set=test_set,
-            test_kge_set=test_kge_set,
-            device=device,
-            save_path=args.save_path,
-            num_worker=args.cpu_num,
-            feature_dim=6,
-            hidden_dim=int(getattr(args, 'gate_mlp_hidden_dim', 32)),
-            dropout=float(getattr(args, 'gate_dropout', 0.1)),
-            topk=int(getattr(args, 'gate_topk', 50)),
-            neg_size=int(getattr(args, 'gate_neg_size', 128)),
-            lr=float(getattr(args, 'gate_lr', 0.001)),
-            weight_decay=float(getattr(args, 'gate_weight_decay', 0.0)),
-            epochs=int(getattr(args, 'gate_epochs', 5)),
-            log_steps=int(getattr(args, 'gate_log_steps', 100)),
-            score_norm=str(getattr(args, 'gate_score_norm', 'none')),
-            norm_eps=float(getattr(args, 'gate_norm_eps', 1e-6)),
-            patience=int(getattr(args, 'gate_patience', 2)),
-            min_improvement=float(getattr(args, 'gate_min_improvement', 0.001)),
-        )
-        gate_trainer.train()
-
-        # (4) 新模块训练完：加载最优gate断点并最终推理评测
-        gate_ckpt_path = os.path.join(args.save_path, 'gate.pt')
-        gate_ckpt = torch.load(gate_ckpt_path, map_location=device)
-        gate_trainer.gate.load_state_dict(gate_ckpt['gate'])
-        logging.info(f'Loaded gate checkpoint from {gate_ckpt_path}')
-
-        logging.info('>>>>> Gate inference: final evaluation')
-        gate_trainer.evaluate('valid')
-        gate_trainer.evaluate('test')
-        gate_trainer.evaluate('test_kge')
+    # logging.info('>>>>> Fixed-alpha inference after grounding checkpoint load')
+    # best_valid_mrr = ground_trainer.evaluate('valid', args.alpha, expectation=True)
+    # best_test_mrr = ground_trainer.evaluate('test', args.alpha, expectation=True)
+    # best_test_kge_mrr = ground_trainer.evaluate_t('test_kge', args.alpha, expectation=True)
+    # logging.info('-------------------------')
+    # logging.info('| Fixed-alpha Valid MRR: {:.6f}'.format(best_valid_mrr))
+    # logging.info('| Fixed-alpha Test  MRR: {:.6f}'.format(best_test_mrr))
+    # logging.info('| Fixed-alpha Test+KGE : {:.6f}'.format(best_test_kge_mrr))
+    # logging.info('-------------------------')
 
     # return test_mrr
 
