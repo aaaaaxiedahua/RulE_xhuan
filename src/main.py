@@ -117,6 +117,8 @@ def parse_args(args=None):
                         help='每步传播保留topS中间实体(beam剪枝)，0表示不剪枝')
     parser.add_argument('--soft_only_on_deadend', default=True, type=lambda x: (str(x).lower() == 'true'),
                         help='仅在真实边传播断路时才启用预测软边(更稳)')
+    parser.add_argument('--soft_real_kmin', default=0, type=int,
+                        help='真实边传播后候选(<kmin)才启用预测软边(0表示关闭；优先于soft_only_on_deadend)')
     parser.add_argument('--soft_log_steps', default=0, type=int,
                         help='Soft-grounding统计日志间隔(以forward次数计)，0表示关闭')
 
@@ -180,6 +182,7 @@ def main():
     RulE_model.soft_temp = float(getattr(args, 'soft_temp', 1.0))
     RulE_model.soft_beam = int(getattr(args, 'soft_beam', 0))
     RulE_model.soft_only_on_deadend = bool(getattr(args, 'soft_only_on_deadend', True))
+    RulE_model.soft_real_kmin = int(getattr(args, 'soft_real_kmin', 0))
     RulE_model.soft_log_steps = int(getattr(args, 'soft_log_steps', 0))
 
     
@@ -216,7 +219,7 @@ def main():
     # load rule embedding and KGE embedding
 
     checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
-    RulE_model.load_state_dict(checkpoint['model'])
+    RulE_model.load_state_dict(checkpoint['model'], strict=False)
     
     
     logging.info('Test the results of pre-training')
@@ -250,7 +253,7 @@ def main():
     # (1) Grounding结束后：加载最优grounding断点（grounding.pt）
     # grounding_ckpt_path = os.path.join(args.save_path, 'grounding.pt')
     # grounding_ckpt = torch.load(grounding_ckpt_path, map_location=device)
-    # RulE_model.load_state_dict(grounding_ckpt['model'])
+    # RulE_model.load_state_dict(grounding_ckpt['model'], strict=False)
 
     # (2) 固定alpha：最终推理评测
     # logging.info('>>>>> Fixed-alpha inference after grounding checkpoint load')

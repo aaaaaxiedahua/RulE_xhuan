@@ -37,24 +37,25 @@
     "num_iters": 15,
     "num_samples": 5,
     "beta_kl": 0.001,
-    "beta_sigma": 0.001,
+    "beta_sigma": 0.01,
     "lambda_0": 1.0,
-    "lambda_uncertainty": 0.001,
+    "lambda_uncertainty": 0.01,
 
-    "use_query_attention": true,
+    "use_query_attention": false,
     "attention_hidden_dim": 64,
     "attention_dropout": 0.1,
     
-    "use_hierarchical_agg": true,
+    "use_hierarchical_agg": false,
     "quality_thresholds": [0.4, 0.7],
     "hierarchical_hidden_dim": 64,
     "hierarchical_dropout": 0.1,
 
     "soft_grounding": true,
-    "soft_topb": 50,
-    "soft_eta": 0.3,
+    "soft_topb": 10,
+    "soft_eta": 0.5,
     "soft_temp": 1.0,
     "soft_beam": 0,
     "soft_only_on_deadend": true,
+    "soft_real_kmin": 3,
     "soft_log_steps": 100
 }

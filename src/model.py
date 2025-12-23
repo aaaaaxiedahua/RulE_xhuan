@@ -197,6 +197,7 @@ class RulE(torch.nn.Module):
         self.soft_temp = 1.0
         self.soft_beam = 0
         self.soft_only_on_deadend = True
+        self.soft_real_kmin = 0
         self.soft_log_steps = 0
         self._soft_forward_calls = 0
         self._soft_pred_edges = None
@@ -583,30 +584,38 @@ class RulE(torch.nn.Module):
             x_real = self.graph.propagate(x, rel, use_remove)
             x_pred = None
 
-            dead = None
-            if self.soft_only_on_deadend:
-                dead = (x_real.sum(dim=0) <= 0).squeeze(-1).squeeze(-1)  # [batch]
-                dead_count = int(dead.sum().item())
-                if dead_count > 0:
-                    x_pred = self._pred_propagate(x, rel, use_remove, query_h=all_h)
-                    x = x_real + dead.view(1, -1, 1).to(dtype=x_real.dtype) * x_pred
-                else:
-                    x = x_real
+            dead = (x_real.sum(dim=0) <= 0).squeeze(-1).squeeze(-1)  # [batch]
+            dead_count = int(dead.sum().item())
+            sparse = None
+            sparse_count = 0
+
+            kmin = int(getattr(self, "soft_real_kmin", 0))
+            if kmin > 0:
+                real_support = (x_real.squeeze(-1) > 0).sum(dim=0)  # [batch]
+                sparse = real_support < kmin
+                sparse_count = int(sparse.sum().item())
+
+            use_pred = None
+            if kmin > 0:
+                use_pred = sparse
+            elif self.soft_only_on_deadend:
+                use_pred = dead
             else:
+                use_pred = torch.ones_like(dead, dtype=torch.bool)
+
+            use_pred_count = int(use_pred.sum().item())
+            if use_pred_count > 0:
                 x_pred = self._pred_propagate(x, rel, use_remove, query_h=all_h)
-                x = x_real + x_pred
+                x = x_real + use_pred.view(1, -1, 1).to(dtype=x_real.dtype) * x_pred
+            else:
+                x = x_real
 
             if stats is not None:
                 stats["step_queries"] = stats.get("step_queries", 0) + batch_size
-                if dead is not None:
-                    dead_count = int(dead.sum().item())
-                else:
-                    dead_count = 0
                 stats["deadend_queries"] = stats.get("deadend_queries", 0) + dead_count
-                if self.soft_only_on_deadend:
-                    stats["pred_used_queries"] = stats.get("pred_used_queries", 0) + dead_count
-                else:
-                    stats["pred_used_queries"] = stats.get("pred_used_queries", 0) + batch_size
+                if sparse is not None:
+                    stats["sparse_queries"] = stats.get("sparse_queries", 0) + sparse_count
+                stats["pred_used_queries"] = stats.get("pred_used_queries", 0) + use_pred_count
 
                 stats["mass_real_sum"] = stats.get("mass_real_sum", 0.0) + float(x_real.sum().item())
                 if x_pred is not None:
@@ -768,11 +777,13 @@ class RulE(torch.nn.Module):
             rule_count.append(count)
 
         if mask.sum().item() == 0:
-            return mask + self.bias.unsqueeze(0), (1 - mask).bool()
+            candidate_mask = torch.zeros_like(mask, dtype=torch.bool)
+            return mask + self.bias.unsqueeze(0), candidate_mask
 
         if soft_stats is not None and soft_stats.get("step_queries", 0) > 0:
             step_q = float(soft_stats["step_queries"])
             dead_rate = float(soft_stats.get("deadend_queries", 0)) / step_q
+            sparse_rate = float(soft_stats.get("sparse_queries", 0)) / step_q
             pred_rate = float(soft_stats.get("pred_used_queries", 0)) / step_q
             real_mass = float(soft_stats.get("mass_real_sum", 0.0))
             pred_mass = float(soft_stats.get("mass_pred_sum", 0.0))
@@ -781,11 +792,12 @@ class RulE(torch.nn.Module):
                 "[SoftGrounding] "
                 f"query_r={int(query_r)} rules={int(soft_stats.get('rules_processed', 0))} "
                 f"rule_steps={int(soft_stats.get('rule_steps_processed', 0))} "
-                f"deadend_rate={dead_rate:.4f} pred_used_rate={pred_rate:.4f} "
+                f"deadend_rate={dead_rate:.4f} sparse_rate={sparse_rate:.4f} pred_used_rate={pred_rate:.4f} "
                 f"pred/real_mass={mass_ratio:.4f} "
                 f"topB={int(getattr(self, 'soft_topb', 0))} eta={float(getattr(self, 'soft_eta', 0.0))} "
                 f"temp={float(getattr(self, 'soft_temp', 1.0))} beam={int(getattr(self, 'soft_beam', 0))} "
-                f"only_on_deadend={bool(getattr(self, 'soft_only_on_deadend', True))}"
+                f"only_on_deadend={bool(getattr(self, 'soft_only_on_deadend', True))} "
+                f"real_kmin={int(getattr(self, 'soft_real_kmin', 0))}"
             )
 
 
@@ -892,9 +904,9 @@ class RulE(torch.nn.Module):
         # score = beta * score + (1 - beta) * kge_score_map
         # score = self.beta[all_r[0]] * score +  kge_score
 
-        mask = torch.ones_like(mask).bool()
+        candidate_mask = mask > 0
 
-        return score, mask
+        return score, candidate_mask
 
 
 

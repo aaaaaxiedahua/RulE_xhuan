@@ -689,6 +689,25 @@ class GroundTrainer(object):
         concat_all_t = torch.cat(concat_all_t, dim=0)
         concat_flag = torch.cat(concat_flag, dim=0)
         concat_mask = torch.cat(concat_mask, dim=0)
+
+        candidate_sizes = concat_mask.sum(dim=1).to(dtype=torch.float)
+        zero_candidate_rate = (candidate_sizes == 0).to(dtype=torch.float).mean().item()
+        oracle_coverage = concat_mask[
+            torch.arange(concat_all_t.size(0), device=self.device), concat_all_t
+        ].to(dtype=torch.float).mean().item()
+
+        sizes_cpu = candidate_sizes.detach().cpu().sort().values
+        if sizes_cpu.numel() > 0:
+            p50 = sizes_cpu[int(0.50 * (sizes_cpu.numel() - 1))].item()
+            p90 = sizes_cpu[int(0.90 * (sizes_cpu.numel() - 1))].item()
+            p99 = sizes_cpu[int(0.99 * (sizes_cpu.numel() - 1))].item()
+        else:
+            p50 = p90 = p99 = 0.0
+        logging.info(
+            f"Candidate stats: zero_rate={zero_candidate_rate:.4f} "
+            f"coverage@oracle={oracle_coverage:.4f} "
+            f"size_mean={candidate_sizes.mean().item():.2f} p50={p50:.0f} p90={p90:.0f} p99={p99:.0f}"
+        )
         
         ranks = []
         for k in range(concat_all_t.size(0)):
