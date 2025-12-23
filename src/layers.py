@@ -57,20 +57,47 @@ class FuncToNodeSum(nn.Module):
         self.add_model = MLP(self.vector_dim, [self.vector_dim])
         # for param in self.add_model.parameters():
         #     param.requires_grad = False
+        self.candidate_chunk_size = 8192
         
     
     def forward(self, A_fn, x_f, mlp_rule_feature):
+        """
+        Args:
+            A_fn: [num_rules, num_candidates]
+            x_f: [num_rules, hidden_dim]
+            mlp_rule_feature: [num_rules, vector_dim]
 
-        weight = torch.transpose(A_fn, 0, 1).unsqueeze(-1)
-        message = x_f.unsqueeze(0)
+        Returns:
+            output: [num_candidates, vector_dim]
 
-        feature = torch.transpose((message * weight), 1, 2)
-        weighted_features = torch.matmul(feature, mlp_rule_feature)
-        weighted_features_norm = self.layer_norm(weighted_features)
-        weighted_features_relu = torch.relu(weighted_features_norm)
-        output = weighted_features_relu.mean(1)
+        Notes:
+            The original implementation materialized a [num_candidates, num_rules, hidden_dim]
+            tensor via (message * weight), which is infeasible on large graphs. This
+            implementation is mathematically equivalent but avoids that intermediate by
+            directly contracting over rules and chunking on candidates.
+        """
+        if A_fn.numel() == 0:
+            return A_fn.new_zeros((0, self.vector_dim))
 
-        return output
+        # Directly compute:
+        # weighted_features[c, h, d] = sum_r A_fn[r, c] * x_f[r, h] * mlp_rule_feature[r, d]
+        num_candidates = int(A_fn.size(1))
+        chunk_size = int(getattr(self, "candidate_chunk_size", 8192))
+        if chunk_size <= 0:
+            chunk_size = num_candidates
+
+        outputs = []
+        for start in range(0, num_candidates, chunk_size):
+            end = min(start + chunk_size, num_candidates)
+            A_chunk = A_fn[:, start:end]  # [R, Cc]
+            weighted_features = torch.einsum(
+                "rc,rh,rd->chd", A_chunk, x_f, mlp_rule_feature
+            )  # [Cc, H, D]
+            weighted_features_norm = self.layer_norm(weighted_features)
+            weighted_features_relu = torch.relu(weighted_features_norm)
+            outputs.append(weighted_features_relu.mean(1))  # [Cc, D]
+
+        return torch.cat(outputs, dim=0)
 
 
     # def forward(self, A_fn, x_f):
