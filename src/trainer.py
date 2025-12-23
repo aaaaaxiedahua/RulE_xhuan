@@ -496,12 +496,6 @@ class GroundTrainer(object):
                 f'std={self.model.rule_mu.std().item():.6f}'
             )
 
-            # Optional: prune rules per relation for large graphs (approximate but much faster)
-            max_rules = int(getattr(args, "max_rules_per_relation", 0))
-            if max_rules > 0:
-                logging.info(f"Pruning rules per relation: topN={max_rules}")
-                self.model.prune_rules_per_relation(max_rules)
-
             # Soft-grounding: precompute KGE-predicted soft edges (small graphs)
             if bool(getattr(self.model, 'use_soft_grounding', False)) and int(
                 getattr(self.model, 'soft_topb', 0)
