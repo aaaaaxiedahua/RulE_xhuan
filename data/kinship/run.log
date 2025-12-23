@@ -1,0 +1,407 @@
+2025-12-22 18:09:59 INFO     Query-Conditioned Attention enabled: attention_hidden_dim=64, dropout=0.1
+2025-12-22 18:09:59 INFO     Hierarchical Rule Aggregation disabled
+2025-12-22 18:09:59 INFO     read 10000 rules from list.
+2025-12-22 18:09:59 INFO     Loaded support_counts from ../data/kinship\support_counts.pt
+2025-12-22 18:09:59 INFO     Uncertainty modeling initialized: num_rules=10000, num_samples=5, lambda_0=2.0
+2025-12-22 18:10:02 INFO     Finishing pre-training!
+2025-12-22 18:10:04 INFO     Pre-computed rule_mu for grounding: mean=-2.654866, std=2.140228
+2025-12-22 18:10:04 INFO     Building soft predicted edges for grounding: topB=50, eta=0.4, temp=1.0, only_on_deadend=True, beam=0
+2025-12-22 18:10:04 INFO     >>>>> RulE: Grounding-Training
+2025-12-22 18:10:04 INFO     -------------------------
+2025-12-22 18:10:04 INFO     | Iteration: 1/10
+2025-12-22 18:10:04 INFO     -------------------------
+2025-12-22 18:10:17 INFO     loss:    10 224 4.510651 3026.4
+2025-12-22 18:10:25 INFO     loss:    20 224 3.926605 3213.6
+2025-12-22 18:10:33 INFO     loss:    30 224 4.201531 2849.6
+2025-12-22 18:10:42 INFO     loss:    40 224 4.737813 3307.2
+2025-12-22 18:10:48 INFO     loss:    50 224 3.795341 2943.2
+2025-12-22 18:10:57 INFO     loss:    60 224 3.606117 2776.8
+2025-12-22 18:11:03 INFO     loss:    70 224 4.265971 2412.8
+2025-12-22 18:11:10 INFO     loss:    80 224 3.586992 2943.2
+2025-12-22 18:11:18 INFO     loss:    90 224 3.369391 3036.8
+2025-12-22 18:11:27 INFO     [SoftGrounding] query_r=22 rules=200 rule_steps=596 deadend_rate=0.0134 pred_used_rate=0.0134 pred/real_mass=0.0261 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:11:27 INFO     loss:    100 224 4.443930 2683.2
+2025-12-22 18:11:35 INFO     loss:    110 224 4.225942 2964.0
+2025-12-22 18:11:40 INFO     loss:    120 224 3.364837 3328.0
+2025-12-22 18:11:49 INFO     loss:    130 224 4.314750 2870.4
+2025-12-22 18:11:57 INFO     loss:    140 224 3.127268 3244.8
+2025-12-22 18:12:08 INFO     loss:    150 224 3.273819 3203.2
+2025-12-22 18:12:17 INFO     loss:    160 224 2.848300 3244.8
+2025-12-22 18:12:24 INFO     loss:    170 224 3.205905 2329.6
+2025-12-22 18:12:31 INFO     loss:    180 224 3.148790 2995.2
+2025-12-22 18:12:40 INFO     loss:    190 224 3.039308 3068.0
+2025-12-22 18:12:46 INFO     [SoftGrounding] query_r=36 rules=200 rule_steps=600 deadend_rate=0.1374 pred_used_rate=0.1374 pred/real_mass=0.7050 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:12:46 INFO     loss:    200 224 2.872215 2922.4
+2025-12-22 18:13:04 INFO     loss:    210 224 2.792135 2984.8
+2025-12-22 18:13:20 INFO     loss:    220 224 2.552022 3328.0
+2025-12-22 18:13:26 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 18:14:47 INFO     [SoftGrounding] query_r=20 rules=200 rule_steps=600 deadend_rate=0.1034 pred_used_rate=0.1034 pred/real_mass=0.6211 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:15:54 INFO     Data : 4274
+2025-12-22 18:15:54 INFO     Hit1 : 0.456715
+2025-12-22 18:15:54 INFO     Hit3 : 0.711044
+2025-12-22 18:15:54 INFO     Hit10: 0.928638
+2025-12-22 18:15:54 INFO     MR   : 3.761114
+2025-12-22 18:15:54 INFO     MRR  : 0.614095
+2025-12-22 18:15:54 INFO     Save checkpoint to kinship\grounding.pt
+2025-12-22 18:15:55 INFO     -------------------------
+2025-12-22 18:15:55 INFO     | Iteration: 2/10
+2025-12-22 18:15:55 INFO     -------------------------
+2025-12-22 18:16:18 INFO     loss:    10 224 3.198387 3026.4
+2025-12-22 18:16:29 INFO     [SoftGrounding] query_r=9 rules=200 rule_steps=600 deadend_rate=0.1272 pred_used_rate=0.1272 pred/real_mass=0.5795 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:16:32 INFO     loss:    20 224 2.834131 3213.6
+2025-12-22 18:16:46 INFO     loss:    30 224 3.021320 2849.6
+2025-12-22 18:17:00 INFO     loss:    40 224 2.753605 3307.2
+2025-12-22 18:17:10 INFO     loss:    50 224 3.084564 2943.2
+2025-12-22 18:17:27 INFO     loss:    60 224 2.702674 2776.8
+2025-12-22 18:17:37 INFO     loss:    70 224 2.787170 2412.8
+2025-12-22 18:17:51 INFO     loss:    80 224 2.931549 2943.2
+2025-12-22 18:18:03 INFO     loss:    90 224 2.728882 3036.8
+2025-12-22 18:18:17 INFO     loss:    100 224 1.968365 2683.2
+2025-12-22 18:18:30 INFO     loss:    110 224 2.929125 2964.0
+2025-12-22 18:18:37 INFO     [SoftGrounding] query_r=41 rules=200 rule_steps=600 deadend_rate=0.1010 pred_used_rate=0.1010 pred/real_mass=0.4974 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:18:38 INFO     loss:    120 224 2.874820 3328.0
+2025-12-22 18:18:53 INFO     loss:    130 224 1.901335 2870.4
+2025-12-22 18:19:06 INFO     loss:    140 224 2.822637 3244.8
+2025-12-22 18:19:22 INFO     loss:    150 224 2.810566 3203.2
+2025-12-22 18:19:38 INFO     loss:    160 224 2.311764 3244.8
+2025-12-22 18:19:50 INFO     loss:    170 224 2.955531 2329.6
+2025-12-22 18:20:04 INFO     loss:    180 224 2.497948 2995.2
+2025-12-22 18:20:19 INFO     loss:    190 224 2.867244 3068.0
+2025-12-22 18:20:29 INFO     loss:    200 224 2.538189 2922.4
+2025-12-22 18:20:49 INFO     loss:    210 224 2.411069 2984.8
+2025-12-22 18:21:00 INFO     [SoftGrounding] query_r=6 rules=200 rule_steps=600 deadend_rate=0.1147 pred_used_rate=0.1147 pred/real_mass=0.6302 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:21:05 INFO     loss:    220 224 2.312698 3328.0
+2025-12-22 18:21:11 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 18:22:52 INFO     [SoftGrounding] query_r=30 rules=200 rule_steps=600 deadend_rate=0.1191 pred_used_rate=0.1191 pred/real_mass=0.5666 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:23:43 INFO     Data : 4274
+2025-12-22 18:23:43 INFO     Hit1 : 0.512401
+2025-12-22 18:23:43 INFO     Hit3 : 0.761816
+2025-12-22 18:23:43 INFO     Hit10: 0.943379
+2025-12-22 18:23:43 INFO     MR   : 3.369209
+2025-12-22 18:23:43 INFO     MRR  : 0.660685
+2025-12-22 18:23:43 INFO     Save checkpoint to kinship\grounding.pt
+2025-12-22 18:23:43 INFO     -------------------------
+2025-12-22 18:23:43 INFO     | Iteration: 3/10
+2025-12-22 18:23:43 INFO     -------------------------
+2025-12-22 18:24:08 INFO     loss:    10 224 3.007648 3026.4
+2025-12-22 18:24:22 INFO     loss:    20 224 2.644003 3213.6
+2025-12-22 18:24:36 INFO     loss:    30 224 2.634408 2849.6
+2025-12-22 18:24:43 INFO     [SoftGrounding] query_r=26 rules=200 rule_steps=600 deadend_rate=0.0960 pred_used_rate=0.0960 pred/real_mass=0.6004 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:24:50 INFO     loss:    40 224 2.537252 3307.2
+2025-12-22 18:25:01 INFO     loss:    50 224 2.956753 2943.2
+2025-12-22 18:25:18 INFO     loss:    60 224 2.419102 2776.8
+2025-12-22 18:25:29 INFO     loss:    70 224 2.471237 2412.8
+2025-12-22 18:25:43 INFO     loss:    80 224 2.775879 2943.2
+2025-12-22 18:25:55 INFO     loss:    90 224 2.448242 3036.8
+2025-12-22 18:26:10 INFO     loss:    100 224 0.261629 2683.2
+2025-12-22 18:26:24 INFO     loss:    110 224 2.258169 2964.0
+2025-12-22 18:26:32 INFO     loss:    120 224 2.640520 3328.0
+2025-12-22 18:26:47 INFO     loss:    130 224 0.208363 2870.4
+2025-12-22 18:26:54 INFO     [SoftGrounding] query_r=16 rules=200 rule_steps=600 deadend_rate=0.1249 pred_used_rate=0.1249 pred/real_mass=0.5346 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:27:01 INFO     loss:    140 224 2.609016 3244.8
+2025-12-22 18:27:18 INFO     loss:    150 224 2.590331 3203.2
+2025-12-22 18:27:35 INFO     loss:    160 224 2.061249 3244.8
+2025-12-22 18:27:47 INFO     loss:    170 224 2.824515 2329.6
+2025-12-22 18:28:01 INFO     loss:    180 224 2.189327 2995.2
+2025-12-22 18:28:16 INFO     loss:    190 224 2.741304 3068.0
+2025-12-22 18:28:28 INFO     loss:    200 224 2.292505 2922.4
+2025-12-22 18:28:48 INFO     loss:    210 224 2.197528 2984.8
+2025-12-22 18:29:04 INFO     loss:    220 224 2.094888 3328.0
+2025-12-22 18:29:10 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 18:29:32 INFO     [SoftGrounding] query_r=3 rules=200 rule_steps=600 deadend_rate=0.1175 pred_used_rate=0.1175 pred/real_mass=0.5639 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:31:01 INFO     [SoftGrounding] query_r=34 rules=200 rule_steps=600 deadend_rate=0.0867 pred_used_rate=0.0867 pred/real_mass=0.4794 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:31:40 INFO     Data : 4274
+2025-12-22 18:31:40 INFO     Hit1 : 0.492513
+2025-12-22 18:31:40 INFO     Hit3 : 0.754796
+2025-12-22 18:31:40 INFO     Hit10: 0.943379
+2025-12-22 18:31:40 INFO     MR   : 3.463500
+2025-12-22 18:31:40 INFO     MRR  : 0.646281
+2025-12-22 18:31:40 INFO     -------------------------
+2025-12-22 18:31:40 INFO     | Iteration: 4/10
+2025-12-22 18:31:40 INFO     -------------------------
+2025-12-22 18:32:04 INFO     loss:    10 224 2.886433 3026.4
+2025-12-22 18:32:18 INFO     loss:    20 224 2.498395 3213.6
+2025-12-22 18:32:33 INFO     loss:    30 224 2.279999 2849.6
+2025-12-22 18:32:47 INFO     loss:    40 224 2.433273 3307.2
+2025-12-22 18:32:58 INFO     loss:    50 224 2.849143 2943.2
+2025-12-22 18:33:04 INFO     [SoftGrounding] query_r=31 rules=200 rule_steps=600 deadend_rate=0.0810 pred_used_rate=0.0810 pred/real_mass=0.4232 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:33:16 INFO     loss:    60 224 2.162063 2776.8
+2025-12-22 18:33:26 INFO     loss:    70 224 2.174817 2412.8
+2025-12-22 18:33:40 INFO     loss:    80 224 2.672024 2943.2
+2025-12-22 18:33:52 INFO     loss:    90 224 2.145703 3036.8
+2025-12-22 18:34:07 INFO     loss:    100 224 0.035130 2683.2
+2025-12-22 18:34:21 INFO     loss:    110 224 1.877658 2964.0
+2025-12-22 18:34:29 INFO     loss:    120 224 2.420013 3328.0
+2025-12-22 18:34:43 INFO     loss:    130 224 0.031564 2870.4
+2025-12-22 18:34:57 INFO     loss:    140 224 2.352771 3244.8
+2025-12-22 18:35:15 INFO     loss:    150 224 2.393389 3203.2
+2025-12-22 18:35:19 INFO     [SoftGrounding] query_r=11 rules=200 rule_steps=600 deadend_rate=0.1087 pred_used_rate=0.1087 pred/real_mass=0.7078 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:35:31 INFO     loss:    160 224 1.847641 3244.8
+2025-12-22 18:35:43 INFO     loss:    170 224 2.798416 2329.6
+2025-12-22 18:35:57 INFO     loss:    180 224 1.863217 2995.2
+2025-12-22 18:36:12 INFO     loss:    190 224 2.508322 3068.0
+2025-12-22 18:36:24 INFO     loss:    200 224 2.031500 2922.4
+2025-12-22 18:36:44 INFO     loss:    210 224 1.931230 2984.8
+2025-12-22 18:37:00 INFO     loss:    220 224 1.875309 3328.0
+2025-12-22 18:37:06 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 18:37:43 INFO     [SoftGrounding] query_r=8 rules=200 rule_steps=600 deadend_rate=0.1419 pred_used_rate=0.1419 pred/real_mass=0.5901 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:39:17 INFO     [SoftGrounding] query_r=38 rules=200 rule_steps=600 deadend_rate=0.0887 pred_used_rate=0.0887 pred/real_mass=0.7469 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:39:38 INFO     Data : 4274
+2025-12-22 18:39:38 INFO     Hit1 : 0.462096
+2025-12-22 18:39:38 INFO     Hit3 : 0.728358
+2025-12-22 18:39:38 INFO     Hit10: 0.938699
+2025-12-22 18:39:38 INFO     MR   : 3.653018
+2025-12-22 18:39:38 INFO     MRR  : 0.622836
+2025-12-22 18:39:38 INFO     -------------------------
+2025-12-22 18:39:38 INFO     | Iteration: 5/10
+2025-12-22 18:39:38 INFO     -------------------------
+2025-12-22 18:40:02 INFO     loss:    10 224 2.741347 3026.4
+2025-12-22 18:40:16 INFO     loss:    20 224 2.299625 3213.6
+2025-12-22 18:40:30 INFO     loss:    30 224 1.930788 2849.6
+2025-12-22 18:40:44 INFO     loss:    40 224 2.054707 3307.2
+2025-12-22 18:40:55 INFO     loss:    50 224 2.727260 2943.2
+2025-12-22 18:41:13 INFO     loss:    60 224 1.943860 2776.8
+2025-12-22 18:41:23 INFO     loss:    70 224 1.906552 2412.8
+2025-12-22 18:41:25 INFO     [SoftGrounding] query_r=34 rules=200 rule_steps=600 deadend_rate=0.0982 pred_used_rate=0.0982 pred/real_mass=0.5221 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:41:37 INFO     loss:    80 224 2.551441 2943.2
+2025-12-22 18:41:49 INFO     loss:    90 224 1.896889 3036.8
+2025-12-22 18:42:04 INFO     loss:    100 224 0.007527 2683.2
+2025-12-22 18:42:18 INFO     loss:    110 224 1.524282 2964.0
+2025-12-22 18:42:26 INFO     loss:    120 224 2.264564 3328.0
+2025-12-22 18:42:41 INFO     loss:    130 224 0.007713 2870.4
+2025-12-22 18:42:55 INFO     loss:    140 224 2.053426 3244.8
+2025-12-22 18:43:12 INFO     loss:    150 224 2.174804 3203.2
+2025-12-22 18:43:29 INFO     loss:    160 224 1.585778 3244.8
+2025-12-22 18:43:41 INFO     loss:    170 224 2.575773 2329.6
+2025-12-22 18:43:43 INFO     [SoftGrounding] query_r=7 rules=200 rule_steps=600 deadend_rate=0.1080 pred_used_rate=0.1080 pred/real_mass=0.6759 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:43:55 INFO     loss:    180 224 1.538051 2995.2
+2025-12-22 18:44:10 INFO     loss:    190 224 2.336348 3068.0
+2025-12-22 18:44:21 INFO     loss:    200 224 1.794658 2922.4
+2025-12-22 18:44:42 INFO     loss:    210 224 1.695962 2984.8
+2025-12-22 18:44:58 INFO     loss:    220 224 1.647216 3328.0
+2025-12-22 18:45:04 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 18:45:55 INFO     [SoftGrounding] query_r=12 rules=200 rule_steps=600 deadend_rate=0.0967 pred_used_rate=0.0967 pred/real_mass=0.6760 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:47:27 INFO     [SoftGrounding] query_r=42 rules=200 rule_steps=600 deadend_rate=0.1146 pred_used_rate=0.1146 pred/real_mass=0.6875 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:47:35 INFO     Data : 4274
+2025-12-22 18:47:35 INFO     Hit1 : 0.440805
+2025-12-22 18:47:35 INFO     Hit3 : 0.711511
+2025-12-22 18:47:35 INFO     Hit10: 0.927234
+2025-12-22 18:47:35 INFO     MR   : 3.934956
+2025-12-22 18:47:35 INFO     MRR  : 0.603247
+2025-12-22 18:47:35 INFO     -------------------------
+2025-12-22 18:47:35 INFO     | Iteration: 6/10
+2025-12-22 18:47:35 INFO     -------------------------
+2025-12-22 18:47:59 INFO     loss:    10 224 2.611956 3026.4
+2025-12-22 18:48:13 INFO     loss:    20 224 2.168490 3213.6
+2025-12-22 18:48:27 INFO     loss:    30 224 1.791682 2849.6
+2025-12-22 18:48:41 INFO     loss:    40 224 1.916056 3307.2
+2025-12-22 18:48:52 INFO     loss:    50 224 2.696687 2943.2
+2025-12-22 18:49:10 INFO     loss:    60 224 1.625540 2776.8
+2025-12-22 18:49:20 INFO     loss:    70 224 1.649261 2412.8
+2025-12-22 18:49:34 INFO     loss:    80 224 2.294780 2943.2
+2025-12-22 18:49:44 INFO     [SoftGrounding] query_r=12 rules=200 rule_steps=600 deadend_rate=0.1108 pred_used_rate=0.1108 pred/real_mass=0.6189 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:49:46 INFO     loss:    90 224 1.633311 3036.8
+2025-12-22 18:50:01 INFO     loss:    100 224 0.002257 2683.2
+2025-12-22 18:50:15 INFO     loss:    110 224 1.123430 2964.0
+2025-12-22 18:50:23 INFO     loss:    120 224 2.017287 3328.0
+2025-12-22 18:50:38 INFO     loss:    130 224 0.002230 2870.4
+2025-12-22 18:50:52 INFO     loss:    140 224 1.774815 3244.8
+2025-12-22 18:51:09 INFO     loss:    150 224 1.976339 3203.2
+2025-12-22 18:51:26 INFO     loss:    160 224 1.282664 3244.8
+2025-12-22 18:51:38 INFO     loss:    170 224 2.338357 2329.6
+2025-12-22 18:51:52 INFO     loss:    180 224 1.262179 2995.2
+2025-12-22 18:52:06 INFO     [SoftGrounding] query_r=41 rules=200 rule_steps=600 deadend_rate=0.1121 pred_used_rate=0.1121 pred/real_mass=0.5135 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:52:07 INFO     loss:    190 224 2.143195 3068.0
+2025-12-22 18:52:18 INFO     loss:    200 224 1.624393 2922.4
+2025-12-22 18:52:39 INFO     loss:    210 224 1.883021 2984.8
+2025-12-22 18:52:55 INFO     loss:    220 224 1.432931 3328.0
+2025-12-22 18:53:01 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 18:54:18 INFO     [SoftGrounding] query_r=16 rules=200 rule_steps=600 deadend_rate=0.1098 pred_used_rate=0.1098 pred/real_mass=0.4619 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:55:31 INFO     Data : 4274
+2025-12-22 18:55:31 INFO     Hit1 : 0.419513
+2025-12-22 18:55:31 INFO     Hit3 : 0.704726
+2025-12-22 18:55:31 INFO     Hit10: 0.926766
+2025-12-22 18:55:31 INFO     MR   : 4.038956
+2025-12-22 18:55:31 INFO     MRR  : 0.590758
+2025-12-22 18:55:31 INFO     -------------------------
+2025-12-22 18:55:31 INFO     | Iteration: 7/10
+2025-12-22 18:55:31 INFO     -------------------------
+2025-12-22 18:55:51 INFO     [SoftGrounding] query_r=37 rules=200 rule_steps=600 deadend_rate=0.1373 pred_used_rate=0.1373 pred/real_mass=0.6394 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:55:56 INFO     loss:    10 224 2.423206 3026.4
+2025-12-22 18:56:10 INFO     loss:    20 224 2.083184 3213.6
+2025-12-22 18:56:24 INFO     loss:    30 224 1.375763 2849.6
+2025-12-22 18:56:38 INFO     loss:    40 224 2.122004 3307.2
+2025-12-22 18:56:49 INFO     loss:    50 224 2.573001 2943.2
+2025-12-22 18:57:07 INFO     loss:    60 224 1.554150 2776.8
+2025-12-22 18:57:18 INFO     loss:    70 224 1.686559 2412.8
+2025-12-22 18:57:32 INFO     loss:    80 224 2.536731 2943.2
+2025-12-22 18:57:44 INFO     loss:    90 224 1.333826 3036.8
+2025-12-22 18:57:58 INFO     loss:    100 224 0.000793 2683.2
+2025-12-22 18:58:09 INFO     [SoftGrounding] query_r=43 rules=200 rule_steps=600 deadend_rate=0.1186 pred_used_rate=0.1186 pred/real_mass=0.7168 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 18:58:12 INFO     loss:    110 224 1.240562 2964.0
+2025-12-22 18:58:20 INFO     loss:    120 224 1.867992 3328.0
+2025-12-22 18:58:35 INFO     loss:    130 224 0.000691 2870.4
+2025-12-22 18:58:49 INFO     loss:    140 224 1.555634 3244.8
+2025-12-22 18:59:06 INFO     loss:    150 224 2.014738 3203.2
+2025-12-22 18:59:23 INFO     loss:    160 224 1.116518 3244.8
+2025-12-22 18:59:35 INFO     loss:    170 224 2.098760 2329.6
+2025-12-22 18:59:48 INFO     loss:    180 224 1.130408 2995.2
+2025-12-22 19:00:04 INFO     loss:    190 224 2.055238 3068.0
+2025-12-22 19:00:15 INFO     loss:    200 224 1.594884 2922.4
+2025-12-22 19:00:30 INFO     [SoftGrounding] query_r=0 rules=200 rule_steps=600 deadend_rate=0.1560 pred_used_rate=0.1560 pred/real_mass=0.7884 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:00:35 INFO     loss:    210 224 1.367629 2984.8
+2025-12-22 19:00:51 INFO     loss:    220 224 1.236395 3328.0
+2025-12-22 19:00:57 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 19:02:27 INFO     [SoftGrounding] query_r=26 rules=200 rule_steps=600 deadend_rate=0.0909 pred_used_rate=0.0909 pred/real_mass=0.6247 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:03:30 INFO     Data : 4274
+2025-12-22 19:03:30 INFO     Hit1 : 0.403369
+2025-12-22 19:03:30 INFO     Hit3 : 0.677819
+2025-12-22 19:03:30 INFO     Hit10: 0.912728
+2025-12-22 19:03:30 INFO     MR   : 4.363126
+2025-12-22 19:03:30 INFO     MRR  : 0.571307
+2025-12-22 19:03:30 INFO     -------------------------
+2025-12-22 19:03:30 INFO     | Iteration: 8/10
+2025-12-22 19:03:30 INFO     -------------------------
+2025-12-22 19:03:54 INFO     loss:    10 224 2.289711 3026.4
+2025-12-22 19:04:09 INFO     loss:    20 224 1.908469 3213.6
+2025-12-22 19:04:17 INFO     [SoftGrounding] query_r=14 rules=200 rule_steps=600 deadend_rate=0.1214 pred_used_rate=0.1214 pred/real_mass=0.5911 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:04:23 INFO     loss:    30 224 1.258431 2849.6
+2025-12-22 19:04:37 INFO     loss:    40 224 1.617710 3307.2
+2025-12-22 19:04:48 INFO     loss:    50 224 2.304044 2943.2
+2025-12-22 19:05:05 INFO     loss:    60 224 1.304846 2776.8
+2025-12-22 19:05:16 INFO     loss:    70 224 1.579482 2412.8
+2025-12-22 19:05:30 INFO     loss:    80 224 1.981736 2943.2
+2025-12-22 19:05:42 INFO     loss:    90 224 1.133355 3036.8
+2025-12-22 19:05:56 INFO     loss:    100 224 0.000368 2683.2
+2025-12-22 19:06:10 INFO     loss:    110 224 1.265849 2964.0
+2025-12-22 19:06:19 INFO     loss:    120 224 1.717120 3328.0
+2025-12-22 19:06:25 INFO     [SoftGrounding] query_r=40 rules=200 rule_steps=598 deadend_rate=0.1285 pred_used_rate=0.1285 pred/real_mass=0.8341 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:06:33 INFO     loss:    130 224 0.000305 2870.4
+2025-12-22 19:06:47 INFO     loss:    140 224 1.441146 3244.8
+2025-12-22 19:07:04 INFO     loss:    150 224 1.758074 3203.2
+2025-12-22 19:07:21 INFO     loss:    160 224 1.187959 3244.8
+2025-12-22 19:07:33 INFO     loss:    170 224 2.284410 2329.6
+2025-12-22 19:07:46 INFO     loss:    180 224 0.990203 2995.2
+2025-12-22 19:08:02 INFO     loss:    190 224 2.065097 3068.0
+2025-12-22 19:08:13 INFO     loss:    200 224 1.506369 2922.4
+2025-12-22 19:08:34 INFO     loss:    210 224 1.406895 2984.8
+2025-12-22 19:08:50 INFO     loss:    220 224 1.611282 3328.0
+2025-12-22 19:08:56 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 19:09:06 INFO     [SoftGrounding] query_r=0 rules=200 rule_steps=600 deadend_rate=0.1465 pred_used_rate=0.1465 pred/real_mass=0.7985 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:10:37 INFO     [SoftGrounding] query_r=31 rules=200 rule_steps=600 deadend_rate=0.0804 pred_used_rate=0.0804 pred/real_mass=0.6286 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:11:27 INFO     Data : 4274
+2025-12-22 19:11:27 INFO     Hit1 : 0.405007
+2025-12-22 19:11:27 INFO     Hit3 : 0.685774
+2025-12-22 19:11:27 INFO     Hit10: 0.918811
+2025-12-22 19:11:27 INFO     MR   : 4.364998
+2025-12-22 19:11:27 INFO     MRR  : 0.575989
+2025-12-22 19:11:27 INFO     -------------------------
+2025-12-22 19:11:27 INFO     | Iteration: 9/10
+2025-12-22 19:11:27 INFO     -------------------------
+2025-12-22 19:11:51 INFO     loss:    10 224 2.340582 3026.4
+2025-12-22 19:12:05 INFO     loss:    20 224 1.820552 3213.6
+2025-12-22 19:12:19 INFO     loss:    30 224 1.040585 2849.6
+2025-12-22 19:12:34 INFO     loss:    40 224 1.668314 3307.2
+2025-12-22 19:12:36 INFO     [SoftGrounding] query_r=31 rules=200 rule_steps=600 deadend_rate=0.0776 pred_used_rate=0.0776 pred/real_mass=0.5871 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:12:44 INFO     loss:    50 224 2.437223 2943.2
+2025-12-22 19:13:02 INFO     loss:    60 224 1.460069 2776.8
+2025-12-22 19:13:12 INFO     loss:    70 224 1.408340 2412.8
+2025-12-22 19:13:26 INFO     loss:    80 224 1.744898 2943.2
+2025-12-22 19:13:39 INFO     loss:    90 224 1.456618 3036.8
+2025-12-22 19:13:53 INFO     loss:    100 224 0.000171 2683.2
+2025-12-22 19:14:07 INFO     loss:    110 224 0.935743 2964.0
+2025-12-22 19:14:15 INFO     loss:    120 224 1.928604 3328.0
+2025-12-22 19:14:30 INFO     loss:    130 224 0.000162 2870.4
+2025-12-22 19:14:44 INFO     loss:    140 224 1.313491 3244.8
+2025-12-22 19:14:50 INFO     [SoftGrounding] query_r=26 rules=200 rule_steps=600 deadend_rate=0.1019 pred_used_rate=0.1019 pred/real_mass=0.6827 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:15:01 INFO     loss:    150 224 1.692686 3203.2
+2025-12-22 19:15:18 INFO     loss:    160 224 1.108748 3244.8
+2025-12-22 19:15:30 INFO     loss:    170 224 2.026613 2329.6
+2025-12-22 19:15:43 INFO     loss:    180 224 0.861071 2995.2
+2025-12-22 19:15:59 INFO     loss:    190 224 1.772329 3068.0
+2025-12-22 19:16:10 INFO     loss:    200 224 1.342450 2922.4
+2025-12-22 19:16:31 INFO     loss:    210 224 1.057384 2984.8
+2025-12-22 19:16:47 INFO     loss:    220 224 1.160731 3328.0
+2025-12-22 19:16:53 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 19:17:20 INFO     [SoftGrounding] query_r=6 rules=200 rule_steps=600 deadend_rate=0.1064 pred_used_rate=0.1064 pred/real_mass=0.6873 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:18:53 INFO     [SoftGrounding] query_r=35 rules=200 rule_steps=600 deadend_rate=0.0869 pred_used_rate=0.0869 pred/real_mass=0.2768 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:19:24 INFO     Data : 4274
+2025-12-22 19:19:24 INFO     Hit1 : 0.397052
+2025-12-22 19:19:24 INFO     Hit3 : 0.670098
+2025-12-22 19:19:24 INFO     Hit10: 0.908049
+2025-12-22 19:19:24 INFO     MR   : 4.692326
+2025-12-22 19:19:24 INFO     MRR  : 0.565249
+2025-12-22 19:19:24 INFO     -------------------------
+2025-12-22 19:19:24 INFO     | Iteration: 10/10
+2025-12-22 19:19:24 INFO     -------------------------
+2025-12-22 19:19:48 INFO     loss:    10 224 2.137890 3026.4
+2025-12-22 19:20:02 INFO     loss:    20 224 1.739932 3213.6
+2025-12-22 19:20:17 INFO     loss:    30 224 0.872728 2849.6
+2025-12-22 19:20:31 INFO     loss:    40 224 1.384099 3307.2
+2025-12-22 19:20:42 INFO     loss:    50 224 2.917419 2943.2
+2025-12-22 19:20:59 INFO     loss:    60 224 1.172233 2776.8
+2025-12-22 19:21:00 INFO     [SoftGrounding] query_r=41 rules=200 rule_steps=600 deadend_rate=0.1046 pred_used_rate=0.1046 pred/real_mass=0.5270 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:21:10 INFO     loss:    70 224 1.491546 2412.8
+2025-12-22 19:21:24 INFO     loss:    80 224 1.722060 2943.2
+2025-12-22 19:21:36 INFO     loss:    90 224 0.975794 3036.8
+2025-12-22 19:21:50 INFO     loss:    100 224 0.000117 2683.2
+2025-12-22 19:22:05 INFO     loss:    110 224 0.921649 2964.0
+2025-12-22 19:22:13 INFO     loss:    120 224 1.513204 3328.0
+2025-12-22 19:22:27 INFO     loss:    130 224 0.000100 2870.4
+2025-12-22 19:22:41 INFO     loss:    140 224 1.256939 3244.8
+2025-12-22 19:22:58 INFO     loss:    150 224 1.512811 3203.2
+2025-12-22 19:23:15 INFO     loss:    160 224 0.893093 3244.8
+2025-12-22 19:23:17 INFO     [SoftGrounding] query_r=45 rules=200 rule_steps=600 deadend_rate=0.0850 pred_used_rate=0.0850 pred/real_mass=0.3163 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:23:27 INFO     loss:    170 224 1.943637 2329.6
+2025-12-22 19:23:41 INFO     loss:    180 224 0.787653 2995.2
+2025-12-22 19:23:56 INFO     loss:    190 224 1.980107 3068.0
+2025-12-22 19:24:07 INFO     loss:    200 224 1.358994 2922.4
+2025-12-22 19:24:28 INFO     loss:    210 224 0.993878 2984.8
+2025-12-22 19:24:44 INFO     loss:    220 224 1.074119 3328.0
+2025-12-22 19:24:50 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 19:25:29 INFO     [SoftGrounding] query_r=10 rules=200 rule_steps=600 deadend_rate=0.1455 pred_used_rate=0.1455 pred/real_mass=0.7714 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:27:09 INFO     [SoftGrounding] query_r=40 rules=200 rule_steps=598 deadend_rate=0.1397 pred_used_rate=0.1397 pred/real_mass=0.7169 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:27:21 INFO     Data : 4274
+2025-12-22 19:27:21 INFO     Hit1 : 0.393776
+2025-12-22 19:27:21 INFO     Hit3 : 0.673842
+2025-12-22 19:27:21 INFO     Hit10: 0.909920
+2025-12-22 19:27:21 INFO     MR   : 4.798549
+2025-12-22 19:27:21 INFO     MRR  : 0.565600
+2025-12-22 19:27:21 INFO     >>>>> Predictor: Evaluating on valid
+2025-12-22 19:28:46 INFO     [SoftGrounding] query_r=25 rules=200 rule_steps=600 deadend_rate=0.0664 pred_used_rate=0.0664 pred/real_mass=0.5595 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:29:52 INFO     Data : 4274
+2025-12-22 19:29:52 INFO     Hit1 : 0.512401
+2025-12-22 19:29:52 INFO     Hit3 : 0.761816
+2025-12-22 19:29:52 INFO     Hit10: 0.943379
+2025-12-22 19:29:52 INFO     MR   : 3.369209
+2025-12-22 19:29:52 INFO     MRR  : 0.660685
+2025-12-22 19:29:52 INFO     >>>>> Predictor: Evaluating on test
+2025-12-22 19:30:26 INFO     [SoftGrounding] query_r=3 rules=200 rule_steps=600 deadend_rate=0.1248 pred_used_rate=0.1248 pred/real_mass=0.5225 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:31:42 INFO     [SoftGrounding] query_r=14 rules=200 rule_steps=600 deadend_rate=0.1245 pred_used_rate=0.1245 pred/real_mass=0.5589 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:33:43 INFO     [SoftGrounding] query_r=30 rules=200 rule_steps=600 deadend_rate=0.1190 pred_used_rate=0.1190 pred/real_mass=0.5791 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:36:22 INFO     [SoftGrounding] query_r=41 rules=200 rule_steps=600 deadend_rate=0.1058 pred_used_rate=0.1058 pred/real_mass=0.5605 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:36:56 INFO     Data : 10686
+2025-12-22 19:36:56 INFO     Hit1 : 0.485682
+2025-12-22 19:36:56 INFO     Hit3 : 0.741250
+2025-12-22 19:36:56 INFO     Hit10: 0.937675
+2025-12-22 19:36:56 INFO     MR   : 3.611267
+2025-12-22 19:36:56 INFO     MRR  : 0.637444
+2025-12-22 19:36:56 INFO     >>>>> Predictor: Evaluating on test_kge
+2025-12-22 19:37:18 INFO     [SoftGrounding] query_r=5 rules=200 rule_steps=600 deadend_rate=0.1540 pred_used_rate=0.1540 pred/real_mass=0.4419 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:37:42 INFO     [SoftGrounding] query_r=9 rules=200 rule_steps=600 deadend_rate=0.1173 pred_used_rate=0.1173 pred/real_mass=0.3524 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:38:04 INFO     [SoftGrounding] query_r=15 rules=200 rule_steps=599 deadend_rate=0.1248 pred_used_rate=0.1248 pred/real_mass=0.4996 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:38:50 INFO     [SoftGrounding] query_r=26 rules=200 rule_steps=600 deadend_rate=0.0982 pred_used_rate=0.0982 pred/real_mass=0.3888 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:39:12 INFO     [SoftGrounding] query_r=32 rules=200 rule_steps=600 deadend_rate=0.0784 pred_used_rate=0.0784 pred/real_mass=0.3769 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:39:37 INFO     [SoftGrounding] query_r=38 rules=200 rule_steps=600 deadend_rate=0.0817 pred_used_rate=0.0817 pred/real_mass=0.4791 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:39:59 INFO     [SoftGrounding] query_r=43 rules=200 rule_steps=600 deadend_rate=0.1120 pred_used_rate=0.1120 pred/real_mass=0.4544 topB=50 eta=0.4 temp=1.0 beam=0 only_on_deadend=True
+2025-12-22 19:40:07 INFO     Data : 10686
+2025-12-22 19:40:07 INFO     Hit1 : 0.616975
+2025-12-22 19:40:07 INFO     Hit3 : 0.826315
+2025-12-22 19:40:07 INFO     Hit10: 0.955830
+2025-12-22 19:40:07 INFO     MR   : 2.919614
+2025-12-22 19:40:07 INFO     MRR  : 0.737032
+2025-12-22 19:40:07 INFO     -------------------------
+2025-12-22 19:40:07 INFO     | Best Valid MRR: 0.660685
+2025-12-22 19:40:07 INFO     | Best Test MRR : 0.637444
+2025-12-22 19:40:07 INFO     | Test+KGE MRR  : 0.737032
+2025-12-22 19:40:07 INFO     -------------------------
