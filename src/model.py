@@ -199,6 +199,9 @@ class RulE(torch.nn.Module):
         self.soft_only_on_deadend = True
         self.soft_real_kmin = 0
         self.soft_log_steps = 0
+        self.ground_beam = 0
+        self.max_rules_per_relation = 0
+        self._relation2rules_full = None
         self._soft_forward_calls = 0
         self._soft_pred_edges = None
         self._soft_pred_cfg = None
@@ -627,6 +630,41 @@ class RulE(torch.nn.Module):
 
         return x.squeeze(-1).transpose(0, 1)
 
+    def grounding_count_beam(self, all_h, query_r, rule_body, edges_to_remove, beam_size):
+        device = all_h.device
+        x = F.one_hot(all_h, self.num_entities).transpose(0, 1).unsqueeze(-1).float()
+        if device.type == "cuda":
+            x = x.cuda(device)
+        for rel in rule_body:
+            use_remove = edges_to_remove if rel == query_r else None
+            x = self.graph.propagate(x, rel, use_remove)
+            x = self._apply_beam(x, beam_size)
+        return x.squeeze(-1).transpose(0, 1)
+
+    def prune_rules_per_relation(self, max_rules):
+        max_rules = int(max_rules)
+        if max_rules <= 0:
+            return
+        if self._relation2rules_full is None:
+            self._relation2rules_full = [list(v) for v in self.relation2rules]
+        else:
+            # restore full list before pruning again
+            self.relation2rules = [list(v) for v in self._relation2rules_full]
+
+        if hasattr(self, "rule_mu"):
+            scores = self.rule_mu.detach().squeeze(-1)
+            for rel in range(len(self.relation2rules)):
+                rules = self.relation2rules[rel]
+                if len(rules) <= max_rules:
+                    continue
+                rules.sort(key=lambda item: float(scores[item[0]].item()), reverse=True)
+                self.relation2rules[rel] = rules[:max_rules]
+        else:
+            for rel in range(len(self.relation2rules)):
+                rules = self.relation2rules[rel]
+                if len(rules) > max_rules:
+                    self.relation2rules[rel] = rules[:max_rules]
+
 
     def RotatE(self, head, relation, tail, mode='tail-batch'):
        
@@ -769,7 +807,13 @@ class RulE(torch.nn.Module):
                     all_h, r_head, r_body, edges_to_remove, stats=soft_stats
                 ).float()
             else:
-                count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
+                beam_size = int(getattr(self, "ground_beam", 0))
+                if beam_size > 0:
+                    count = self.grounding_count_beam(
+                        all_h, r_head, r_body, edges_to_remove, beam_size
+                    ).float()
+                else:
+                    count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
 
             mask += count
 

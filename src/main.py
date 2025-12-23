@@ -122,6 +122,12 @@ def parse_args(args=None):
     parser.add_argument('--soft_log_steps', default=0, type=int,
                         help='Soft-grounding统计日志间隔(以forward次数计)，0表示关闭')
 
+    # Large-graph speed knobs (approximate)
+    parser.add_argument('--max_rules_per_relation', default=0, type=int,
+                        help='每个查询关系仅使用topN条规则(0表示不裁剪，按rule_mu排序)')
+    parser.add_argument('--ground_beam', default=0, type=int,
+                        help='真实边grounding每步保留topS中间实体(beam剪枝)，0表示关闭')
+
     return parser.parse_args(args)
 
 def main():
@@ -184,6 +190,8 @@ def main():
     RulE_model.soft_only_on_deadend = bool(getattr(args, 'soft_only_on_deadend', True))
     RulE_model.soft_real_kmin = int(getattr(args, 'soft_real_kmin', 0))
     RulE_model.soft_log_steps = int(getattr(args, 'soft_log_steps', 0))
+    RulE_model.ground_beam = int(getattr(args, 'ground_beam', 0))
+    RulE_model.max_rules_per_relation = int(getattr(args, 'max_rules_per_relation', 0))
 
     
     # For pre-training 

@@ -39,5 +39,17 @@
     "beta_kl": 0.001,
     "beta_sigma": 0.01,
     "lambda_0": 1.0,
-    "lambda_uncertainty": 0.01
+    "lambda_uncertainty": 0.01,
+
+    "soft_grounding": false,
+    "soft_topb": 0,
+    "soft_eta": 0.3,
+    "soft_temp": 1.0,
+    "soft_beam": 0,
+    "soft_only_on_deadend": true,
+    "soft_real_kmin": 0,
+    "soft_log_steps": 0,
+
+    "max_rules_per_relation": 1000,
+    "ground_beam": 200
 }
