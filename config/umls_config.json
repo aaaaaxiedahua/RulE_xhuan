@@ -34,5 +34,22 @@
     "g_batch_size": 16,
     "g_lr": 0.0001,
     "weight_decay": 0,
-    "num_iters": 20
+    "num_iters": 20,
+    
+    "use_topk_reasoner": true,
+    "topk_layers": 5,
+    "topk_hidden_dim": 64,
+    "topk_attn_dim": 5,
+    "topk_topk": 100,
+    "topk_tau": 1.0,
+    "topk_dropout": 0.01,
+    "topk_act": "tanh",
+    "topk_use_rule_semantic": true,
+    "topk_use_kge": false,
+    "topk_kge_alpha": 1.0,
+    "topk_epochs": 300,
+    "topk_batch_size": 10,
+    "topk_lr": 0.0012,
+    "topk_weight_decay": 0.00014,
+    "topk_eval_interval": 1
 }

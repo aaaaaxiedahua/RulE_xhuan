@@ -6,6 +6,7 @@ from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDa
 from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
 from trainer import GroundTrainer, PreTrainer
+from topk_reasoner import IncrementalNeighborSampler, TopKReasoner
 
 # torch.cuda.set_device(1)
 
@@ -84,6 +85,24 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+
+    # top-k propagation reasoner (AdaProp-style)
+    parser.add_argument('--use_topk_reasoner', action='store_true', default=True)
+    parser.add_argument('--topk_layers', default=5, type=int)
+    parser.add_argument('--topk_hidden_dim', default=64, type=int)
+    parser.add_argument('--topk_attn_dim', default=8, type=int)
+    parser.add_argument('--topk_topk', default=200, type=int)
+    parser.add_argument('--topk_tau', default=0.0, type=float)
+    parser.add_argument('--topk_dropout', default=0.1, type=float)
+    parser.add_argument('--topk_act', default='relu', type=str)
+    parser.add_argument('--topk_use_rule_semantic', action='store_true', default=True)
+    parser.add_argument('--topk_use_kge', action='store_true', default=False)
+    parser.add_argument('--topk_kge_alpha', default=1.0, type=float)
+    parser.add_argument('--topk_epochs', default=0, type=int)
+    parser.add_argument('--topk_batch_size', default=32, type=int)
+    parser.add_argument('--topk_lr', default=0.001, type=float)
+    parser.add_argument('--topk_weight_decay', default=0.0, type=float)
+    parser.add_argument('--topk_eval_interval', default=1, type=int)
     return parser.parse_args(args)
 
 def main():
@@ -91,8 +110,9 @@ def main():
 
     # read the given config
     if args.init_checkpoint_config:
-        args = load_config(args.init_checkpoint_config)
-        args = args[0]
+        cfg = load_config(args.init_checkpoint_config)[0]
+        for k, v in cfg.items():
+            setattr(args, k, v)
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -191,8 +211,139 @@ def main():
     
     # args.g_batch_size = 32
     
-    ground_trainer.train(args)
-    
+    # ---- Original grounding training (disabled) ----
+    # ground_trainer.train(args)
+
+    if args.use_topk_reasoner:
+        logging.info('Running top-k propagation reasoner (AdaProp-style)')
+
+        sampler = IncrementalNeighborSampler(
+            triples=graph.ground_train_facts,
+            n_ent=graph.entity_size,
+            n_rel=graph.relation_size,
+            device=device,
+        )
+
+        with torch.no_grad():
+            RulE_model.eval_compute_rule_weight(device)
+
+        rules_weight_emb = RulE_model.rules_weight_emb.detach() if args.topk_use_rule_semantic else None
+
+        reasoner = TopKReasoner(
+            n_ent=graph.entity_size,
+            n_rel=graph.relation_size,
+            hidden_dim=args.topk_hidden_dim,
+            attn_dim=args.topk_attn_dim,
+            n_layer=args.topk_layers,
+            n_node_topk=args.topk_topk,
+            tau=args.topk_tau,
+            dropout=args.topk_dropout,
+            act=args.topk_act,
+            use_rule_semantic=args.topk_use_rule_semantic,
+            rule_vec_dim=rules_weight_emb.size(-1) if args.topk_use_rule_semantic else None,
+        ).to(device)
+
+        reasoner.set_kge_fusion(args.topk_use_kge, alpha=args.topk_kge_alpha)
+
+        def kge_score_candidates(q_sub, q_rel, nodes):
+            # nodes: [N,2] with (batch_idx, ent_id); return scores aligned to nodes order
+            batch_idx = nodes[:, 0]
+            tails = nodes[:, 1]
+            head = RulE_model.entity_embedding(q_sub)[batch_idx]
+            rel = RulE_model.relation_embedding(q_rel % graph.relation_size)[batch_idx]
+            flag = torch.pow(-1, (q_rel // graph.relation_size)).unsqueeze(-1)[batch_idx]
+            rel = rel * flag
+            tail = RulE_model.entity_embedding(tails)
+            # RotatE expects [B,*,dim]; implement candidate score directly
+            re_head, im_head = torch.chunk(head, 2, dim=-1)
+            re_tail, im_tail = torch.chunk(tail, 2, dim=-1)
+            phase_relation = rel / (RulE_model.embedding_range_fact.item() / RulE_model.pi)
+            re_relation = torch.cos(phase_relation)
+            im_relation = torch.sin(phase_relation)
+            re_score = re_head * re_relation - im_head * im_relation
+            im_score = re_head * im_relation + im_head * re_relation
+            re_score = re_score - re_tail
+            im_score = im_score - im_tail
+            score = torch.stack([re_score, im_score], dim=0).norm(dim=0)
+            score = RulE_model.gamma_fact.item() - score.sum(dim=-1)
+            return score
+
+        def evaluate_split(split, dataset, expectation: bool = True):
+            reasoner.eval()
+            dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=args.cpu_num)
+            mrr_sum = 0.0
+            n_q = 0
+            for batch in dataloader:
+                all_h, all_r, all_t, flag = batch
+                all_h = all_h.squeeze(0).to(device)
+                all_r = all_r.squeeze(0).to(device)
+                all_t = all_t.squeeze(0).to(device)
+                flag = flag.squeeze(0).to(device)
+
+                logits = reasoner(
+                    subs=all_h,
+                    rels=all_r,
+                    sampler=sampler,
+                    relation2rules=RulE_model.relation2rules if args.topk_use_rule_semantic else None,
+                    rules_weight_emb=rules_weight_emb,
+                    kge_score_fn=kge_score_candidates if args.topk_use_kge else None,
+                )
+
+                for i in range(all_t.size(0)):
+                    t = all_t[i].item()
+                    val = logits[i, t]
+                    L = (logits[i][flag[i]] > val).sum().item() + 1
+                    H = (logits[i][flag[i]] >= val).sum().item() + 2
+                    if expectation:
+                        denom = max(1, H - L)
+                        mrr_sum += sum((1.0 / r) for r in range(L, H)) / denom
+                    else:
+                        mrr_sum += 1.0 / max(1, H - 1)
+                    n_q += 1
+            logging.info('TopKReasoner %s MRR: %.6f (%d queries)', split, mrr_sum / max(1, n_q), n_q)
+            return mrr_sum / max(1, n_q)
+
+        if args.topk_epochs > 0:
+            logging.info('Training top-k reasoner for %d epochs', args.topk_epochs)
+            optimizer = torch.optim.Adam(reasoner.parameters(), lr=args.topk_lr, weight_decay=args.topk_weight_decay)
+            triples = graph.ground_train_facts
+            for epoch in range(1, args.topk_epochs + 1):
+                reasoner.train()
+                perm = torch.randperm(len(triples))
+                total_loss = 0.0
+                n_batch = 0
+                for start in range(0, len(triples), args.topk_batch_size):
+                    idx = perm[start:start + args.topk_batch_size].tolist()
+                    batch = [triples[i] for i in idx]
+                    subs = [h for h, _, _ in batch]
+                    rels = [r for _, r, _ in batch]
+                    tails = torch.as_tensor([t for _, _, t in batch], dtype=torch.long, device=device)
+
+                    logits = reasoner(
+                        subs=subs,
+                        rels=rels,
+                        sampler=sampler,
+                        relation2rules=RulE_model.relation2rules if args.topk_use_rule_semantic else None,
+                        rules_weight_emb=rules_weight_emb,
+                        kge_score_fn=kge_score_candidates if args.topk_use_kge else None,
+                    )
+
+                    loss = torch.nn.functional.cross_entropy(logits, tails)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    total_loss += loss.item()
+                    n_batch += 1
+
+                logging.info('TopKReasoner epoch %d loss %.6f', epoch, total_loss / max(1, n_batch))
+                if args.topk_eval_interval > 0 and epoch % args.topk_eval_interval == 0:
+                    evaluate_split('valid', valid_set)
+
+        # evaluation on valid/test using existing batching datasets
+        reasoner.eval()
+        evaluate_split('valid', valid_set)
+        evaluate_split('test', test_set)
+
     # return test_mrr
 
 
