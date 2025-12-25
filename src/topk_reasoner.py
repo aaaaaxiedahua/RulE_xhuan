@@ -6,22 +6,21 @@ from typing import Optional
 
 
 class RuleContextEncoder(nn.Module):
-    def __init__(self, rule_vec_dim: int, out_dim: int):
+    def __init__(self, num_rules: int, out_dim: int):
         super().__init__()
-        self.proj = nn.Linear(rule_vec_dim, out_dim, bias=False)
+        self.embed = nn.Embedding(num_rules, out_dim)
 
-    def forward(self, query_rel: torch.LongTensor, relation2rules, rules_weight_emb: torch.Tensor) -> torch.Tensor:
+    def forward(self, query_rel: torch.LongTensor, relation2rules) -> torch.Tensor:
         device = query_rel.device
         batch_size = query_rel.size(0)
-        out = torch.zeros(batch_size, self.proj.out_features, device=device)
+        out = torch.zeros(batch_size, self.embed.embedding_dim, device=device)
         for i in range(batch_size):
             r = int(query_rel[i].item())
             if r < 0 or r >= len(relation2rules) or len(relation2rules[r]) == 0:
                 continue
-            rule_indices = [idx for idx, _ in relation2rules[r]]
-            rule_indices = torch.as_tensor(rule_indices, dtype=torch.long, device=device)
-            vec = rules_weight_emb[rule_indices]
-            out[i] = self.proj(vec).mean(0)
+            rule_ids = [rule_id for rule_id, _ in relation2rules[r]]
+            rule_ids = torch.as_tensor(rule_ids, dtype=torch.long, device=device)
+            out[i] = self.embed(rule_ids).mean(0)
         return out
 
 
@@ -169,7 +168,7 @@ class TopKPropagationLayer(nn.Module):
 class TopKReasoner(nn.Module):
     def __init__(self, n_ent: int, n_rel: int, hidden_dim: int = 64, attn_dim: int = 8, n_layer: int = 5,
                  n_node_topk: int = 200, tau: float = 0.0, dropout: float = 0.1, act: str = "relu",
-                 use_rule_semantic: bool = True, rule_vec_dim: Optional[int] = None):
+                 use_rule_semantic: bool = True, num_rules: Optional[int] = None):
         super().__init__()
         self.n_ent = n_ent
         self.n_rel = n_rel
@@ -186,9 +185,9 @@ class TopKReasoner(nn.Module):
         self.readout = nn.Linear(hidden_dim, 1, bias=False)
 
         if self.use_rule_semantic:
-            if rule_vec_dim is None:
-                raise ValueError("rule_vec_dim is required when use_rule_semantic=True")
-            self.rule_ctx = RuleContextEncoder(rule_vec_dim, hidden_dim)
+            if num_rules is None:
+                raise ValueError("num_rules is required when use_rule_semantic=True")
+            self.rule_ctx = RuleContextEncoder(num_rules, hidden_dim)
         else:
             self.rule_ctx = None
 
@@ -199,15 +198,14 @@ class TopKReasoner(nn.Module):
         self.use_kge = bool(enabled)
         self.kge_alpha = float(alpha)
 
-    def forward(self, subs, rels, sampler: IncrementalNeighborSampler, relation2rules=None, rules_weight_emb=None,
-                kge_score_fn=None):
+    def forward(self, subs, rels, sampler: IncrementalNeighborSampler, relation2rules=None, kge_score_fn=None):
         device = next(self.parameters()).device
         q_sub = torch.as_tensor(subs, dtype=torch.long, device=device)
         q_rel = torch.as_tensor(rels, dtype=torch.long, device=device)
         batch_size = q_sub.size(0)
 
-        if self.use_rule_semantic and relation2rules is not None and rules_weight_emb is not None:
-            rule_ctx = self.rule_ctx(q_rel, relation2rules, rules_weight_emb.to(device))
+        if self.use_rule_semantic and relation2rules is not None:
+            rule_ctx = self.rule_ctx(q_rel, relation2rules)
         else:
             rule_ctx = torch.zeros(batch_size, self.hidden_dim, device=device)
 

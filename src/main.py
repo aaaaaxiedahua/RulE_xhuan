@@ -224,11 +224,6 @@ def main():
             device=device,
         )
 
-        with torch.no_grad():
-            RulE_model.eval_compute_rule_weight(device)
-
-        rules_weight_emb = RulE_model.rules_weight_emb.detach() if args.topk_use_rule_semantic else None
-
         reasoner = TopKReasoner(
             n_ent=graph.entity_size,
             n_rel=graph.relation_size,
@@ -240,7 +235,7 @@ def main():
             dropout=args.topk_dropout,
             act=args.topk_act,
             use_rule_semantic=args.topk_use_rule_semantic,
-            rule_vec_dim=rules_weight_emb.size(-1) if args.topk_use_rule_semantic else None,
+            num_rules=RulE_model.num_rules if args.topk_use_rule_semantic else None,
         ).to(device)
 
         reasoner.set_kge_fusion(args.topk_use_kge, alpha=args.topk_kge_alpha)
@@ -285,7 +280,6 @@ def main():
                     rels=all_r,
                     sampler=sampler,
                     relation2rules=RulE_model.relation2rules if args.topk_use_rule_semantic else None,
-                    rules_weight_emb=rules_weight_emb,
                     kge_score_fn=kge_score_candidates if args.topk_use_kge else None,
                 )
 
@@ -324,7 +318,6 @@ def main():
                         rels=rels,
                         sampler=sampler,
                         relation2rules=RulE_model.relation2rules if args.topk_use_rule_semantic else None,
-                        rules_weight_emb=rules_weight_emb,
                         kge_score_fn=kge_score_candidates if args.topk_use_kge else None,
                     )
 
