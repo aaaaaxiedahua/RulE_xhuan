@@ -38,9 +38,9 @@
     
     "use_topk_reasoner": true,
     "topk_layers": 5,
-    "topk_hidden_dim": 64,
+    "topk_hidden_dim": 128,
     "topk_attn_dim": 5,
-    "topk_topk": 100,
+    "topk_topk": 50,
     "topk_tau": 1.0,
     "topk_dropout": 0.01,
     "topk_act": "tanh",

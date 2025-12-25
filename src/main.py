@@ -219,40 +219,19 @@ def main():
     if args.use_topk_reasoner:
         logging.info('Running top-k propagation reasoner (AdaProp-style)')
 
-        def load_facts_triples():
-            facts_path = os.path.join(args.data_path, 'facts.txt')
-            if not os.path.exists(facts_path):
-                return []
-            triples = []
-            with open(facts_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    h, r, t = line.split('\t')
-                    triples.append((graph.entity2id[h], graph.relation2id[r], graph.entity2id[t]))
-            return triples
-
         def double_triples(triples):
             out = list(triples)
             n_rel = graph.relation_size
             out.extend((t, r + n_rel, h) for (h, r, t) in triples)
             return out
 
-        facts_triples = load_facts_triples()
+        # Use the RulE training graph as the propagation graph (no separate facts.txt).
+        # To avoid leakage during training, we apply leave-one-out edge masking for each (h, r, t) query.
         base_train_triples = list(graph.train_facts)
-        all_triples = facts_triples + base_train_triples
+        train_graph_triples = double_triples(base_train_triples)
 
-        # For filtered evaluation, also filter out known fact triples.
-        for h, r, t in double_triples(facts_triples):
-            hr_index = graph.encode_hr(h, r)
-            if hr_index not in graph.hr2ooo:
-                graph.hr2ooo[hr_index] = []
-            graph.hr2ooo[hr_index].append(t)
-
-        # Fixed propagation graph for eval: facts + train (AdaProp's tKG equivalent).
         sampler_eval = IncrementalNeighborSampler(
-            triples=double_triples(all_triples),
+            triples=train_graph_triples,
             n_ent=graph.entity_size,
             n_rel=graph.relation_size,
             device=device,
@@ -337,24 +316,17 @@ def main():
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.topk_decay_rate)
             for epoch in range(1, args.topk_epochs + 1):
                 reasoner.train()
-                if len(all_triples) == 0:
-                    raise ValueError('No triples available for top-k reasoner training (facts.txt missing and train empty).')
-
-                perm = torch.randperm(len(all_triples))
-                bar = int(len(all_triples) * args.topk_fact_ratio)
-                bar = max(1, min(bar, len(all_triples) - 1))
-                fact_part = [all_triples[i] for i in perm[:bar].tolist()]
-                train_part = [all_triples[i] for i in perm[bar:].tolist()]
-
-                fact_data = double_triples(fact_part)
-                train_data = double_triples(train_part)
+                if len(train_graph_triples) == 0:
+                    raise ValueError('No triples available for top-k reasoner training (train.txt empty).')
 
                 sampler_train = IncrementalNeighborSampler(
-                    triples=fact_data,
+                    triples=train_graph_triples,
                     n_ent=graph.entity_size,
                     n_rel=graph.relation_size,
                     device=device,
                 )
+
+                train_data = train_graph_triples
 
                 total_loss = 0.0
                 n_batch = 0
@@ -372,6 +344,7 @@ def main():
                         sampler=sampler_train,
                         relation2rules=RulE_model.relation2rules if args.topk_use_rule_semantic else None,
                         kge_score_fn=kge_score_candidates if args.topk_use_kge else None,
+                        forbidden_tails=tails,
                     )
 
                     # AdaProp-style negative log-likelihood with max-trick for stability.

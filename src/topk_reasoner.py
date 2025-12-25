@@ -45,16 +45,26 @@ class IncrementalNeighborSampler:
         indptr[1:] = torch.cumsum(counts, dim=0)
         self.indptr = indptr
 
-    def get_neighbors(self, nodes: torch.LongTensor, batch_size: int):
+    def get_neighbors(self, nodes: torch.LongTensor, batch_size: int, forbidden_triples: Optional[torch.LongTensor] = None):
         nodes = nodes.to("cpu")
+        forbidden_triples_cpu = None
+        if forbidden_triples is not None:
+            if forbidden_triples.dim() != 2 or forbidden_triples.size(1) != 3:
+                raise ValueError("forbidden_triples must have shape [batch_size, 3] = (h, r, t)")
+            forbidden_triples_cpu = forbidden_triples.to("cpu")
         edges = []
         for b, u in nodes.tolist():
+            fh = fr = ft = None
+            if forbidden_triples_cpu is not None and 0 <= b < forbidden_triples_cpu.size(0):
+                fh, fr, ft = forbidden_triples_cpu[b].tolist()
             start = int(self.indptr[u].item())
             end = int(self.indptr[u + 1].item())
             if end > start:
                 rel = self.rels[start:end].tolist()
                 tail = self.tails[start:end].tolist()
                 for r, v in zip(rel, tail):
+                    if fh is not None and u == fh and r == fr and v == ft:
+                        continue
                     edges.append((b, u, r, v))
             edges.append((b, u, self.self_loop_rel, u))
 
@@ -198,11 +208,26 @@ class TopKReasoner(nn.Module):
         self.use_kge = bool(enabled)
         self.kge_alpha = float(alpha)
 
-    def forward(self, subs, rels, sampler: IncrementalNeighborSampler, relation2rules=None, kge_score_fn=None):
+    def forward(
+        self,
+        subs,
+        rels,
+        sampler: IncrementalNeighborSampler,
+        relation2rules=None,
+        kge_score_fn=None,
+        forbidden_tails: Optional[torch.LongTensor] = None,
+    ):
         device = next(self.parameters()).device
         q_sub = torch.as_tensor(subs, dtype=torch.long, device=device)
         q_rel = torch.as_tensor(rels, dtype=torch.long, device=device)
         batch_size = q_sub.size(0)
+
+        forbidden_triples = None
+        if forbidden_tails is not None:
+            forbidden_tails = torch.as_tensor(forbidden_tails, dtype=torch.long, device=device)
+            if forbidden_tails.dim() != 1 or forbidden_tails.size(0) != batch_size:
+                raise ValueError("forbidden_tails must have shape [batch_size]")
+            forbidden_triples = torch.stack([q_sub, q_rel, forbidden_tails], dim=1)
 
         if self.use_rule_semantic and relation2rules is not None:
             rule_ctx = self.rule_ctx(q_rel, relation2rules)
@@ -214,7 +239,9 @@ class TopKReasoner(nn.Module):
         h0 = torch.zeros(1, batch_size, self.hidden_dim, device=device)
 
         for layer in self.layers:
-            nodes_full, edges, old_nodes_new_idx = sampler.get_neighbors(nodes, batch_size=batch_size)
+            nodes_full, edges, old_nodes_new_idx = sampler.get_neighbors(
+                nodes, batch_size=batch_size, forbidden_triples=forbidden_triples
+            )
             hidden, nodes, keep_mask = layer(
                 q_rel=q_rel,
                 rule_ctx=rule_ctx,
