@@ -210,21 +210,28 @@ class TopKReasoner(nn.Module):
         h0 = torch.zeros(1, batch_size, self.hidden_dim, device=device)
 
         for layer in self.layers:
-            nodes, edges, old_nodes_new_idx = sampler.get_neighbors(nodes, batch_size=batch_size)
+            nodes_full, edges, old_nodes_new_idx = sampler.get_neighbors(nodes, batch_size=batch_size)
             hidden, nodes, keep_mask = layer(
                 q_rel=q_rel,
                 rule_ctx=rule_ctx,
                 hidden=hidden,
                 edges=edges,
-                nodes=nodes,
-                old_nodes_new_idx=old_nodes_new_idx.to(nodes.device),
+                nodes=nodes_full,
+                old_nodes_new_idx=old_nodes_new_idx.to(nodes_full.device),
                 batch_size=batch_size,
                 n_node_topk=self.n_node_topk,
             )
 
-            n_node = nodes.size(0)
-            h0_aligned = torch.zeros(1, n_node, self.hidden_dim, device=device).index_copy_(1, old_nodes_new_idx.to(device), h0)
-            h0_aligned = h0_aligned[:, keep_mask, :]
+            if keep_mask.dim() != 1 or keep_mask.size(0) != nodes_full.size(0):
+                raise ValueError(
+                    f"keep_mask shape {tuple(keep_mask.shape)} must match nodes_full shape {tuple(nodes_full.shape)}"
+                )
+
+            keep_mask = keep_mask.to(device=device)
+            old_nodes_new_idx = old_nodes_new_idx.to(device=device)
+            n_node_full = int(keep_mask.size(0))
+            h0_aligned_full = torch.zeros(1, n_node_full, self.hidden_dim, device=device).index_copy_(1, old_nodes_new_idx, h0)
+            h0_aligned = h0_aligned_full[:, keep_mask, :]
             hidden = self.dropout(hidden)
             hidden, h0 = self.gru(hidden.unsqueeze(0), h0_aligned)
             hidden = hidden.squeeze(0)
