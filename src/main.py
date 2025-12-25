@@ -328,7 +328,25 @@ def main():
                         kge_score_fn=kge_score_candidates if args.topk_use_kge else None,
                     )
 
+                    if tails.numel() > 0:
+                        t_min = int(tails.min().item())
+                        t_max = int(tails.max().item())
+                        if t_min < 0 or t_max >= graph.entity_size:
+                            raise ValueError(f"Invalid tail id range: min={t_min} max={t_max} n_ent={graph.entity_size}")
+
+                    if not torch.isfinite(logits).all():
+                        bad = (~torch.isfinite(logits)).sum().item()
+                        logging.error(
+                            "TopKReasoner produced non-finite logits (bad=%d). "
+                            "Try disabling --topk_use_rule_semantic/--topk_use_kge to isolate.",
+                            bad,
+                        )
+                        raise FloatingPointError("Non-finite logits in TopKReasoner")
+
                     loss = torch.nn.functional.cross_entropy(logits, tails)
+                    if not torch.isfinite(loss):
+                        logging.error("TopKReasoner loss is non-finite: %s", loss.detach().cpu().item())
+                        raise FloatingPointError("Non-finite loss in TopKReasoner")
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
