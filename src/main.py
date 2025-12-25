@@ -103,6 +103,8 @@ def parse_args(args=None):
     parser.add_argument('--topk_lr', default=0.001, type=float)
     parser.add_argument('--topk_weight_decay', default=0.0, type=float)
     parser.add_argument('--topk_eval_interval', default=1, type=int)
+    parser.add_argument('--topk_fact_ratio', default=0.9, type=float)
+    parser.add_argument('--topk_decay_rate', default=0.998, type=float)
     return parser.parse_args(args)
 
 def main():
@@ -217,8 +219,40 @@ def main():
     if args.use_topk_reasoner:
         logging.info('Running top-k propagation reasoner (AdaProp-style)')
 
-        sampler = IncrementalNeighborSampler(
-            triples=graph.ground_train_facts,
+        def load_facts_triples():
+            facts_path = os.path.join(args.data_path, 'facts.txt')
+            if not os.path.exists(facts_path):
+                return []
+            triples = []
+            with open(facts_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    h, r, t = line.split('\t')
+                    triples.append((graph.entity2id[h], graph.relation2id[r], graph.entity2id[t]))
+            return triples
+
+        def double_triples(triples):
+            out = list(triples)
+            n_rel = graph.relation_size
+            out.extend((t, r + n_rel, h) for (h, r, t) in triples)
+            return out
+
+        facts_triples = load_facts_triples()
+        base_train_triples = list(graph.train_facts)
+        all_triples = facts_triples + base_train_triples
+
+        # For filtered evaluation, also filter out known fact triples.
+        for h, r, t in double_triples(facts_triples):
+            hr_index = graph.encode_hr(h, r)
+            if hr_index not in graph.hr2ooo:
+                graph.hr2ooo[hr_index] = []
+            graph.hr2ooo[hr_index].append(t)
+
+        # Fixed propagation graph for eval: facts + train (AdaProp's tKG equivalent).
+        sampler_eval = IncrementalNeighborSampler(
+            triples=double_triples(all_triples),
             n_ent=graph.entity_size,
             n_rel=graph.relation_size,
             device=device,
@@ -278,7 +312,7 @@ def main():
                 logits = reasoner(
                     subs=all_h,
                     rels=all_r,
-                    sampler=sampler,
+                    sampler=sampler_eval,
                     relation2rules=RulE_model.relation2rules if args.topk_use_rule_semantic else None,
                     kge_score_fn=kge_score_candidates if args.topk_use_kge else None,
                 )
@@ -300,15 +334,34 @@ def main():
         if args.topk_epochs > 0:
             logging.info('Training top-k reasoner for %d epochs', args.topk_epochs)
             optimizer = torch.optim.Adam(reasoner.parameters(), lr=args.topk_lr, weight_decay=args.topk_weight_decay)
-            triples = graph.ground_train_facts
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.topk_decay_rate)
             for epoch in range(1, args.topk_epochs + 1):
                 reasoner.train()
-                perm = torch.randperm(len(triples))
+                if len(all_triples) == 0:
+                    raise ValueError('No triples available for top-k reasoner training (facts.txt missing and train empty).')
+
+                perm = torch.randperm(len(all_triples))
+                bar = int(len(all_triples) * args.topk_fact_ratio)
+                bar = max(1, min(bar, len(all_triples) - 1))
+                fact_part = [all_triples[i] for i in perm[:bar].tolist()]
+                train_part = [all_triples[i] for i in perm[bar:].tolist()]
+
+                fact_data = double_triples(fact_part)
+                train_data = double_triples(train_part)
+
+                sampler_train = IncrementalNeighborSampler(
+                    triples=fact_data,
+                    n_ent=graph.entity_size,
+                    n_rel=graph.relation_size,
+                    device=device,
+                )
+
                 total_loss = 0.0
                 n_batch = 0
-                for start in range(0, len(triples), args.topk_batch_size):
-                    idx = perm[start:start + args.topk_batch_size].tolist()
-                    batch = [triples[i] for i in idx]
+                perm_train = torch.randperm(len(train_data))
+                for start in range(0, len(train_data), args.topk_batch_size):
+                    idx = perm_train[start:start + args.topk_batch_size].tolist()
+                    batch = [train_data[i] for i in idx]
                     subs = [h for h, _, _ in batch]
                     rels = [r for _, r, _ in batch]
                     tails = torch.as_tensor([t for _, _, t in batch], dtype=torch.long, device=device)
@@ -316,7 +369,7 @@ def main():
                     logits = reasoner(
                         subs=subs,
                         rels=rels,
-                        sampler=sampler,
+                        sampler=sampler_train,
                         relation2rules=RulE_model.relation2rules if args.topk_use_rule_semantic else None,
                         kge_score_fn=kge_score_candidates if args.topk_use_kge else None,
                     )
@@ -340,6 +393,7 @@ def main():
                     n_batch += 1
 
                 logging.info('TopKReasoner epoch %d loss %.6f', epoch, total_loss / max(1, n_batch))
+                scheduler.step()
                 if args.topk_eval_interval > 0 and epoch % args.topk_eval_interval == 0:
                     evaluate_split('valid', valid_set)
 

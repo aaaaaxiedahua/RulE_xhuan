@@ -51,5 +51,7 @@
     "topk_batch_size": 10,
     "topk_lr": 0.0012,
     "topk_weight_decay": 0.00014,
+    "topk_fact_ratio": 0.9,
+    "topk_decay_rate": 0.998,
     "topk_eval_interval": 1
 }
