@@ -70,10 +70,11 @@ class IncrementalNeighborSampler:
 
 
 class TopKPropagationLayer(nn.Module):
-    def __init__(self, hidden_dim: int, attn_dim: int, n_rel: int, tau: float = 0.0, act="relu"):
+    def __init__(self, hidden_dim: int, attn_dim: int, n_rel: int, n_ent: int, tau: float = 0.0, act="relu"):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.n_rel = n_rel
+        self.n_ent = n_ent
         self.tau = tau
         self.self_loop_rel = 2 * n_rel
 
@@ -90,18 +91,17 @@ class TopKPropagationLayer(nn.Module):
         self.W_h = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.W_samp = nn.Linear(hidden_dim, 1, bias=False)
 
-    def _per_batch_topk(self, batch_idx: torch.LongTensor, logits: torch.Tensor, k: int, batch_size: int):
-        selected = torch.zeros_like(logits, dtype=torch.bool)
-        for b in range(batch_size):
-            mask = batch_idx == b
-            if mask.sum().item() == 0:
-                continue
-            b_logits = logits[mask]
-            kk = min(k, b_logits.numel())
-            topk_local = torch.topk(b_logits, kk, dim=0).indices
-            global_idx = torch.nonzero(mask, as_tuple=True)[0][topk_local]
-            selected[global_idx] = True
-        return selected
+    def train(self, mode=True):
+        if not isinstance(mode, bool):
+            raise ValueError("training mode is expected to be boolean")
+        self.training = mode
+        if self.training and self.tau and self.tau > 0:
+            self.softmax = lambda x: F.gumbel_softmax(x, tau=self.tau, hard=False)
+        else:
+            self.softmax = lambda x: F.softmax(x, dim=1)
+        for module in self.children():
+            module.train(mode)
+        return self
 
     def forward(self, q_rel: torch.LongTensor, rule_ctx: torch.Tensor, hidden: torch.Tensor, edges: torch.LongTensor,
                 nodes: torch.LongTensor, old_nodes_new_idx: torch.LongTensor, batch_size: int, n_node_topk: int):
@@ -116,48 +116,54 @@ class TopKPropagationLayer(nn.Module):
         h_c = rule_ctx[r_idx]
 
         message = hs + hr
-        alpha = self.w_alpha(torch.relu(self.Ws_attn(hs) + self.Wr_attn(hr) + self.Wq_attn(h_qr) + self.Wc_attn(h_c))).squeeze(-1)
-        alpha = torch.sigmoid(alpha).unsqueeze(-1)
+        alpha = self.w_alpha(nn.ReLU()(self.Ws_attn(hs) + self.Wr_attn(hr) + self.Wq_attn(h_qr) + self.Wc_attn(h_c)))
+        alpha = torch.sigmoid(alpha)
 
         message = alpha * message
-        message_agg = scatter(message, index=obj, dim=0, dim_size=nodes.size(0), reduce="sum")
+        n_node = nodes.size(0)
+        message_agg = scatter(message, index=obj, dim=0, dim_size=n_node, reduce="sum")
         hidden_new = self.act(self.W_h(message_agg))
         hidden_new = hidden_new.clone()
 
         if n_node_topk <= 0:
             return hidden_new, nodes, torch.ones(nodes.size(0), dtype=torch.bool, device=nodes.device)
 
-        tmp_diff = torch.ones(nodes.size(0), dtype=torch.bool, device=nodes.device)
-        tmp_diff[old_nodes_new_idx] = False
-        diff_mask = tmp_diff
-        same_mask = ~diff_mask
-        diff_nodes = nodes[diff_mask]
+        tmp_diff_node_idx = torch.ones(n_node, device=nodes.device)
+        tmp_diff_node_idx[old_nodes_new_idx] = 0
+        bool_diff_node_idx = tmp_diff_node_idx.bool()
+        diff_node = nodes[bool_diff_node_idx]
 
-        if diff_nodes.size(0) == 0:
-            return hidden_new[same_mask], nodes[same_mask], same_mask
+        if diff_node.numel() == 0:
+            keep_mask = ~bool_diff_node_idx
+            return hidden_new[keep_mask], nodes[keep_mask], keep_mask
 
-        diff_logits = self.W_samp(hidden_new[diff_mask]).squeeze(-1)
-        if self.training and self.tau and self.tau > 0:
-            g = -torch.log(-torch.log(torch.rand_like(diff_logits).clamp_min_(1e-12)).clamp_min_(1e-12))
-            diff_logits_g = (diff_logits + g) / self.tau
-            diff_prob = torch.zeros_like(diff_logits_g)
-            for b in range(batch_size):
-                m = diff_nodes[:, 0] == b
-                if m.sum().item() == 0:
-                    continue
-                diff_prob[m] = F.softmax(diff_logits_g[m], dim=0)
-        else:
-            diff_prob = None
+        diff_node_logit = self.W_samp(hidden_new[bool_diff_node_idx]).squeeze(-1)
+        node_scores = torch.full((batch_size, self.n_ent), float("-inf"), device=nodes.device)
+        node_scores[diff_node[:, 0], diff_node[:, 1]] = diff_node_logit
 
-        selected_diff = self._per_batch_topk(diff_nodes[:, 0], diff_logits, n_node_topk, batch_size)
+        all_inf = torch.isneginf(node_scores).all(dim=1)
+        if all_inf.any():
+            node_scores[all_inf, 0] = 0.0
 
-        if diff_prob is not None:
-            hidden_new[diff_mask] = hidden_new[diff_mask] * (selected_diff.float() - diff_prob.detach() + diff_prob).unsqueeze(-1)
+        node_scores = self.softmax(node_scores)
 
-        same_mask[diff_mask] = selected_diff
-        new_nodes = nodes[same_mask]
-        new_hidden = hidden_new[same_mask]
-        return new_hidden, new_nodes, same_mask
+        topk = min(n_node_topk, self.n_ent)
+        topk_index = torch.topk(node_scores, topk, dim=1).indices.reshape(-1)
+        topk_batchidx = torch.arange(batch_size, device=nodes.device).repeat(topk, 1).T.reshape(-1)
+        batch_topk_nodes = torch.zeros((batch_size, self.n_ent), device=nodes.device)
+        batch_topk_nodes[topk_batchidx, topk_index] = 1
+
+        bool_sampled_diff_nodes_idx = batch_topk_nodes[diff_node[:, 0], diff_node[:, 1]].bool()
+        bool_same_node_idx = ~bool_diff_node_idx
+        bool_same_node_idx[bool_diff_node_idx] = bool_sampled_diff_nodes_idx
+
+        diff_node_prob_hard = batch_topk_nodes[diff_node[:, 0], diff_node[:, 1]]
+        diff_node_prob = node_scores[diff_node[:, 0], diff_node[:, 1]]
+        hidden_new[bool_diff_node_idx] *= (diff_node_prob_hard - diff_node_prob.detach() + diff_node_prob).unsqueeze(-1)
+
+        new_nodes = nodes[bool_same_node_idx]
+        new_hidden = hidden_new[bool_same_node_idx]
+        return new_hidden, new_nodes, bool_same_node_idx
 
 
 class TopKReasoner(nn.Module):
@@ -172,9 +178,9 @@ class TopKReasoner(nn.Module):
         self.n_node_topk = n_node_topk
         self.use_rule_semantic = use_rule_semantic
 
-        self.layers = nn.ModuleList([
-            TopKPropagationLayer(hidden_dim, attn_dim, n_rel, tau=tau, act=act) for _ in range(n_layer)
-        ])
+        self.layers = nn.ModuleList(
+            [TopKPropagationLayer(hidden_dim, attn_dim, n_rel, n_ent, tau=tau, act=act) for _ in range(n_layer)]
+        )
         self.dropout = nn.Dropout(dropout)
         self.gru = nn.GRU(hidden_dim, hidden_dim)
         self.readout = nn.Linear(hidden_dim, 1, bias=False)
