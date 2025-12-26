@@ -53,5 +53,6 @@
     "topk_weight_decay": 0.00014,
     "topk_fact_ratio": 0.9,
     "topk_decay_rate": 0.998,
+    "topk_resume": false,
     "topk_eval_interval": 1
 }

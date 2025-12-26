@@ -105,6 +105,7 @@ def parse_args(args=None):
     parser.add_argument('--topk_eval_interval', default=1, type=int)
     parser.add_argument('--topk_fact_ratio', default=0.9, type=float)
     parser.add_argument('--topk_decay_rate', default=0.998, type=float)
+    parser.add_argument('--topk_resume', default=False, type=bool)
     return parser.parse_args(args)
 
 def main():
@@ -310,11 +311,52 @@ def main():
             logging.info('TopKReasoner %s MRR: %.6f (%d queries)', split, mrr_sum / max(1, n_q), n_q)
             return mrr_sum / max(1, n_q)
 
+        def topk_ckpt_paths():
+            ckpt_dir = args.save_path
+            return (
+                os.path.join(ckpt_dir, 'topk_reasoner_last.pt'),
+                os.path.join(ckpt_dir, 'topk_reasoner_best.pt'),
+            )
+
+        def save_topk_checkpoint(path, epoch, best_valid_mrr):
+            torch.save(
+                {
+                    'epoch': epoch,
+                    'model_state_dict': reasoner.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_valid_mrr': best_valid_mrr,
+                },
+                path,
+            )
+
+        def maybe_resume_topk():
+            if not getattr(args, 'topk_resume', False):
+                return 1, float('-inf')
+            last_path, best_path = topk_ckpt_paths()
+            if not os.path.exists(last_path):
+                return 1, float('-inf')
+            logging.info('Resuming TopKReasoner from %s', last_path)
+            ckpt = torch.load(last_path, map_location=device)
+            reasoner.load_state_dict(ckpt['model_state_dict'])
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            start_epoch = int(ckpt.get('epoch', 0)) + 1
+            best_valid_mrr = float(ckpt.get('best_valid_mrr', float('-inf')))
+            # best checkpoint might exist from previous run
+            if os.path.exists(best_path):
+                logging.info('Existing best checkpoint: %s', best_path)
+            return start_epoch, best_valid_mrr
+
         if args.topk_epochs > 0:
             logging.info('Training top-k reasoner for %d epochs', args.topk_epochs)
             optimizer = torch.optim.Adam(reasoner.parameters(), lr=args.topk_lr, weight_decay=args.topk_weight_decay)
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.topk_decay_rate)
-            for epoch in range(1, args.topk_epochs + 1):
+            start_epoch, best_valid_mrr = 1, float('-inf')
+            last_ckpt_path, best_ckpt_path = topk_ckpt_paths()
+            start_epoch, best_valid_mrr = maybe_resume_topk()
+
+            for epoch in range(start_epoch, args.topk_epochs + 1):
                 reasoner.train()
                 if len(train_graph_triples) == 0:
                     raise ValueError('No triples available for top-k reasoner training (train.txt empty).')
@@ -368,9 +410,21 @@ def main():
                 logging.info('TopKReasoner epoch %d loss %.6f', epoch, total_loss / max(1, n_batch))
                 scheduler.step()
                 if args.topk_eval_interval > 0 and epoch % args.topk_eval_interval == 0:
-                    evaluate_split('valid', valid_set)
+                    valid_mrr = evaluate_split('valid', valid_set)
+                    if valid_mrr > best_valid_mrr:
+                        best_valid_mrr = valid_mrr
+                        save_topk_checkpoint(best_ckpt_path, epoch, best_valid_mrr)
+                        logging.info('Saved TopKReasoner best checkpoint (valid MRR=%.6f) to %s', best_valid_mrr, best_ckpt_path)
+
+                save_topk_checkpoint(last_ckpt_path, epoch, best_valid_mrr)
 
         # evaluation on valid/test using existing batching datasets
+        _, best_ckpt_path = topk_ckpt_paths()
+        if os.path.exists(best_ckpt_path):
+            logging.info('Loading TopKReasoner best checkpoint from %s', best_ckpt_path)
+            ckpt = torch.load(best_ckpt_path, map_location=device)
+            reasoner.load_state_dict(ckpt['model_state_dict'])
+
         reasoner.eval()
         evaluate_split('valid', valid_set)
         evaluate_split('test', test_set)
