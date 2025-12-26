@@ -107,6 +107,9 @@ def parse_args(args=None):
     parser.add_argument('--topk_fact_ratio', default=0.9, type=float)
     parser.add_argument('--topk_decay_rate', default=0.998, type=float)
     parser.add_argument('--topk_resume', default=False, type=bool)
+    parser.add_argument('--topk_rule_ctx_agg', default='mean', choices=['mean', 'attn'], type=str)
+    parser.add_argument('--topk_rule_ctx_temperature', default=1.0, type=float)
+    parser.add_argument('--topk_rule_len_prior_weight', default=0.0, type=float)
     return parser.parse_args(args)
 
 def main():
@@ -251,6 +254,9 @@ def main():
             act=args.topk_act,
             use_rule_semantic=args.topk_use_rule_semantic,
             num_rules=RulE_model.num_rules if args.topk_use_rule_semantic else None,
+            rule_ctx_agg=getattr(args, 'topk_rule_ctx_agg', 'mean'),
+            rule_ctx_temperature=getattr(args, 'topk_rule_ctx_temperature', 1.0),
+            rule_len_prior_weight=getattr(args, 'topk_rule_len_prior_weight', 0.0),
             use_pretrained_embedding=getattr(args, 'topk_use_pretrained_embedding', False),
             kge_entity_embed=RulE_model.entity_embedding if getattr(args, 'topk_use_pretrained_embedding', False) else None,
             kge_relation_embed=RulE_model.relation_embedding if getattr(args, 'topk_use_pretrained_embedding', False) else None,

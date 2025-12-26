@@ -2,50 +2,237 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_scatter import scatter
-from typing import Optional, Callable
+from typing import Optional, Callable, Literal
+import math
 
 
 class RuleContextEncoder(nn.Module):
-    def __init__(self, num_rules: int, out_dim: int):
+    def __init__(
+        self,
+        num_rules: int,
+        out_dim: int,
+        *,
+        agg: Literal["mean", "attn"] = "mean",
+        query_dim: Optional[int] = None,
+        temperature: float = 1.0,
+        len_prior_weight: float = 0.0,
+    ):
         super().__init__()
         self.embed = nn.Embedding(num_rules, out_dim)
+        self.agg = str(agg)
+        self.temperature = float(temperature)
+        self.len_prior_weight = float(len_prior_weight)
+        if self.agg not in ("mean", "attn"):
+            raise ValueError(f"agg must be 'mean' or 'attn', got {agg!r}")
+        if self.agg == "attn":
+            if query_dim is None:
+                query_dim = out_dim
+            self.query_proj = nn.Linear(int(query_dim), out_dim, bias=False)
+            self.rule_proj = nn.Linear(out_dim, out_dim, bias=False)
+        else:
+            self.query_proj = None
+            self.rule_proj = None
 
-    def forward(self, query_rel: torch.LongTensor, relation2rules) -> torch.Tensor:
+    def forward(
+        self,
+        query_rel: torch.LongTensor,
+        relation2rules,
+        *,
+        query: Optional[torch.Tensor] = None,
+        relation2rule_ids: Optional[torch.LongTensor] = None,
+        relation2rule_mask: Optional[torch.BoolTensor] = None,
+        relation2rule_prior: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         device = query_rel.device
         batch_size = query_rel.size(0)
-        out = torch.zeros(batch_size, self.embed.embedding_dim, device=device)
+        out_dim = int(self.embed.embedding_dim)
+
+        if self.agg == "mean":
+            out = torch.zeros(batch_size, out_dim, device=device)
+            if relation2rule_ids is not None and relation2rule_mask is not None:
+                rule_ids = relation2rule_ids[query_rel]  # [B, M]
+                mask = relation2rule_mask[query_rel]  # [B, M]
+                if mask.any():
+                    emb = self.embed(rule_ids)  # [B, M, D]
+                    denom = mask.sum(dim=1, keepdim=True).clamp(min=1).to(emb.dtype)
+                    out = (emb * mask.unsqueeze(-1).to(emb.dtype)).sum(dim=1) / denom
+            else:
+                for i in range(batch_size):
+                    r = int(query_rel[i].item())
+                    if r < 0 or r >= len(relation2rules) or len(relation2rules[r]) == 0:
+                        continue
+                    rule_ids_i = [rule_id for rule_id, _ in relation2rules[r]]
+                    rule_ids_i = torch.as_tensor(rule_ids_i, dtype=torch.long, device=device)
+                    out[i] = self.embed(rule_ids_i).mean(0)
+            return out
+
+        if query is None:
+            raise ValueError("query is required when agg='attn'")
+
+        if relation2rule_ids is not None and relation2rule_mask is not None:
+            rule_ids = relation2rule_ids[query_rel]  # [B, M]
+            mask = relation2rule_mask[query_rel]  # [B, M]
+            if not mask.any():
+                return torch.zeros(batch_size, out_dim, device=device)
+
+            rule_emb = self.embed(rule_ids)  # [B, M, D]
+            q = self.query_proj(query)  # [B, D]
+            k = self.rule_proj(rule_emb)  # [B, M, D]
+            scores = (k * q.unsqueeze(1)).sum(dim=-1) / math.sqrt(out_dim)  # [B, M]
+            if self.temperature and self.temperature != 1.0:
+                scores = scores / float(self.temperature)
+
+            if relation2rule_prior is not None:
+                scores = scores + relation2rule_prior[query_rel].to(device=device)
+
+            scores = scores.masked_fill(~mask, float("-inf"))
+            alpha = torch.softmax(scores, dim=1)  # [B, M]
+            ctx = (alpha.unsqueeze(-1) * rule_emb).sum(dim=1)
+            ctx = torch.nan_to_num(ctx, nan=0.0, posinf=0.0, neginf=0.0)
+            return ctx
+
+        out = torch.zeros(batch_size, out_dim, device=device)
+        q = self.query_proj(query)  # [B, D]
         for i in range(batch_size):
             r = int(query_rel[i].item())
             if r < 0 or r >= len(relation2rules) or len(relation2rules[r]) == 0:
                 continue
-            rule_ids = [rule_id for rule_id, _ in relation2rules[r]]
-            rule_ids = torch.as_tensor(rule_ids, dtype=torch.long, device=device)
-            out[i] = self.embed(rule_ids).mean(0)
+            # relation2rules[r] entries: (rule_id, (rule_head, rule_body))
+            rule_ids_i = []
+            prior_i = []
+            for rule_id, rule_struct in relation2rules[r]:
+                rule_ids_i.append(rule_id)
+                if self.len_prior_weight != 0.0:
+                    # rule_struct: (rule_head, rule_body)
+                    body = rule_struct[1] if isinstance(rule_struct, (tuple, list)) and len(rule_struct) > 1 else []
+                    prior_i.append(-self.len_prior_weight * float(len(body)))
+            rule_ids_i = torch.as_tensor(rule_ids_i, dtype=torch.long, device=device)
+            rule_emb = self.embed(rule_ids_i)  # [M, D]
+            k = self.rule_proj(rule_emb)  # [M, D]
+            scores = (k * q[i].unsqueeze(0)).sum(dim=-1) / math.sqrt(out_dim)  # [M]
+            if self.temperature and self.temperature != 1.0:
+                scores = scores / float(self.temperature)
+            if prior_i:
+                scores = scores + torch.as_tensor(prior_i, dtype=scores.dtype, device=device)
+            alpha = torch.softmax(scores, dim=0)  # [M]
+            out[i] = (alpha.unsqueeze(-1) * rule_emb).sum(dim=0)
         return out
 
 
 class RuleContextEncoderFromPretrained(nn.Module):
-    def __init__(self, rule_embed: nn.Embedding, proj: nn.Module):
+    def __init__(
+        self,
+        rule_embed: nn.Embedding,
+        proj: nn.Module,
+        *,
+        agg: Literal["mean", "attn"] = "mean",
+        query_dim: Optional[int] = None,
+        temperature: float = 1.0,
+        len_prior_weight: float = 0.0,
+    ):
         super().__init__()
         self.rule_embed = rule_embed
         self.proj = proj
+        self.agg = str(agg)
+        self.temperature = float(temperature)
+        self.len_prior_weight = float(len_prior_weight)
+        if self.agg not in ("mean", "attn"):
+            raise ValueError(f"agg must be 'mean' or 'attn', got {agg!r}")
+        if self.agg == "attn":
+            if query_dim is None:
+                raise ValueError("query_dim is required for agg='attn'")
+            out_dim = int(query_dim)
+            self.out_dim = out_dim
+            self.query_proj = nn.Linear(int(query_dim), out_dim, bias=False)
+            self.rule_proj = nn.Linear(out_dim, out_dim, bias=False)
+        else:
+            self.out_dim = int(query_dim) if query_dim is not None else None
+            self.query_proj = None
+            self.rule_proj = None
 
         for p in self.rule_embed.parameters():
             p.requires_grad = False
 
-    def forward(self, query_rel: torch.LongTensor, relation2rules) -> torch.Tensor:
+    def forward(
+        self,
+        query_rel: torch.LongTensor,
+        relation2rules,
+        *,
+        query: Optional[torch.Tensor] = None,
+        relation2rule_ids: Optional[torch.LongTensor] = None,
+        relation2rule_mask: Optional[torch.BoolTensor] = None,
+        relation2rule_prior: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         device = query_rel.device
         batch_size = query_rel.size(0)
-        in_dim = int(self.rule_embed.embedding_dim)
-        pooled = torch.zeros(batch_size, in_dim, device=device)
+        out_dim = int(self.out_dim) if self.out_dim is not None else int(self.proj(torch.zeros(1, int(self.rule_embed.embedding_dim), device=device)).shape[-1])
+
+        if self.agg == "mean":
+            pooled = torch.zeros(batch_size, int(self.rule_embed.embedding_dim), device=device)
+            if relation2rule_ids is not None and relation2rule_mask is not None:
+                rule_ids = relation2rule_ids[query_rel]  # [B, M]
+                mask = relation2rule_mask[query_rel]  # [B, M]
+                if mask.any():
+                    emb = self.rule_embed(rule_ids)  # [B, M, Din]
+                    denom = mask.sum(dim=1, keepdim=True).clamp(min=1).to(emb.dtype)
+                    pooled = (emb * mask.unsqueeze(-1).to(emb.dtype)).sum(dim=1) / denom
+            else:
+                for i in range(batch_size):
+                    r = int(query_rel[i].item())
+                    if r < 0 or r >= len(relation2rules) or len(relation2rules[r]) == 0:
+                        continue
+                    rule_ids_i = [rule_id for rule_id, _ in relation2rules[r]]
+                    rule_ids_i = torch.as_tensor(rule_ids_i, dtype=torch.long, device=device)
+                    pooled[i] = self.rule_embed(rule_ids_i).mean(0)
+            return self.proj(pooled)
+
+        if query is None:
+            raise ValueError("query is required when agg='attn'")
+
+        if relation2rule_ids is not None and relation2rule_mask is not None:
+            rule_ids = relation2rule_ids[query_rel]  # [B, M]
+            mask = relation2rule_mask[query_rel]  # [B, M]
+            if not mask.any():
+                return torch.zeros(batch_size, out_dim, device=device)
+            raw = self.rule_embed(rule_ids)  # [B, M, Din]
+            rule_emb = self.proj(raw)  # [B, M, D]
+            q = self.query_proj(query)  # [B, D]
+            k = self.rule_proj(rule_emb)  # [B, M, D]
+            scores = (k * q.unsqueeze(1)).sum(dim=-1) / math.sqrt(out_dim)  # [B, M]
+            if self.temperature and self.temperature != 1.0:
+                scores = scores / float(self.temperature)
+            if relation2rule_prior is not None:
+                scores = scores + relation2rule_prior[query_rel].to(device=device)
+            scores = scores.masked_fill(~mask, float("-inf"))
+            alpha = torch.softmax(scores, dim=1)
+            ctx = (alpha.unsqueeze(-1) * rule_emb).sum(dim=1)
+            ctx = torch.nan_to_num(ctx, nan=0.0, posinf=0.0, neginf=0.0)
+            return ctx
+
+        out = torch.zeros(batch_size, out_dim, device=device)
+        q = self.query_proj(query)  # [B, D]
         for i in range(batch_size):
             r = int(query_rel[i].item())
             if r < 0 or r >= len(relation2rules) or len(relation2rules[r]) == 0:
                 continue
-            rule_ids = [rule_id for rule_id, _ in relation2rules[r]]
-            rule_ids = torch.as_tensor(rule_ids, dtype=torch.long, device=device)
-            pooled[i] = self.rule_embed(rule_ids).mean(0)
-        return self.proj(pooled)
+            rule_ids_i = []
+            prior_i = []
+            for rule_id, rule_struct in relation2rules[r]:
+                rule_ids_i.append(rule_id)
+                if self.len_prior_weight != 0.0:
+                    body = rule_struct[1] if isinstance(rule_struct, (tuple, list)) and len(rule_struct) > 1 else []
+                    prior_i.append(-self.len_prior_weight * float(len(body)))
+            rule_ids_i = torch.as_tensor(rule_ids_i, dtype=torch.long, device=device)
+            rule_emb = self.proj(self.rule_embed(rule_ids_i))  # [M, D]
+            k = self.rule_proj(rule_emb)  # [M, D]
+            scores = (k * q[i].unsqueeze(0)).sum(dim=-1) / math.sqrt(out_dim)  # [M]
+            if self.temperature and self.temperature != 1.0:
+                scores = scores / float(self.temperature)
+            if prior_i:
+                scores = scores + torch.as_tensor(prior_i, dtype=scores.dtype, device=device)
+            alpha = torch.softmax(scores, dim=0)
+            out[i] = (alpha.unsqueeze(-1) * rule_emb).sum(dim=0)
+        return out
 
 
 class IncrementalNeighborSampler:
@@ -222,6 +409,9 @@ class TopKReasoner(nn.Module):
     def __init__(self, n_ent: int, n_rel: int, hidden_dim: int = 64, attn_dim: int = 8, n_layer: int = 5,
                  n_node_topk: int = 200, tau: float = 0.0, dropout: float = 0.1, act: str = "relu",
                  use_rule_semantic: bool = True, num_rules: Optional[int] = None,
+                 rule_ctx_agg: Literal["mean", "attn"] = "mean",
+                 rule_ctx_temperature: float = 1.0,
+                 rule_len_prior_weight: float = 0.0,
                  use_pretrained_embedding: bool = False,
                  kge_entity_embed: Optional[nn.Embedding] = None,
                  kge_relation_embed: Optional[nn.Embedding] = None,
@@ -234,6 +424,9 @@ class TopKReasoner(nn.Module):
         self.n_node_topk = n_node_topk
         self.use_rule_semantic = use_rule_semantic
         self.use_pretrained_embedding = bool(use_pretrained_embedding)
+        self.rule_ctx_agg = str(rule_ctx_agg)
+        self.rule_ctx_temperature = float(rule_ctx_temperature)
+        self.rule_len_prior_weight = float(rule_len_prior_weight)
 
         self.layers = nn.ModuleList(
             [TopKPropagationLayer(hidden_dim, attn_dim, n_rel, n_ent, tau=tau, act=act) for _ in range(n_layer)]
@@ -249,6 +442,9 @@ class TopKReasoner(nn.Module):
         self.relation_proj = None
         self.rule_proj = None
         self.self_loop_feat = None
+        self.query_ent_embed = None
+        self.query_rel_embed = None
+        self.rule_query_proj = None
 
         if self.use_pretrained_embedding:
             if kge_entity_embed is None or kge_relation_embed is None:
@@ -281,16 +477,46 @@ class TopKReasoner(nn.Module):
                     nn.Linear(rule_in_dim, hidden_dim, bias=False),
                     nn.LayerNorm(hidden_dim),
                 )
-                self.rule_ctx = RuleContextEncoderFromPretrained(kge_rule_embed, self.rule_proj)
+                self.rule_ctx = RuleContextEncoderFromPretrained(
+                    kge_rule_embed,
+                    self.rule_proj,
+                    agg=self.rule_ctx_agg,
+                    query_dim=hidden_dim,
+                    temperature=self.rule_ctx_temperature,
+                    len_prior_weight=self.rule_len_prior_weight,
+                )
             else:
                 self.rule_ctx = None
         else:
             if self.use_rule_semantic:
                 if num_rules is None:
                     raise ValueError("num_rules is required when use_rule_semantic=True")
-                self.rule_ctx = RuleContextEncoder(num_rules, hidden_dim)
+                self.rule_ctx = RuleContextEncoder(
+                    num_rules,
+                    hidden_dim,
+                    agg=self.rule_ctx_agg,
+                    query_dim=hidden_dim,
+                    temperature=self.rule_ctx_temperature,
+                    len_prior_weight=self.rule_len_prior_weight,
+                )
             else:
                 self.rule_ctx = None
+
+        if self.use_rule_semantic and self.rule_ctx_agg == "attn":
+            if self.use_pretrained_embedding:
+                self.rule_query_proj = nn.Sequential(
+                    nn.Linear(hidden_dim * 2, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                )
+            else:
+                self.query_ent_embed = nn.Embedding(n_ent, hidden_dim)
+                self.query_rel_embed = nn.Embedding(2 * n_rel, hidden_dim)
+                self.rule_query_proj = nn.Sequential(
+                    nn.Linear(hidden_dim * 2, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                )
 
         self.use_kge = False
         self.kge_alpha = 1.0
@@ -353,7 +579,16 @@ class TopKReasoner(nn.Module):
             forbidden_triples = torch.stack([q_sub, q_rel, forbidden_tails], dim=1)
 
         if self.use_rule_semantic and relation2rules is not None and self.rule_ctx is not None:
-            rule_ctx = self.rule_ctx(q_rel, relation2rules)
+            query_vec = None
+            if self.rule_ctx_agg == "attn":
+                if self.use_pretrained_embedding:
+                    sub_feat = self._entity_features(q_sub)  # [B, D]
+                    rel_feat = self._relation_features(q_rel)  # [B, D]
+                else:
+                    sub_feat = self.query_ent_embed(q_sub)
+                    rel_feat = self.query_rel_embed(q_rel)
+                query_vec = self.rule_query_proj(torch.cat([sub_feat, rel_feat], dim=-1))
+            rule_ctx = self.rule_ctx(q_rel, relation2rules, query=query_vec)
         else:
             rule_ctx = torch.zeros(batch_size, self.hidden_dim, device=device)
 
