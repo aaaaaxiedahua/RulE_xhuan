@@ -96,6 +96,7 @@ def parse_args(args=None):
     parser.add_argument('--topk_dropout', default=0.1, type=float)
     parser.add_argument('--topk_act', default='relu', type=str)
     parser.add_argument('--topk_use_rule_semantic', action='store_true', default=True)
+    parser.add_argument('--topk_use_pretrained_embedding', action='store_true', default=False)
     parser.add_argument('--topk_use_kge', action='store_true', default=False)
     parser.add_argument('--topk_kge_alpha', default=1.0, type=float)
     parser.add_argument('--topk_epochs', default=0, type=int)
@@ -250,6 +251,14 @@ def main():
             act=args.topk_act,
             use_rule_semantic=args.topk_use_rule_semantic,
             num_rules=RulE_model.num_rules if args.topk_use_rule_semantic else None,
+            use_pretrained_embedding=getattr(args, 'topk_use_pretrained_embedding', False),
+            kge_entity_embed=RulE_model.entity_embedding if getattr(args, 'topk_use_pretrained_embedding', False) else None,
+            kge_relation_embed=RulE_model.relation_embedding if getattr(args, 'topk_use_pretrained_embedding', False) else None,
+            kge_rule_embed=(
+                RulE_model.rule_emb
+                if (getattr(args, 'topk_use_pretrained_embedding', False) and args.topk_use_rule_semantic)
+                else None
+            ),
         ).to(device)
 
         reasoner.set_kge_fusion(args.topk_use_kge, alpha=args.topk_kge_alpha)
@@ -319,10 +328,11 @@ def main():
             )
 
         def save_topk_checkpoint(path, epoch, best_valid_mrr):
+            model_state = reasoner.trainable_state_dict() if hasattr(reasoner, 'trainable_state_dict') else reasoner.state_dict()
             torch.save(
                 {
                     'epoch': epoch,
-                    'model_state_dict': reasoner.state_dict(),
+                    'model_state_dict': model_state,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'best_valid_mrr': best_valid_mrr,
@@ -338,7 +348,7 @@ def main():
                 return 1, float('-inf')
             logging.info('Resuming TopKReasoner from %s', last_path)
             ckpt = torch.load(last_path, map_location=device)
-            reasoner.load_state_dict(ckpt['model_state_dict'])
+            reasoner.load_state_dict(ckpt['model_state_dict'], strict=False)
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             scheduler.load_state_dict(ckpt['scheduler_state_dict'])
             start_epoch = int(ckpt.get('epoch', 0)) + 1
@@ -350,7 +360,11 @@ def main():
 
         if args.topk_epochs > 0:
             logging.info('Training top-k reasoner for %d epochs', args.topk_epochs)
-            optimizer = torch.optim.Adam(reasoner.parameters(), lr=args.topk_lr, weight_decay=args.topk_weight_decay)
+            optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, reasoner.parameters()),
+                lr=args.topk_lr,
+                weight_decay=args.topk_weight_decay,
+            )
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.topk_decay_rate)
             start_epoch, best_valid_mrr = 1, float('-inf')
             last_ckpt_path, best_ckpt_path = topk_ckpt_paths()
@@ -399,6 +413,8 @@ def main():
 
                     # AdaProp: avoid NaN/Inf by resetting invalid parameters.
                     for p in reasoner.parameters():
+                        if not p.requires_grad:
+                            continue
                         X = p.data
                         bad = ~torch.isfinite(X)
                         if bad.any():
@@ -423,7 +439,7 @@ def main():
         if os.path.exists(best_ckpt_path):
             logging.info('Loading TopKReasoner best checkpoint from %s', best_ckpt_path)
             ckpt = torch.load(best_ckpt_path, map_location=device)
-            reasoner.load_state_dict(ckpt['model_state_dict'])
+            reasoner.load_state_dict(ckpt['model_state_dict'], strict=False)
 
         reasoner.eval()
         evaluate_split('valid', valid_set)

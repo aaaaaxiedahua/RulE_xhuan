@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_scatter import scatter
-from typing import Optional
+from typing import Optional, Callable
 
 
 class RuleContextEncoder(nn.Module):
@@ -22,6 +22,30 @@ class RuleContextEncoder(nn.Module):
             rule_ids = torch.as_tensor(rule_ids, dtype=torch.long, device=device)
             out[i] = self.embed(rule_ids).mean(0)
         return out
+
+
+class RuleContextEncoderFromPretrained(nn.Module):
+    def __init__(self, rule_embed: nn.Embedding, proj: nn.Module):
+        super().__init__()
+        self.rule_embed = rule_embed
+        self.proj = proj
+
+        for p in self.rule_embed.parameters():
+            p.requires_grad = False
+
+    def forward(self, query_rel: torch.LongTensor, relation2rules) -> torch.Tensor:
+        device = query_rel.device
+        batch_size = query_rel.size(0)
+        in_dim = int(self.rule_embed.embedding_dim)
+        pooled = torch.zeros(batch_size, in_dim, device=device)
+        for i in range(batch_size):
+            r = int(query_rel[i].item())
+            if r < 0 or r >= len(relation2rules) or len(relation2rules[r]) == 0:
+                continue
+            rule_ids = [rule_id for rule_id, _ in relation2rules[r]]
+            rule_ids = torch.as_tensor(rule_ids, dtype=torch.long, device=device)
+            pooled[i] = self.rule_embed(rule_ids).mean(0)
+        return self.proj(pooled)
 
 
 class IncrementalNeighborSampler:
@@ -112,16 +136,35 @@ class TopKPropagationLayer(nn.Module):
             module.train(mode)
         return self
 
-    def forward(self, q_rel: torch.LongTensor, rule_ctx: torch.Tensor, hidden: torch.Tensor, edges: torch.LongTensor,
-                nodes: torch.LongTensor, old_nodes_new_idx: torch.LongTensor, batch_size: int, n_node_topk: int):
+    def forward(
+        self,
+        q_rel: torch.LongTensor,
+        rule_ctx: torch.Tensor,
+        hidden: torch.Tensor,
+        edges: torch.LongTensor,
+        nodes: torch.LongTensor,
+        old_nodes_new_idx: torch.LongTensor,
+        batch_size: int,
+        n_node_topk: int,
+        head_feat: Optional[torch.Tensor] = None,
+        q_rel_feat: Optional[torch.Tensor] = None,
+        rel_feat: Optional[torch.Tensor] = None,
+    ):
         sub = edges[:, 4]
         rel = edges[:, 2]
         obj = edges[:, 5]
         r_idx = edges[:, 0]
 
         hs = hidden[sub]
-        hr = self.rela_embed(rel)
-        h_qr = self.rela_embed(q_rel)[r_idx]
+        if head_feat is not None:
+            hs = hs + head_feat[sub]
+
+        hr = rel_feat if rel_feat is not None else self.rela_embed(rel)
+
+        if q_rel_feat is not None:
+            h_qr = q_rel_feat[r_idx]
+        else:
+            h_qr = self.rela_embed(q_rel)[r_idx]
         h_c = rule_ctx[r_idx]
 
         message = hs + hr
@@ -178,7 +221,11 @@ class TopKPropagationLayer(nn.Module):
 class TopKReasoner(nn.Module):
     def __init__(self, n_ent: int, n_rel: int, hidden_dim: int = 64, attn_dim: int = 8, n_layer: int = 5,
                  n_node_topk: int = 200, tau: float = 0.0, dropout: float = 0.1, act: str = "relu",
-                 use_rule_semantic: bool = True, num_rules: Optional[int] = None):
+                 use_rule_semantic: bool = True, num_rules: Optional[int] = None,
+                 use_pretrained_embedding: bool = False,
+                 kge_entity_embed: Optional[nn.Embedding] = None,
+                 kge_relation_embed: Optional[nn.Embedding] = None,
+                 kge_rule_embed: Optional[nn.Embedding] = None):
         super().__init__()
         self.n_ent = n_ent
         self.n_rel = n_rel
@@ -186,6 +233,7 @@ class TopKReasoner(nn.Module):
         self.n_layer = n_layer
         self.n_node_topk = n_node_topk
         self.use_rule_semantic = use_rule_semantic
+        self.use_pretrained_embedding = bool(use_pretrained_embedding)
 
         self.layers = nn.ModuleList(
             [TopKPropagationLayer(hidden_dim, attn_dim, n_rel, n_ent, tau=tau, act=act) for _ in range(n_layer)]
@@ -194,12 +242,55 @@ class TopKReasoner(nn.Module):
         self.gru = nn.GRU(hidden_dim, hidden_dim)
         self.readout = nn.Linear(hidden_dim, 1, bias=False)
 
-        if self.use_rule_semantic:
-            if num_rules is None:
-                raise ValueError("num_rules is required when use_rule_semantic=True")
-            self.rule_ctx = RuleContextEncoder(num_rules, hidden_dim)
+        self.kge_entity_embed = None
+        self.kge_relation_embed = None
+        self.kge_rule_embed = None
+        self.entity_proj = None
+        self.relation_proj = None
+        self.rule_proj = None
+        self.self_loop_feat = None
+
+        if self.use_pretrained_embedding:
+            if kge_entity_embed is None or kge_relation_embed is None:
+                raise ValueError("kge_entity_embed and kge_relation_embed are required when use_pretrained_embedding=True")
+            self.kge_entity_embed = kge_entity_embed
+            self.kge_relation_embed = kge_relation_embed
+            for p in self.kge_entity_embed.parameters():
+                p.requires_grad = False
+            for p in self.kge_relation_embed.parameters():
+                p.requires_grad = False
+
+            ent_in_dim = int(self.kge_entity_embed.embedding_dim)
+            rel_in_dim = int(self.kge_relation_embed.embedding_dim)
+            self.entity_proj = nn.Sequential(
+                nn.Linear(ent_in_dim, hidden_dim, bias=False),
+                nn.LayerNorm(hidden_dim),
+            )
+            self.relation_proj = nn.Sequential(
+                nn.Linear(rel_in_dim, hidden_dim, bias=False),
+                nn.LayerNorm(hidden_dim),
+            )
+            self.self_loop_feat = nn.Parameter(torch.zeros(hidden_dim))
+            nn.init.kaiming_uniform_(self.self_loop_feat.unsqueeze(0), a=5 ** 0.5, mode="fan_in")
+
+            if self.use_rule_semantic:
+                if kge_rule_embed is None:
+                    raise ValueError("kge_rule_embed is required when use_rule_semantic=True and use_pretrained_embedding=True")
+                rule_in_dim = int(kge_rule_embed.embedding_dim)
+                self.rule_proj = nn.Sequential(
+                    nn.Linear(rule_in_dim, hidden_dim, bias=False),
+                    nn.LayerNorm(hidden_dim),
+                )
+                self.rule_ctx = RuleContextEncoderFromPretrained(kge_rule_embed, self.rule_proj)
+            else:
+                self.rule_ctx = None
         else:
-            self.rule_ctx = None
+            if self.use_rule_semantic:
+                if num_rules is None:
+                    raise ValueError("num_rules is required when use_rule_semantic=True")
+                self.rule_ctx = RuleContextEncoder(num_rules, hidden_dim)
+            else:
+                self.rule_ctx = None
 
         self.use_kge = False
         self.kge_alpha = 1.0
@@ -207,6 +298,38 @@ class TopKReasoner(nn.Module):
     def set_kge_fusion(self, enabled: bool, alpha: float = 1.0):
         self.use_kge = bool(enabled)
         self.kge_alpha = float(alpha)
+
+    def _relation_features(self, rel_ids: torch.LongTensor) -> torch.Tensor:
+        if not self.use_pretrained_embedding:
+            raise RuntimeError("_relation_features requires use_pretrained_embedding=True")
+        device = rel_ids.device
+        rel_ids = rel_ids.to(device)
+        self_loop = (rel_ids == (2 * self.n_rel))
+        base = (rel_ids % self.n_rel).clamp(min=0)
+        sign = torch.pow(torch.tensor(-1.0, device=device), (rel_ids // self.n_rel).to(torch.float32)).unsqueeze(-1)
+        raw = self.kge_relation_embed(base) * sign
+        out = self.relation_proj(raw)
+        if self_loop.any():
+            out = out.clone()
+            out[self_loop] = self.self_loop_feat
+        return out
+
+    def _entity_features(self, ent_ids: torch.LongTensor) -> torch.Tensor:
+        if not self.use_pretrained_embedding:
+            raise RuntimeError("_entity_features requires use_pretrained_embedding=True")
+        return self.entity_proj(self.kge_entity_embed(ent_ids))
+
+    def trainable_state_dict(self) -> dict:
+        sd = self.state_dict()
+        if self.use_pretrained_embedding:
+            for prefix in ("kge_entity_embed.", "kge_relation_embed.", "kge_rule_embed."):
+                for k in list(sd.keys()):
+                    if k.startswith(prefix):
+                        sd.pop(k, None)
+            for k in list(sd.keys()):
+                if k.startswith("rule_ctx.rule_embed."):
+                    sd.pop(k, None)
+        return sd
 
     def forward(
         self,
@@ -229,7 +352,7 @@ class TopKReasoner(nn.Module):
                 raise ValueError("forbidden_tails must have shape [batch_size]")
             forbidden_triples = torch.stack([q_sub, q_rel, forbidden_tails], dim=1)
 
-        if self.use_rule_semantic and relation2rules is not None:
+        if self.use_rule_semantic and relation2rules is not None and self.rule_ctx is not None:
             rule_ctx = self.rule_ctx(q_rel, relation2rules)
         else:
             rule_ctx = torch.zeros(batch_size, self.hidden_dim, device=device)
@@ -239,9 +362,16 @@ class TopKReasoner(nn.Module):
         h0 = torch.zeros(1, batch_size, self.hidden_dim, device=device)
 
         for layer in self.layers:
+            head_feat = None
+            q_rel_feat = None
             nodes_full, edges, old_nodes_new_idx = sampler.get_neighbors(
                 nodes, batch_size=batch_size, forbidden_triples=forbidden_triples
             )
+            rel_feat = None
+            if self.use_pretrained_embedding:
+                head_feat = self._entity_features(nodes[:, 1])
+                q_rel_feat = self._relation_features(q_rel)
+                rel_feat = self._relation_features(edges[:, 2])
             hidden, nodes, keep_mask = layer(
                 q_rel=q_rel,
                 rule_ctx=rule_ctx,
@@ -251,6 +381,9 @@ class TopKReasoner(nn.Module):
                 old_nodes_new_idx=old_nodes_new_idx.to(nodes_full.device),
                 batch_size=batch_size,
                 n_node_topk=self.n_node_topk,
+                head_feat=head_feat,
+                q_rel_feat=q_rel_feat,
+                rel_feat=rel_feat,
             )
 
             if keep_mask.dim() != 1 or keep_mask.size(0) != nodes_full.size(0):
