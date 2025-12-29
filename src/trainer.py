@@ -495,19 +495,119 @@ class GroundTrainer(object):
 
             target = target * smoothing + target_t * (1 - smoothing)
             
-            grounding_rule_score, mask = model(all_h, all_r, edges_to_remove)
-            
-            if mask.sum().item() != 0:
-                rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
-                
-                loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
-                loss.backward()
+            grounding_rule_score, candidate_mask, candidate_strength = model(all_h, all_r, edges_to_remove)
 
-                optimizer.step()
-                optimizer.zero_grad()
+            # Candidate-first training on subset C = topK(candidates) + negatives
+            nentity = self.train_set.graph.entity_size
+            K = int(getattr(args, 'topk_candidates', 256))
+            N = int(getattr(args, 'neg_k', 256))
+            kd_lambda = float(getattr(args, 'kd_lambda', 0.0))
+            kd_tau = float(getattr(args, 'kd_tau', 2.0))
+            count_transform = getattr(args, 'count_transform', 'log1p')
 
-                total_loss += loss.item()
-                total_size += mask.sum().item()
+            if count_transform == 'log1p':
+                candidate_strength = torch.log1p(candidate_strength)
+
+            subset_size = K + N
+            C = torch.empty(all_h.size(0), subset_size, dtype=torch.long, device=all_h.device)
+
+            # build subset per sample (B is small, per-sample loop is acceptable)
+            for i in range(all_h.size(0)):
+                cand = torch.nonzero(candidate_mask[i], as_tuple=True)[0]
+                if cand.numel() > 0:
+                    scores = candidate_strength[i, cand]
+                    if cand.numel() > K:
+                        _, top_idx = torch.topk(scores, K, largest=True, sorted=False)
+                        cand_topk = cand[top_idx]
+                    else:
+                        cand_topk = cand
+                else:
+                    cand_topk = cand
+
+                # Ensure the current ground-truth tail is present in the subset so CE has signal
+                gt = all_t[i]
+                if cand_topk.numel() == 0:
+                    cand_topk = gt.view(1)
+                elif not (cand_topk == gt).any():
+                    if cand_topk.numel() < K:
+                        cand_topk = torch.cat([cand_topk, gt.view(1)], dim=0)
+                    else:
+                        cand_topk[0] = gt
+
+                pos_size = cand_topk.numel()
+                invalid = torch.zeros(nentity, dtype=torch.bool, device=all_h.device)
+                if pos_size > 0:
+                    invalid[cand_topk] = True
+
+                # filter true tails (from smoothed target: non-zero implies true tail)
+                true_tails = torch.nonzero(target[i] > 0, as_tuple=True)[0]
+                if true_tails.numel() > 0:
+                    invalid[true_tails] = True
+
+                # fill to K positions (if candidates are fewer than K)
+                fill_needed = max(0, K - pos_size)
+                fill_neg = torch.empty(0, dtype=torch.long, device=all_h.device)
+                if fill_needed > 0:
+                    fill_neg = []
+                    while sum(x.numel() for x in fill_neg) < fill_needed:
+                        pool = torch.randint(0, nentity, (fill_needed * 4,), device=all_h.device)
+                        pool = pool[~invalid[pool]]
+                        if pool.numel() == 0:
+                            continue
+                        pool = torch.unique(pool)
+                        take = pool[: max(0, fill_needed - sum(x.numel() for x in fill_neg))]
+                        if take.numel() == 0:
+                            continue
+                        invalid[take] = True
+                        fill_neg.append(take)
+                    fill_neg = torch.cat(fill_neg, dim=0)[:fill_needed]
+
+                # sample N additional negatives
+                neg = []
+                while sum(x.numel() for x in neg) < N:
+                    pool = torch.randint(0, nentity, (N * 4,), device=all_h.device)
+                    pool = pool[~invalid[pool]]
+                    if pool.numel() == 0:
+                        continue
+                    pool = torch.unique(pool)
+                    take = pool[: max(0, N - sum(x.numel() for x in neg))]
+                    if take.numel() == 0:
+                        continue
+                    invalid[take] = True
+                    neg.append(take)
+                neg = torch.cat(neg, dim=0)[:N]
+
+                # final subset: candidates + fill_neg (both counted as first K slots), then N negatives
+                if pos_size < K:
+                    pos_padded = torch.cat([cand_topk, fill_neg], dim=0)
+                else:
+                    pos_padded = cand_topk[:K]
+                C[i, :K] = pos_padded
+                C[i, K:] = neg
+
+            student_logits = grounding_rule_score.gather(1, C)
+            student_logp = F.log_softmax(student_logits, dim=1)
+
+            target_C = target.gather(1, C)
+            denom = torch.clamp(target_C.sum(dim=1), min=1.0)
+            ce = - (student_logp * target_C).sum(dim=1) / denom
+
+            if kd_lambda > 0:
+                teacher_logits = model.compute_g_KGE_subset(all_h, all_r, C)
+                teacher_p = F.softmax(teacher_logits / kd_tau, dim=1).detach()
+                student_logp_tau = F.log_softmax(student_logits / kd_tau, dim=1)
+                kd = - (teacher_p * student_logp_tau).sum(dim=1) * (kd_tau * kd_tau)
+                loss_vec = (1.0 - kd_lambda) * ce + kd_lambda * kd
+            else:
+                loss_vec = ce
+
+            loss = loss_vec.mean()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            total_loss += loss.item()
+            total_size += all_h.size(0)
             
             if (batch_id + 1) % print_every == 0:
                 
@@ -550,18 +650,14 @@ class GroundTrainer(object):
                 all_t = all_t.cuda(device=self.device)
                 flag = flag.cuda(device=self.device)
 
-            # logits, mask = model.forward_weight(all_h, all_r, None)
-            logits, mask = model(all_h, all_r, None)
-
-            # kge_score = model.compute_g_KGE(all_h,all_r)
-            # logits += alpha * kge_score
+            logits, cand_mask, _ = model(all_h, all_r, None)
 
             concat_logits.append(logits)
             concat_all_h.append(all_h)
             concat_all_r.append(all_r)
             concat_all_t.append(all_t)
             concat_flag.append(flag)
-            concat_mask.append(mask)
+            concat_mask.append(cand_mask)
         
         concat_logits = torch.cat(concat_logits, dim=0)
         concat_all_h = torch.cat(concat_all_h, dim=0)
@@ -661,8 +757,7 @@ class GroundTrainer(object):
                 all_t = all_t.cuda(device=self.device)
                 flag = flag.cuda(device=self.device)
 
-            # logits, mask = model.forward_weight(all_h, all_r, None)
-            logits, mask = model(all_h, all_r, None)
+            logits, mask, _ = model(all_h, all_r, None)
 
             kge_score = model.compute_g_KGE(all_h,all_r)
             

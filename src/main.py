@@ -84,6 +84,17 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+
+    # grounding: candidate-first + distillation + hypernet
+    parser.add_argument('--topk_candidates', default=256, type=int)
+    parser.add_argument('--neg_k', default=256, type=int)
+    parser.add_argument('--kd_lambda', default=0.0, type=float)
+    parser.add_argument('--kd_tau', default=2.0, type=float)
+    parser.add_argument('--count_transform', default='log1p', type=str, choices=['none', 'log1p'])
+    parser.add_argument('--use_hypernet', action='store_true', default=False)
+    parser.add_argument('--hypernet_in', default='rule_weight', type=str, choices=['rule_weight', 'rule_emb', 'concat'])
+    parser.add_argument('--hypernet_hidden_dim', default=128, type=int)
+    parser.add_argument('--hypernet_dropout', default=0.0, type=float)
     return parser.parse_args(args)
 
 def main():
@@ -126,7 +137,20 @@ def main():
     else:
         device = torch.device('cpu')
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
+    RulE_model = RulE(
+        graph,
+        args.p_norm,
+        args.mlp_rule_dim,
+        args.gamma_fact,
+        args.gamma_rule,
+        args.hidden_dim,
+        device,
+        args.data_path,
+        use_hypernet=getattr(args, 'use_hypernet', False),
+        hypernet_in=getattr(args, 'hypernet_in', 'rule_weight'),
+        hypernet_hidden_dim=getattr(args, 'hypernet_hidden_dim', 128),
+        hypernet_dropout=getattr(args, 'hypernet_dropout', 0.0),
+    )
     RulE_model.set_rules(rules)
 
     

@@ -2,12 +2,26 @@
 import torch
 import torch.nn as nn
 import logging, math
-from layers import MLP, FuncToNodeSum
+from layers import MLP, FuncToNodeSum, RuleHyperNet
 
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
+    def __init__(
+        self,
+        graph,
+        p_norm,
+        mlp_rule_dim,
+        gamma_fact,
+        gamma_rule,
+        hidden_dim,
+        device,
+        dataset,
+        use_hypernet=False,
+        hypernet_in="rule_weight",
+        hypernet_hidden_dim=128,
+        hypernet_dropout=0.0,
+    ):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -25,6 +39,8 @@ class RulE(torch.nn.Module):
         self.p = p_norm
 
         self.mlp_rule_dim = mlp_rule_dim
+        self.use_hypernet = use_hypernet
+        self.hypernet_in = hypernet_in
 
         
         self.rule_to_entity = FuncToNodeSum(self.mlp_rule_dim)
@@ -91,6 +107,20 @@ class RulE(torch.nn.Module):
         # self.linear = torch.nn.Linear(self.rnn_hidden_dim, self.relation_dim)
         
         self.pi = 3.14159262358979323846
+
+        if self.use_hypernet:
+            if self.hypernet_in == "rule_weight" or self.hypernet_in == "rule_emb":
+                hyper_in_dim = self.hidden_dim
+            elif self.hypernet_in == "concat":
+                hyper_in_dim = self.hidden_dim * 2
+            else:
+                raise ValueError("hypernet_in must be one of: rule_weight, rule_emb, concat")
+            self.rule_hypernet = RuleHyperNet(
+                input_dim=hyper_in_dim,
+                output_dim=self.mlp_rule_dim,
+                hidden_dim=hypernet_hidden_dim,
+                dropout=hypernet_dropout,
+            )
 
     # def add_param(self):
 
@@ -229,9 +259,27 @@ class RulE(torch.nn.Module):
 
         tail = self.entity_embedding(all_t.view(-1)).view(all_h.size(0), self.num_entities, -1)
         
-
+        
         return self.RotatE(head,relation,tail)
 
+    def compute_g_KGE_subset(self, all_h, all_r, tail_ids):
+        """
+        Compute KGE scores for a subset of tail entities.
+        all_h: [B]
+        all_r: [B]
+        tail_ids: [B, K]
+        return: [B, K]
+        """
+        B, K = tail_ids.size(0), tail_ids.size(1)
+
+        relations_flag = torch.pow(-1, all_r // self.num_relations).unsqueeze(-1)
+        r = all_r % self.num_relations
+
+        head = self.entity_embedding(all_h).unsqueeze(1)
+        relation = (self.relation_embedding(r) * relations_flag).unsqueeze(1)
+
+        tail = self.entity_embedding(tail_ids.reshape(-1)).view(B, K, -1)
+        return self.RotatE(head, relation, tail)
 
     def RotatE(self, head, relation, tail, mode='tail-batch'):
        
@@ -346,38 +394,47 @@ class RulE(torch.nn.Module):
         rule_count = list()
         
         
-        mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
+        candidate_strength = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
         for index, (r_head, r_body) in self.relation2rules[query_r]:
 
             assert r_head == query_r
 
             count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
             
-            mask += count
+            candidate_strength += count
 
             rule_index.append(index)
             rule_count.append(count)
 
 
-        if mask.sum().item() == 0:
-            # return mask + self.bias.unsqueeze(0), (1 - mask).bool(), torch.zeros_like(rule_loss)
-            return mask + self.bias.unsqueeze(0), (1 - mask).bool()
+        candidate_mask = candidate_strength > 0
+        if candidate_strength.sum().item() == 0:
+            score = candidate_strength + self.bias.unsqueeze(0)
+            return score, candidate_mask, candidate_strength
 
 
-        candidate_set = torch.nonzero(mask.view(-1), as_tuple=True)[0]
+        candidate_set = torch.nonzero(candidate_strength.view(-1), as_tuple=True)[0]
 
         rule_index = torch.tensor(rule_index, dtype=torch.long, device=device)
         rule_count = torch.stack(rule_count, dim=0)
 
         rule_count = rule_count.reshape(rule_index.size(0), -1)[:, candidate_set]
         
-        rule_emb = self.rules_weight_emb[rule_index]
+        rule_weight_emb = self.rules_weight_emb[rule_index]
 
-        # mlp_feature = self.mlp_feature[rule_index] * rule_emb.unsqueeze(-1)
-        mlp_feature = self.mlp_feature[rule_index]
+        if self.use_hypernet:
+            if self.hypernet_in == "rule_weight":
+                hyper_in = rule_weight_emb
+            elif self.hypernet_in == "rule_emb":
+                hyper_in = self.rule_emb(rule_index)
+            else:  # concat
+                hyper_in = torch.cat([self.rule_emb(rule_index), rule_weight_emb], dim=-1)
+            mlp_feature = self.rule_hypernet(hyper_in)
+        else:
+            mlp_feature = self.mlp_feature[rule_index]
 
         # output = self.rule_to_entity(rule_count, mlp_feature)
-        output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
+        output = self.rule_to_entity(rule_count, rule_weight_emb, mlp_feature)
 
 
         # rel = self.relation_embedding(all_r[0]%self.num_relations)
@@ -404,9 +461,7 @@ class RulE(torch.nn.Module):
         # score = beta * score + (1 - beta) * kge_score_map
         # score = self.beta[all_r[0]] * score +  kge_score
 
-        mask = torch.ones_like(mask).bool()
-
-        return score, mask
+        return score, candidate_mask, candidate_strength
 
 
 
