@@ -404,6 +404,19 @@ class GroundTrainer(object):
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
         
         self.model.eval_compute_rule_weight(self.device)
+        try:
+            logging.info('Grounding config: topk_candidates=%s neg_k=%s kd_lambda=%s kd_tau=%s count_transform=%s use_hypernet=%s hypernet_in=%s',
+                         getattr(args, 'topk_candidates', None),
+                         getattr(args, 'neg_k', None),
+                         getattr(args, 'kd_lambda', None),
+                         getattr(args, 'kd_tau', None),
+                         getattr(args, 'count_transform', None),
+                         getattr(args, 'use_hypernet', None),
+                         getattr(args, 'hypernet_in', None))
+        except Exception:
+            pass
+        if hasattr(self.model, 'rules_weight_emb'):
+            logging.info('rules_weight_emb shape: %s', tuple(self.model.rules_weight_emb.size()))
 
 
         
@@ -468,7 +481,11 @@ class GroundTrainer(object):
         model.train()
 
         total_loss = 0.0
+        total_ce = 0.0
+        total_kd = 0.0
         total_size = 0.0
+        total_cand_size = 0.0
+        total_gt_in_cand = 0.0
 
         for batch_id, batch in enumerate(islice(train_dataloader, batch_per_epoch)):
             # 归一化
@@ -513,6 +530,7 @@ class GroundTrainer(object):
 
             # build subset per sample (B is small, per-sample loop is acceptable)
             for i in range(all_h.size(0)):
+                total_cand_size += float(candidate_mask[i].sum().item())
                 cand = torch.nonzero(candidate_mask[i], as_tuple=True)[0]
                 if cand.numel() > 0:
                     scores = candidate_strength[i, cand]
@@ -526,6 +544,7 @@ class GroundTrainer(object):
 
                 # Ensure the current ground-truth tail is present in the subset so CE has signal
                 gt = all_t[i]
+                total_gt_in_cand += float(candidate_mask[i, gt].item())
                 if cand_topk.numel() == 0:
                     cand_topk = gt.view(1)
                 elif not (cand_topk == gt).any():
@@ -599,6 +618,7 @@ class GroundTrainer(object):
                 kd = - (teacher_p * student_logp_tau).sum(dim=1) * (kd_tau * kd_tau)
                 loss_vec = (1.0 - kd_lambda) * ce + kd_lambda * kd
             else:
+                kd = torch.zeros_like(ce)
                 loss_vec = ce
 
             loss = loss_vec.mean()
@@ -607,15 +627,31 @@ class GroundTrainer(object):
             optimizer.zero_grad()
 
             total_loss += loss.item()
+            total_ce += ce.mean().item()
+            total_kd += kd.mean().item()
             total_size += all_h.size(0)
             
             if (batch_id + 1) % print_every == 0:
                 
-                
-                logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
+                avg_cand = total_cand_size / max(total_size, 1.0)
+                gt_in_cand_rate = total_gt_in_cand / max(total_size, 1.0)
+                logging.info(
+                    'loss:    %s %s %.6f | ce=%.6f kd=%.6f | avg_cand=%.1f gt_in_cand=%.3f',
+                    batch_id + 1,
+                    len(train_dataloader),
+                    total_loss / max(print_every, 1),
+                    total_ce / max(print_every, 1),
+                    total_kd / max(print_every, 1),
+                    avg_cand,
+                    gt_in_cand_rate,
+                )
                 
                 total_loss = 0.0
+                total_ce = 0.0
+                total_kd = 0.0
                 total_size = 0.0
+                total_cand_size = 0.0
+                total_gt_in_cand = 0.0
                 self.save(args, os.path.join(args.save_path, 'grounding.pt'))
         
 
