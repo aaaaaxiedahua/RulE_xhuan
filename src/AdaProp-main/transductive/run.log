@@ -1,0 +1,93 @@
+2025-12-26 17:55:03 INFO     read 18400 rules from list.
+2025-12-26 17:55:03 INFO     Finishing pre-training!
+2025-12-26 17:55:04 INFO     Running top-k propagation reasoner (AdaProp-style)
+2025-12-26 17:55:04 INFO     Training top-k reasoner for 50 epochs
+2025-12-26 17:55:59 INFO     TopKReasoner epoch 1 loss 44.474393
+2025-12-26 17:56:51 INFO     TopKReasoner epoch 2 loss 41.268723
+2025-12-26 17:57:21 INFO     TopKReasoner valid MRR: 0.395233 (2612 queries)
+2025-12-26 17:57:22 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.395233) to umls\topk_reasoner_best.pt
+2025-12-26 17:58:14 INFO     TopKReasoner epoch 3 loss 38.862707
+2025-12-26 17:59:06 INFO     TopKReasoner epoch 4 loss 36.983276
+2025-12-26 17:59:37 INFO     TopKReasoner valid MRR: 0.468626 (2612 queries)
+2025-12-26 17:59:37 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.468626) to umls\topk_reasoner_best.pt
+2025-12-26 18:00:31 INFO     TopKReasoner epoch 5 loss 35.695856
+2025-12-26 18:01:24 INFO     TopKReasoner epoch 6 loss 35.050816
+2025-12-26 18:01:55 INFO     TopKReasoner valid MRR: 0.590962 (2612 queries)
+2025-12-26 18:01:55 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.590962) to umls\topk_reasoner_best.pt
+2025-12-26 18:02:47 INFO     TopKReasoner epoch 7 loss 34.289774
+2025-12-26 18:03:40 INFO     TopKReasoner epoch 8 loss 32.554693
+2025-12-26 18:04:10 INFO     TopKReasoner valid MRR: 0.684138 (2612 queries)
+2025-12-26 18:04:11 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.684138) to umls\topk_reasoner_best.pt
+2025-12-26 18:05:03 INFO     TopKReasoner epoch 9 loss 31.563068
+2025-12-26 18:05:57 INFO     TopKReasoner epoch 10 loss 30.785876
+2025-12-26 18:06:28 INFO     TopKReasoner valid MRR: 0.723878 (2612 queries)
+2025-12-26 18:06:28 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.723878) to umls\topk_reasoner_best.pt
+2025-12-26 18:07:20 INFO     TopKReasoner epoch 11 loss 30.269981
+2025-12-26 18:08:14 INFO     TopKReasoner epoch 12 loss 29.749273
+2025-12-26 18:08:45 INFO     TopKReasoner valid MRR: 0.726704 (2612 queries)
+2025-12-26 18:08:45 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.726704) to umls\topk_reasoner_best.pt
+2025-12-26 18:09:37 INFO     TopKReasoner epoch 13 loss 29.714478
+2025-12-26 18:10:31 INFO     TopKReasoner epoch 14 loss 30.298051
+2025-12-26 18:11:01 INFO     TopKReasoner valid MRR: 0.726366 (2612 queries)
+2025-12-26 18:11:55 INFO     TopKReasoner epoch 15 loss 29.959924
+2025-12-26 18:12:48 INFO     TopKReasoner epoch 16 loss 29.946681
+2025-12-26 18:13:18 INFO     TopKReasoner valid MRR: 0.740899 (2612 queries)
+2025-12-26 18:13:18 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.740899) to umls\topk_reasoner_best.pt
+2025-12-26 18:14:11 INFO     TopKReasoner epoch 17 loss 29.019513
+2025-12-26 18:15:04 INFO     TopKReasoner epoch 18 loss 28.897219
+2025-12-26 18:15:34 INFO     TopKReasoner valid MRR: 0.747758 (2612 queries)
+2025-12-26 18:15:34 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.747758) to umls\topk_reasoner_best.pt
+2025-12-26 18:16:26 INFO     TopKReasoner epoch 19 loss 28.508201
+2025-12-26 18:17:18 INFO     TopKReasoner epoch 20 loss 27.876253
+2025-12-26 18:17:49 INFO     TopKReasoner valid MRR: 0.754777 (2612 queries)
+2025-12-26 18:17:49 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.754777) to umls\topk_reasoner_best.pt
+2025-12-26 18:18:42 INFO     TopKReasoner epoch 21 loss 27.725962
+2025-12-26 18:19:34 INFO     TopKReasoner epoch 22 loss 27.532349
+2025-12-26 18:20:06 INFO     TopKReasoner valid MRR: 0.726780 (2612 queries)
+2025-12-26 18:20:58 INFO     TopKReasoner epoch 23 loss 27.393522
+2025-12-26 18:21:51 INFO     TopKReasoner epoch 24 loss 27.497112
+2025-12-26 18:22:21 INFO     TopKReasoner valid MRR: 0.733529 (2612 queries)
+2025-12-26 18:23:15 INFO     TopKReasoner epoch 25 loss 27.628703
+2025-12-26 18:24:08 INFO     TopKReasoner epoch 26 loss 28.237251
+2025-12-26 18:24:39 INFO     TopKReasoner valid MRR: 0.740989 (2612 queries)
+2025-12-26 18:25:31 INFO     TopKReasoner epoch 27 loss 28.310833
+2025-12-26 18:26:23 INFO     TopKReasoner epoch 28 loss 28.208165
+2025-12-26 18:26:54 INFO     TopKReasoner valid MRR: 0.742803 (2612 queries)
+2025-12-26 18:27:46 INFO     TopKReasoner epoch 29 loss 27.157540
+2025-12-26 18:28:39 INFO     TopKReasoner epoch 30 loss 27.011622
+2025-12-26 18:29:09 INFO     TopKReasoner valid MRR: 0.714886 (2612 queries)
+2025-12-26 18:30:03 INFO     TopKReasoner epoch 31 loss 26.367554
+2025-12-26 18:30:56 INFO     TopKReasoner epoch 32 loss 26.296917
+2025-12-26 18:31:27 INFO     TopKReasoner valid MRR: 0.746189 (2612 queries)
+2025-12-26 18:32:21 INFO     TopKReasoner epoch 33 loss 25.931864
+2025-12-26 18:33:13 INFO     TopKReasoner epoch 34 loss 25.479640
+2025-12-26 18:33:44 INFO     TopKReasoner valid MRR: 0.756145 (2612 queries)
+2025-12-26 18:33:45 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.756145) to umls\topk_reasoner_best.pt
+2025-12-26 18:34:38 INFO     TopKReasoner epoch 35 loss 25.742882
+2025-12-26 18:35:33 INFO     TopKReasoner epoch 36 loss 26.821350
+2025-12-26 18:36:05 INFO     TopKReasoner valid MRR: 0.760349 (2612 queries)
+2025-12-26 18:36:05 INFO     Saved TopKReasoner best checkpoint (valid MRR=0.760349) to umls\topk_reasoner_best.pt
+2025-12-26 18:36:58 INFO     TopKReasoner epoch 37 loss 25.714490
+2025-12-26 18:37:52 INFO     TopKReasoner epoch 38 loss 25.390316
+2025-12-26 18:38:24 INFO     TopKReasoner valid MRR: 0.749872 (2612 queries)
+2025-12-26 18:39:17 INFO     TopKReasoner epoch 39 loss 25.619882
+2025-12-26 18:40:11 INFO     TopKReasoner epoch 40 loss 25.511271
+2025-12-26 18:40:42 INFO     TopKReasoner valid MRR: 0.744190 (2612 queries)
+2025-12-26 18:41:36 INFO     TopKReasoner epoch 41 loss 25.104848
+2025-12-26 18:42:30 INFO     TopKReasoner epoch 42 loss 24.761271
+2025-12-26 18:43:01 INFO     TopKReasoner valid MRR: 0.739170 (2612 queries)
+2025-12-26 18:43:56 INFO     TopKReasoner epoch 43 loss 24.897204
+2025-12-26 18:44:49 INFO     TopKReasoner epoch 44 loss 24.802921
+2025-12-26 18:45:20 INFO     TopKReasoner valid MRR: 0.743767 (2612 queries)
+2025-12-26 18:46:14 INFO     TopKReasoner epoch 45 loss 24.593562
+2025-12-26 18:47:07 INFO     TopKReasoner epoch 46 loss 24.690462
+2025-12-26 18:47:39 INFO     TopKReasoner valid MRR: 0.725640 (2612 queries)
+2025-12-26 18:48:33 INFO     TopKReasoner epoch 47 loss 24.712379
+2025-12-26 18:49:27 INFO     TopKReasoner epoch 48 loss 24.406237
+2025-12-26 18:49:59 INFO     TopKReasoner valid MRR: 0.739693 (2612 queries)
+2025-12-26 18:50:52 INFO     TopKReasoner epoch 49 loss 24.236097
+2025-12-26 18:51:46 INFO     TopKReasoner epoch 50 loss 24.038448
+2025-12-26 18:52:18 INFO     TopKReasoner valid MRR: 0.737072 (2612 queries)
+2025-12-26 18:52:18 INFO     Loading TopKReasoner best checkpoint from umls\topk_reasoner_best.pt
+2025-12-26 18:52:50 INFO     TopKReasoner valid MRR: 0.760349 (2612 queries)
+2025-12-26 18:53:54 INFO     TopKReasoner test MRR: 0.752910 (6528 queries)

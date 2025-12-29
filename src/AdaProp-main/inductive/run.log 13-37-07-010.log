@@ -1,0 +1,206 @@
+2025-12-25 20:11:17 INFO     read 18400 rules from list.
+2025-12-25 20:11:18 INFO     Finishing pre-training!
+2025-12-25 20:11:18 INFO     Running top-k propagation reasoner (AdaProp-style)
+2025-12-25 20:11:19 INFO     Training top-k reasoner for 100 epochs
+2025-12-25 20:12:01 INFO     TopKReasoner epoch 1 loss 41.271675
+2025-12-25 20:12:54 INFO     TopKReasoner valid MRR: 0.587396 (2612 queries)
+2025-12-25 20:13:36 INFO     TopKReasoner epoch 2 loss 34.384285
+2025-12-25 20:14:28 INFO     TopKReasoner valid MRR: 0.656978 (2612 queries)
+2025-12-25 20:15:08 INFO     TopKReasoner epoch 3 loss 32.127150
+2025-12-25 20:15:59 INFO     TopKReasoner valid MRR: 0.689640 (2612 queries)
+2025-12-25 20:16:41 INFO     TopKReasoner epoch 4 loss 30.475062
+2025-12-25 20:17:31 INFO     TopKReasoner valid MRR: 0.753794 (2612 queries)
+2025-12-25 20:18:13 INFO     TopKReasoner epoch 5 loss 29.271799
+2025-12-25 20:19:02 INFO     TopKReasoner valid MRR: 0.725065 (2612 queries)
+2025-12-25 20:19:43 INFO     TopKReasoner epoch 6 loss 28.246363
+2025-12-25 20:20:32 INFO     TopKReasoner valid MRR: 0.744998 (2612 queries)
+2025-12-25 20:21:12 INFO     TopKReasoner epoch 7 loss 27.385753
+2025-12-25 20:22:02 INFO     TopKReasoner valid MRR: 0.752199 (2612 queries)
+2025-12-25 20:22:43 INFO     TopKReasoner epoch 8 loss 26.623264
+2025-12-25 20:23:34 INFO     TopKReasoner valid MRR: 0.774695 (2612 queries)
+2025-12-25 20:24:16 INFO     TopKReasoner epoch 9 loss 25.808619
+2025-12-25 20:25:09 INFO     TopKReasoner valid MRR: 0.782887 (2612 queries)
+2025-12-25 20:25:52 INFO     TopKReasoner epoch 10 loss 25.256049
+2025-12-25 20:26:40 INFO     TopKReasoner valid MRR: 0.773550 (2612 queries)
+2025-12-25 20:27:20 INFO     TopKReasoner epoch 11 loss 24.097477
+2025-12-25 20:28:10 INFO     TopKReasoner valid MRR: 0.779672 (2612 queries)
+2025-12-25 20:28:51 INFO     TopKReasoner epoch 12 loss 23.347965
+2025-12-25 20:29:40 INFO     TopKReasoner valid MRR: 0.766026 (2612 queries)
+2025-12-25 20:30:21 INFO     TopKReasoner epoch 13 loss 22.376827
+2025-12-25 20:31:10 INFO     TopKReasoner valid MRR: 0.752443 (2612 queries)
+2025-12-25 20:31:53 INFO     TopKReasoner epoch 14 loss 21.516677
+2025-12-25 20:32:42 INFO     TopKReasoner valid MRR: 0.731346 (2612 queries)
+2025-12-25 20:33:23 INFO     TopKReasoner epoch 15 loss 20.515203
+2025-12-25 20:34:15 INFO     TopKReasoner valid MRR: 0.731620 (2612 queries)
+2025-12-25 20:34:57 INFO     TopKReasoner epoch 16 loss 19.766045
+2025-12-25 20:35:47 INFO     TopKReasoner valid MRR: 0.716502 (2612 queries)
+2025-12-25 20:36:30 INFO     TopKReasoner epoch 17 loss 18.795612
+2025-12-25 20:37:20 INFO     TopKReasoner valid MRR: 0.734203 (2612 queries)
+2025-12-25 20:38:02 INFO     TopKReasoner epoch 18 loss 17.746313
+2025-12-25 20:38:54 INFO     TopKReasoner valid MRR: 0.715536 (2612 queries)
+2025-12-25 20:39:34 INFO     TopKReasoner epoch 19 loss 17.193608
+2025-12-25 20:40:24 INFO     TopKReasoner valid MRR: 0.718140 (2612 queries)
+2025-12-25 20:41:05 INFO     TopKReasoner epoch 20 loss 16.204860
+2025-12-25 20:41:56 INFO     TopKReasoner valid MRR: 0.714440 (2612 queries)
+2025-12-25 20:42:38 INFO     TopKReasoner epoch 21 loss 15.328851
+2025-12-25 20:43:27 INFO     TopKReasoner valid MRR: 0.706523 (2612 queries)
+2025-12-25 20:44:11 INFO     TopKReasoner epoch 22 loss 14.468424
+2025-12-25 20:44:59 INFO     TopKReasoner valid MRR: 0.704562 (2612 queries)
+2025-12-25 20:45:39 INFO     TopKReasoner epoch 23 loss 13.724504
+2025-12-25 20:46:30 INFO     TopKReasoner valid MRR: 0.698862 (2612 queries)
+2025-12-25 20:47:11 INFO     TopKReasoner epoch 24 loss 12.998974
+2025-12-25 20:47:59 INFO     TopKReasoner valid MRR: 0.711172 (2612 queries)
+2025-12-25 20:48:41 INFO     TopKReasoner epoch 25 loss 12.628767
+2025-12-25 20:49:31 INFO     TopKReasoner valid MRR: 0.681173 (2612 queries)
+2025-12-25 20:50:13 INFO     TopKReasoner epoch 26 loss 11.840350
+2025-12-25 20:51:02 INFO     TopKReasoner valid MRR: 0.707139 (2612 queries)
+2025-12-25 20:51:43 INFO     TopKReasoner epoch 27 loss 11.408078
+2025-12-25 20:52:36 INFO     TopKReasoner valid MRR: 0.672002 (2612 queries)
+2025-12-25 20:53:16 INFO     TopKReasoner epoch 28 loss 10.935376
+2025-12-25 20:54:06 INFO     TopKReasoner valid MRR: 0.700226 (2612 queries)
+2025-12-25 20:54:47 INFO     TopKReasoner epoch 29 loss 10.473559
+2025-12-25 20:55:39 INFO     TopKReasoner valid MRR: 0.705197 (2612 queries)
+2025-12-25 20:56:20 INFO     TopKReasoner epoch 30 loss 9.616198
+2025-12-25 20:57:08 INFO     TopKReasoner valid MRR: 0.690307 (2612 queries)
+2025-12-25 20:57:49 INFO     TopKReasoner epoch 31 loss 9.607361
+2025-12-25 20:58:39 INFO     TopKReasoner valid MRR: 0.663547 (2612 queries)
+2025-12-25 20:59:19 INFO     TopKReasoner epoch 32 loss 9.236872
+2025-12-25 21:00:10 INFO     TopKReasoner valid MRR: 0.690713 (2612 queries)
+2025-12-25 21:00:50 INFO     TopKReasoner epoch 33 loss 8.901707
+2025-12-25 21:01:43 INFO     TopKReasoner valid MRR: 0.704374 (2612 queries)
+2025-12-25 21:02:24 INFO     TopKReasoner epoch 34 loss 8.710014
+2025-12-25 21:03:13 INFO     TopKReasoner valid MRR: 0.684086 (2612 queries)
+2025-12-25 21:03:53 INFO     TopKReasoner epoch 35 loss 8.596082
+2025-12-25 21:04:45 INFO     TopKReasoner valid MRR: 0.670989 (2612 queries)
+2025-12-25 21:05:26 INFO     TopKReasoner epoch 36 loss 7.710246
+2025-12-25 21:06:17 INFO     TopKReasoner valid MRR: 0.659819 (2612 queries)
+2025-12-25 21:06:57 INFO     TopKReasoner epoch 37 loss 8.862573
+2025-12-25 21:07:49 INFO     TopKReasoner valid MRR: 0.686433 (2612 queries)
+2025-12-25 21:08:30 INFO     TopKReasoner epoch 38 loss 7.248687
+2025-12-25 21:09:20 INFO     TopKReasoner valid MRR: 0.701598 (2612 queries)
+2025-12-25 21:10:01 INFO     TopKReasoner epoch 39 loss 7.319775
+2025-12-25 21:10:51 INFO     TopKReasoner valid MRR: 0.663171 (2612 queries)
+2025-12-25 21:11:32 INFO     TopKReasoner epoch 40 loss 7.199110
+2025-12-25 21:12:27 INFO     TopKReasoner valid MRR: 0.681009 (2612 queries)
+2025-12-25 21:13:07 INFO     TopKReasoner epoch 41 loss 6.617358
+2025-12-25 21:13:58 INFO     TopKReasoner valid MRR: 0.646198 (2612 queries)
+2025-12-25 21:14:38 INFO     TopKReasoner epoch 42 loss 6.510401
+2025-12-25 21:15:28 INFO     TopKReasoner valid MRR: 0.658969 (2612 queries)
+2025-12-25 21:16:08 INFO     TopKReasoner epoch 43 loss 6.726073
+2025-12-25 21:16:59 INFO     TopKReasoner valid MRR: 0.646154 (2612 queries)
+2025-12-25 21:17:40 INFO     TopKReasoner epoch 44 loss 6.827614
+2025-12-25 21:18:31 INFO     TopKReasoner valid MRR: 0.666505 (2612 queries)
+2025-12-25 21:19:12 INFO     TopKReasoner epoch 45 loss 5.816335
+2025-12-25 21:20:04 INFO     TopKReasoner valid MRR: 0.669981 (2612 queries)
+2025-12-25 21:20:45 INFO     TopKReasoner epoch 46 loss 5.933969
+2025-12-25 21:21:35 INFO     TopKReasoner valid MRR: 0.675111 (2612 queries)
+2025-12-25 21:22:15 INFO     TopKReasoner epoch 47 loss 5.414204
+2025-12-25 21:23:05 INFO     TopKReasoner valid MRR: 0.646097 (2612 queries)
+2025-12-25 21:23:47 INFO     TopKReasoner epoch 48 loss 5.686238
+2025-12-25 21:24:39 INFO     TopKReasoner valid MRR: 0.677873 (2612 queries)
+2025-12-25 21:25:20 INFO     TopKReasoner epoch 49 loss 5.883310
+2025-12-25 21:26:10 INFO     TopKReasoner valid MRR: 0.655433 (2612 queries)
+2025-12-25 21:26:49 INFO     TopKReasoner epoch 50 loss 6.071451
+2025-12-25 21:27:39 INFO     TopKReasoner valid MRR: 0.666005 (2612 queries)
+2025-12-25 21:28:20 INFO     TopKReasoner epoch 51 loss 5.245515
+2025-12-25 21:29:11 INFO     TopKReasoner valid MRR: 0.675022 (2612 queries)
+2025-12-25 21:29:52 INFO     TopKReasoner epoch 52 loss 5.466763
+2025-12-25 21:30:42 INFO     TopKReasoner valid MRR: 0.648554 (2612 queries)
+2025-12-25 21:31:23 INFO     TopKReasoner epoch 53 loss 5.271071
+2025-12-25 21:32:12 INFO     TopKReasoner valid MRR: 0.678948 (2612 queries)
+2025-12-25 21:32:52 INFO     TopKReasoner epoch 54 loss 5.494418
+2025-12-25 21:33:42 INFO     TopKReasoner valid MRR: 0.635814 (2612 queries)
+2025-12-25 21:34:23 INFO     TopKReasoner epoch 55 loss 6.191305
+2025-12-25 21:35:12 INFO     TopKReasoner valid MRR: 0.662038 (2612 queries)
+2025-12-25 21:35:54 INFO     TopKReasoner epoch 56 loss 5.581138
+2025-12-25 21:36:45 INFO     TopKReasoner valid MRR: 0.672198 (2612 queries)
+2025-12-25 21:37:26 INFO     TopKReasoner epoch 57 loss 5.045707
+2025-12-25 21:38:18 INFO     TopKReasoner valid MRR: 0.666699 (2612 queries)
+2025-12-25 21:38:59 INFO     TopKReasoner epoch 58 loss 4.632968
+2025-12-25 21:39:50 INFO     TopKReasoner valid MRR: 0.666646 (2612 queries)
+2025-12-25 21:40:33 INFO     TopKReasoner epoch 59 loss 4.302924
+2025-12-25 21:41:23 INFO     TopKReasoner valid MRR: 0.657192 (2612 queries)
+2025-12-25 21:42:06 INFO     TopKReasoner epoch 60 loss 4.725287
+2025-12-25 21:42:59 INFO     TopKReasoner valid MRR: 0.669269 (2612 queries)
+2025-12-25 21:43:41 INFO     TopKReasoner epoch 61 loss 4.752991
+2025-12-25 21:44:34 INFO     TopKReasoner valid MRR: 0.659177 (2612 queries)
+2025-12-25 21:45:14 INFO     TopKReasoner epoch 62 loss 4.313787
+2025-12-25 21:46:05 INFO     TopKReasoner valid MRR: 0.648823 (2612 queries)
+2025-12-25 21:46:46 INFO     TopKReasoner epoch 63 loss 4.252643
+2025-12-25 21:47:35 INFO     TopKReasoner valid MRR: 0.631143 (2612 queries)
+2025-12-25 21:48:17 INFO     TopKReasoner epoch 64 loss 4.639222
+2025-12-25 21:49:08 INFO     TopKReasoner valid MRR: 0.649753 (2612 queries)
+2025-12-25 21:49:50 INFO     TopKReasoner epoch 65 loss 4.232291
+2025-12-25 21:50:40 INFO     TopKReasoner valid MRR: 0.676187 (2612 queries)
+2025-12-25 21:51:20 INFO     TopKReasoner epoch 66 loss 4.223330
+2025-12-25 21:52:09 INFO     TopKReasoner valid MRR: 0.669843 (2612 queries)
+2025-12-25 21:52:50 INFO     TopKReasoner epoch 67 loss 4.036661
+2025-12-25 21:53:41 INFO     TopKReasoner valid MRR: 0.676398 (2612 queries)
+2025-12-25 21:54:24 INFO     TopKReasoner epoch 68 loss 3.462352
+2025-12-25 21:55:14 INFO     TopKReasoner valid MRR: 0.664092 (2612 queries)
+2025-12-25 21:55:55 INFO     TopKReasoner epoch 69 loss 3.893658
+2025-12-25 21:56:44 INFO     TopKReasoner valid MRR: 0.656048 (2612 queries)
+2025-12-25 21:57:24 INFO     TopKReasoner epoch 70 loss 3.795307
+2025-12-25 21:58:16 INFO     TopKReasoner valid MRR: 0.622571 (2612 queries)
+2025-12-25 21:58:57 INFO     TopKReasoner epoch 71 loss 4.347086
+2025-12-25 21:59:48 INFO     TopKReasoner valid MRR: 0.673087 (2612 queries)
+2025-12-25 22:00:31 INFO     TopKReasoner epoch 72 loss 4.086945
+2025-12-25 22:01:22 INFO     TopKReasoner valid MRR: 0.646276 (2612 queries)
+2025-12-25 22:02:06 INFO     TopKReasoner epoch 73 loss 3.735669
+2025-12-25 22:02:54 INFO     TopKReasoner valid MRR: 0.644422 (2612 queries)
+2025-12-25 22:03:34 INFO     TopKReasoner epoch 74 loss 4.004555
+2025-12-25 22:04:28 INFO     TopKReasoner valid MRR: 0.649347 (2612 queries)
+2025-12-25 22:05:11 INFO     TopKReasoner epoch 75 loss 3.621339
+2025-12-25 22:06:02 INFO     TopKReasoner valid MRR: 0.636838 (2612 queries)
+2025-12-25 22:06:44 INFO     TopKReasoner epoch 76 loss 3.415815
+2025-12-25 22:07:35 INFO     TopKReasoner valid MRR: 0.629251 (2612 queries)
+2025-12-25 22:08:17 INFO     TopKReasoner epoch 77 loss 3.382176
+2025-12-25 22:09:07 INFO     TopKReasoner valid MRR: 0.654257 (2612 queries)
+2025-12-25 22:09:48 INFO     TopKReasoner epoch 78 loss 4.045747
+2025-12-25 22:10:41 INFO     TopKReasoner valid MRR: 0.642158 (2612 queries)
+2025-12-25 22:11:22 INFO     TopKReasoner epoch 79 loss 3.443120
+2025-12-25 22:12:15 INFO     TopKReasoner valid MRR: 0.652167 (2612 queries)
+2025-12-25 22:12:56 INFO     TopKReasoner epoch 80 loss 3.316582
+2025-12-25 22:13:46 INFO     TopKReasoner valid MRR: 0.645264 (2612 queries)
+2025-12-25 22:14:28 INFO     TopKReasoner epoch 81 loss 3.261223
+2025-12-25 22:15:18 INFO     TopKReasoner valid MRR: 0.637435 (2612 queries)
+2025-12-25 22:15:59 INFO     TopKReasoner epoch 82 loss 2.968370
+2025-12-25 22:16:51 INFO     TopKReasoner valid MRR: 0.649393 (2612 queries)
+2025-12-25 22:17:33 INFO     TopKReasoner epoch 83 loss 3.254249
+2025-12-25 22:18:25 INFO     TopKReasoner valid MRR: 0.618736 (2612 queries)
+2025-12-25 22:19:06 INFO     TopKReasoner epoch 84 loss 2.996293
+2025-12-25 22:19:59 INFO     TopKReasoner valid MRR: 0.630633 (2612 queries)
+2025-12-25 22:20:41 INFO     TopKReasoner epoch 85 loss 3.578670
+2025-12-25 22:21:32 INFO     TopKReasoner valid MRR: 0.648592 (2612 queries)
+2025-12-25 22:22:14 INFO     TopKReasoner epoch 86 loss 3.005213
+2025-12-25 22:23:05 INFO     TopKReasoner valid MRR: 0.630528 (2612 queries)
+2025-12-25 22:23:48 INFO     TopKReasoner epoch 87 loss 2.977803
+2025-12-25 22:24:40 INFO     TopKReasoner valid MRR: 0.662490 (2612 queries)
+2025-12-25 22:25:23 INFO     TopKReasoner epoch 88 loss 3.183486
+2025-12-25 22:26:13 INFO     TopKReasoner valid MRR: 0.642099 (2612 queries)
+2025-12-25 22:26:53 INFO     TopKReasoner epoch 89 loss 3.082570
+2025-12-25 22:27:43 INFO     TopKReasoner valid MRR: 0.641901 (2612 queries)
+2025-12-25 22:28:24 INFO     TopKReasoner epoch 90 loss 2.787458
+2025-12-25 22:29:12 INFO     TopKReasoner valid MRR: 0.650045 (2612 queries)
+2025-12-25 22:29:55 INFO     TopKReasoner epoch 91 loss 3.212549
+2025-12-25 22:30:47 INFO     TopKReasoner valid MRR: 0.657534 (2612 queries)
+2025-12-25 22:31:29 INFO     TopKReasoner epoch 92 loss 2.396489
+2025-12-25 22:32:22 INFO     TopKReasoner valid MRR: 0.635379 (2612 queries)
+2025-12-25 22:33:02 INFO     TopKReasoner epoch 93 loss 2.070741
+2025-12-25 22:33:53 INFO     TopKReasoner valid MRR: 0.617677 (2612 queries)
+2025-12-25 22:34:34 INFO     TopKReasoner epoch 94 loss 2.486925
+2025-12-25 22:35:23 INFO     TopKReasoner valid MRR: 0.624866 (2612 queries)
+2025-12-25 22:36:06 INFO     TopKReasoner epoch 95 loss 3.427999
+2025-12-25 22:36:57 INFO     TopKReasoner valid MRR: 0.597748 (2612 queries)
+2025-12-25 22:37:40 INFO     TopKReasoner epoch 96 loss 2.976101
+2025-12-25 22:38:33 INFO     TopKReasoner valid MRR: 0.658268 (2612 queries)
+2025-12-25 22:39:12 INFO     TopKReasoner epoch 97 loss 2.449957
+2025-12-25 22:40:01 INFO     TopKReasoner valid MRR: 0.637015 (2612 queries)
+2025-12-25 22:40:42 INFO     TopKReasoner epoch 98 loss 2.198133
+2025-12-25 22:41:33 INFO     TopKReasoner valid MRR: 0.651222 (2612 queries)
+2025-12-25 22:42:14 INFO     TopKReasoner epoch 99 loss 2.434059
+2025-12-25 22:43:05 INFO     TopKReasoner valid MRR: 0.639101 (2612 queries)
+2025-12-25 22:43:48 INFO     TopKReasoner epoch 100 loss 2.425495
+2025-12-25 22:44:39 INFO     TopKReasoner valid MRR: 0.659665 (2612 queries)
+2025-12-25 22:45:28 INFO     TopKReasoner valid MRR: 0.659665 (2612 queries)
+2025-12-25 22:47:17 INFO     TopKReasoner test MRR: 0.650069 (6528 queries)
