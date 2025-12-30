@@ -652,8 +652,8 @@ class GroundTrainer(object):
                 total_size = 0.0
                 total_cand_size = 0.0
                 total_gt_in_cand = 0.0
-                self.save(args, os.path.join(args.save_path, 'grounding.pt'))
-        
+                # Don't save here to avoid overwriting the best checkpoint saved in GroundTrainer.train()
+                # self.save(args, os.path.join(args.save_path, 'grounding.pt'))
 
     @torch.no_grad()
     def evaluate(self, split, alpha=3.0, expectation=True):

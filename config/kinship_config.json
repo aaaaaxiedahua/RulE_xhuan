@@ -34,5 +34,16 @@
     "g_batch_size": 32,
     "g_lr": 0.0005,
     "weight_decay": 0,
-    "num_iters": 10
+    "num_iters": 10,
+
+    "topk_candidates": 48,
+    "neg_k": 24,
+    "kd_lambda": 0.2,
+    "kd_tau": 2.0,
+    "count_transform": "log1p",
+
+    "use_hypernet": true,
+    "hypernet_in": "rule_weight",
+    "hypernet_hidden_dim": 128,
+    "hypernet_dropout": 0.1
 }
