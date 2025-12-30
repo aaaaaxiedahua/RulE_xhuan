@@ -84,13 +84,6 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
-
-    # grounding: candidate-first + distillation + hypernet
-    parser.add_argument('--topk_candidates', default=256, type=int)
-    parser.add_argument('--neg_k', default=256, type=int)
-    parser.add_argument('--kd_lambda', default=0.0, type=float)
-    parser.add_argument('--kd_tau', default=2.0, type=float)
-    parser.add_argument('--count_transform', default='log1p', type=str, choices=['none', 'log1p'])
     parser.add_argument('--use_hypernet', action='store_true', default=False)
     parser.add_argument('--hypernet_in', default='rule_weight', type=str, choices=['rule_weight', 'rule_emb', 'concat'])
     parser.add_argument('--hypernet_hidden_dim', default=128, type=int)

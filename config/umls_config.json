@@ -36,12 +36,6 @@
     "weight_decay": 0,
     "num_iters": 20,
 
-    "topk_candidates": 64,
-    "neg_k": 32,
-    "kd_lambda": 0.2,
-    "kd_tau": 2.0,
-    "count_transform": "log1p",
-
     "use_hypernet": true,
     "hypernet_in": "rule_weight",
     "hypernet_hidden_dim": 128,
