@@ -35,9 +35,10 @@
     "g_lr": 0.0001,
     "weight_decay": 0,
     "num_iters": 20,
-
-    "use_hypernet": true,
-    "hypernet_in": "rule_weight",
-    "hypernet_hidden_dim": 128,
-    "hypernet_dropout": 0.1
+    
+    "use_rule_conf": true,
+    "rule_conf_init": 0.5,
+    "rule_conf_reg": 0.0005,
+    "rule_conf_log_every": 10,
+    "count_transform": "log1p"
 }

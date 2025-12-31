@@ -404,20 +404,21 @@ class GroundTrainer(object):
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
         
         self.model.eval_compute_rule_weight(self.device)
-        try:
-            logging.info(
-                'Grounding config: use_hypernet=%s hypernet_in=%s',
-                getattr(args, 'use_hypernet', None),
-                getattr(args, 'hypernet_in', None),
-            )
-        except Exception:
-            pass
         if hasattr(self.model, 'rules_weight_emb'):
             logging.info('rules_weight_emb shape: %s', tuple(self.model.rules_weight_emb.size()))
 
 
         
         logging.info('>>>>> RulE: Grounding-Training')
+        if getattr(self.model, "use_rule_conf", False):
+            logging.info(
+                "Grounding config: use_rule_conf=%s rule_conf_init=%s rule_conf_reg=%s rule_conf_log_every=%s count_transform=%s",
+                getattr(args, "use_rule_conf", False),
+                getattr(args, "rule_conf_init", None),
+                getattr(args, "rule_conf_reg", 0.0),
+                getattr(args, "rule_conf_log_every", None),
+                getattr(args, "count_transform", "none"),
+            )
         
 
         best_valid_mrr = 0.0 
@@ -509,6 +510,11 @@ class GroundTrainer(object):
 
             rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
             loss = -(rule_logits * target).sum() / torch.clamp(target.sum(), min=1)
+
+            rule_conf_reg = float(getattr(args, "rule_conf_reg", 0.0))
+            if rule_conf_reg > 0 and getattr(model, "use_rule_conf", False) and hasattr(model, "rule_conf"):
+                loss = loss + rule_conf_reg * (model.rule_conf.weight ** 2).mean()
+
             loss.backward()
 
             optimizer.step()
@@ -519,6 +525,19 @@ class GroundTrainer(object):
             
             if (batch_id + 1) % print_every == 0:
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
+                if getattr(model, "use_rule_conf", False) and hasattr(model, "rule_conf"):
+                    log_every = int(getattr(args, "rule_conf_log_every", 0) or 0)
+                    if log_every > 0 and ((batch_id + 1) % log_every == 0):
+                        with torch.no_grad():
+                            conf_all = torch.sigmoid(model.rule_conf.weight.detach())
+                            logging.info(
+                                "RuleConf global: rules=%s conf(mean=%.4g std=%.4g min=%.4g max=%.4g)",
+                                int(conf_all.numel()),
+                                conf_all.mean().item(),
+                                conf_all.std(unbiased=False).item() if conf_all.numel() > 1 else 0.0,
+                                conf_all.min().item(),
+                                conf_all.max().item(),
+                            )
                 
                 total_loss = 0.0
                 total_size = 0.0

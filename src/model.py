@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import logging, math
-from layers import MLP, FuncToNodeSum, RuleHyperNet
+from layers import MLP, FuncToNodeSum
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -17,10 +17,10 @@ class RulE(torch.nn.Module):
         hidden_dim,
         device,
         dataset,
-        use_hypernet=False,
-        hypernet_in="rule_weight",
-        hypernet_hidden_dim=128,
-        hypernet_dropout=0.0,
+        use_rule_conf=False,
+        count_transform="none",
+        rule_conf_init=0.5,
+        rule_conf_log_every=200,
     ):
         super(RulE, self).__init__()
         self.graph = graph
@@ -39,8 +39,12 @@ class RulE(torch.nn.Module):
         self.p = p_norm
 
         self.mlp_rule_dim = mlp_rule_dim
-        self.use_hypernet = use_hypernet
-        self.hypernet_in = hypernet_in
+
+        self.use_rule_conf = bool(use_rule_conf)
+        self.count_transform = str(count_transform or "none")
+        self.rule_conf_init = float(rule_conf_init)
+        self.rule_conf_log_every = int(rule_conf_log_every)
+        self._forward_calls = 0
 
         
         self.rule_to_entity = FuncToNodeSum(self.mlp_rule_dim)
@@ -108,21 +112,14 @@ class RulE(torch.nn.Module):
         
         self.pi = 3.14159262358979323846
 
-        if self.use_hypernet:
-            if self.hypernet_in == "rule_weight" or self.hypernet_in == "rule_emb":
-                hyper_in_dim = self.hidden_dim
-            elif self.hypernet_in == "concat":
-                hyper_in_dim = self.hidden_dim * 2
-            else:
-                raise ValueError("hypernet_in must be one of: rule_weight, rule_emb, concat")
-            self.rule_hypernet = RuleHyperNet(
-                input_dim=hyper_in_dim,
-                output_dim=self.mlp_rule_dim,
-                hidden_dim=hypernet_hidden_dim,
-                dropout=hypernet_dropout,
-            )
-        self._forward_calls = 0
-        self._hypernet_log_every = 200
+    def _transform_count(self, rule_count: torch.Tensor) -> torch.Tensor:
+        if self.count_transform == "none":
+            return rule_count
+        if self.count_transform == "log1p":
+            return torch.log1p(rule_count)
+        if self.count_transform == "sqrt":
+            return torch.sqrt(rule_count)
+        raise ValueError(f"Unknown count_transform={self.count_transform!r}")
 
     # def add_param(self):
 
@@ -180,6 +177,12 @@ class RulE(torch.nn.Module):
         
         nn.init.kaiming_uniform_(self.mlp_feature, a=math.sqrt(5), mode="fan_in")
 
+        if self.use_rule_conf:
+            self.rule_conf = nn.Embedding(self.num_rules, 1)
+            init = min(max(self.rule_conf_init, 1e-4), 1.0 - 1e-4)
+            init_logit = math.log(init / (1.0 - init))
+            nn.init.constant_(self.rule_conf.weight, init_logit)
+
         self.rule_emb = torch.nn.Embedding(self.num_rules, self.rule_dim)
         nn.init.kaiming_uniform_(self.rule_emb.weight, a=math.sqrt(5), mode="fan_in")
         # nn.init.uniform_(
@@ -215,14 +218,6 @@ class RulE(torch.nn.Module):
                 self.rule_end_node[rule_id] = node_id
 
             self.rule_tries[r_head] = (children, end_rule_ids)
-            num_end_nodes = sum(1 for ids in end_rule_ids if ids)
-            logging.info(
-                "Built rule trie for relation=%s: rules=%s nodes=%s end_nodes=%s",
-                r_head,
-                len(rules),
-                len(children),
-                num_end_nodes,
-            )
 
     def _ground_rule_trie(self, all_h, query_r, edges_to_remove):
         children, end_rule_ids = self.rule_tries[query_r]
@@ -445,7 +440,7 @@ class RulE(torch.nn.Module):
         query_r = all_r[0].item()
         assert (all_r != query_r).sum() == 0
         device = all_r.device
-
+        
         if device.type == "cuda":
             self.rule_features = self.rule_features.cuda(device)
 
@@ -455,12 +450,6 @@ class RulE(torch.nn.Module):
         
         candidate_strength = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
         if hasattr(self, "rule_tries") and self.rule_tries[query_r] is not None:
-            logging.info(
-                "Using trie grounding for relation=%s rules=%s batch=%s",
-                query_r,
-                len(self.relation2rules[query_r]),
-                all_h.size(0),
-            )
             node_count, node_multiplicity = self._ground_rule_trie(all_h, query_r, edges_to_remove)
 
             for node_id, mult in node_multiplicity.items():
@@ -473,12 +462,6 @@ class RulE(torch.nn.Module):
                 rule_index.append(index)
                 rule_count.append(count)
         else:
-            logging.info(
-                "Using per-rule grounding for relation=%s rules=%s batch=%s",
-                query_r,
-                len(self.relation2rules[query_r]),
-                all_h.size(0),
-            )
             for index, (r_head, r_body) in self.relation2rules[query_r]:
 
                 assert r_head == query_r
@@ -511,45 +494,40 @@ class RulE(torch.nn.Module):
         rule_count = torch.stack(rule_count, dim=0)
 
         rule_count = rule_count.reshape(rule_index.size(0), -1)[:, candidate_set]
+
+        if self.count_transform != "none":
+            rule_count = self._transform_count(rule_count)
+
+        if self.use_rule_conf:
+            if not hasattr(self, "rule_conf"):
+                raise RuntimeError("use_rule_conf=True but rule_conf not initialized; call set_rules() first")
+            conf = torch.sigmoid(self.rule_conf(rule_index)).view(-1, 1)
+            rule_count = rule_count * conf
+
+            if self.rule_conf_log_every > 0 and (self._forward_calls % self.rule_conf_log_every == 0):
+                with torch.no_grad():
+                    conf_mean = conf.mean().item()
+                    conf_std = conf.std(unbiased=False).item() if conf.numel() > 1 else 0.0
+                    conf_min = conf.min().item()
+                    conf_max = conf.max().item()
+                    logging.info(
+                        "RuleConf stats: relation=%s rules=%s candidates=%s count_transform=%s conf(mean=%.4g std=%.4g min=%.4g max=%.4g)",
+                        query_r,
+                        int(rule_index.numel()),
+                        int(candidate_set.numel()),
+                        self.count_transform,
+                        conf_mean,
+                        conf_std,
+                        conf_min,
+                        conf_max,
+                    )
         
         rule_weight_emb = self.rules_weight_emb[rule_index]
 
-        if self.use_hypernet:
-            if self.hypernet_in == "rule_weight":
-                hyper_in = rule_weight_emb
-            elif self.hypernet_in == "rule_emb":
-                hyper_in = self.rule_emb(rule_index)
-            else:  # concat
-                hyper_in = torch.cat([self.rule_emb(rule_index), rule_weight_emb], dim=-1)
-            mlp_feature = self.rule_hypernet(hyper_in)
-        else:
-            mlp_feature = self.mlp_feature[rule_index]
+        mlp_feature = self.mlp_feature[rule_index]
 
         # output = self.rule_to_entity(rule_count, mlp_feature)
         output = self.rule_to_entity(rule_count, rule_weight_emb, mlp_feature)
-        if self.use_hypernet and (self._forward_calls % self._hypernet_log_every == 0):
-            with torch.no_grad():
-                try:
-                    rw_mean = rule_weight_emb.mean().item()
-                    rw_std = rule_weight_emb.std(unbiased=False).item()
-                    mf_mean = mlp_feature.mean().item()
-                    mf_std = mlp_feature.std(unbiased=False).item()
-                    out_mean = output.mean().item()
-                    out_std = output.std(unbiased=False).item()
-                    logging.info(
-                        "HyperNet stats: relation=%s hypernet_in=%s hyper_in=%s rule_weight_emb(mean=%.4g std=%.4g) mlp_feature(mean=%.4g std=%.4g) agg_out(mean=%.4g std=%.4g)",
-                        query_r,
-                        self.hypernet_in,
-                        tuple(hyper_in.shape),
-                        rw_mean,
-                        rw_std,
-                        mf_mean,
-                        mf_std,
-                        out_mean,
-                        out_std,
-                    )
-                except Exception as e:
-                    logging.info("HyperNet stats logging failed: %s", e)
 
 
         # rel = self.relation_embedding(all_r[0]%self.num_relations)

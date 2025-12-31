@@ -84,11 +84,27 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
-    parser.add_argument('--use_hypernet', action='store_true', default=False)
-    parser.add_argument('--hypernet_in', default='rule_weight', type=str, choices=['rule_weight', 'rule_emb', 'concat'])
-    parser.add_argument('--hypernet_hidden_dim', default=128, type=int)
-    parser.add_argument('--hypernet_dropout', default=0.0, type=float)
+
+    # Grounding innovations
+    parser.add_argument('--use_rule_conf', action='store_true', default=False)
+    parser.add_argument('--rule_conf_init', default=0.5, type=float)
+    parser.add_argument('--rule_conf_reg', default=0.0, type=float)
+    parser.add_argument('--rule_conf_log_every', default=200, type=int)
+    parser.add_argument('--count_transform', default="none", type=str)
     return parser.parse_args(args)
+
+def _ensure_defaults(args):
+    defaults = {
+        "use_rule_conf": False,
+        "rule_conf_init": 0.5,
+        "rule_conf_reg": 0.0,
+        "rule_conf_log_every": 200,
+        "count_transform": "none",
+    }
+    for key, value in defaults.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+    return args
 
 def main():
     args = parse_args()
@@ -97,6 +113,9 @@ def main():
     if args.init_checkpoint_config:
         args = load_config(args.init_checkpoint_config)
         args = args[0]
+    args = _ensure_defaults(args)
+    if args.use_rule_conf and args.count_transform == "none":
+        args.count_transform = "log1p"
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -139,10 +158,10 @@ def main():
         args.hidden_dim,
         device,
         args.data_path,
-        use_hypernet=getattr(args, 'use_hypernet', False),
-        hypernet_in=getattr(args, 'hypernet_in', 'rule_weight'),
-        hypernet_hidden_dim=getattr(args, 'hypernet_hidden_dim', 128),
-        hypernet_dropout=getattr(args, 'hypernet_dropout', 0.0),
+        use_rule_conf=args.use_rule_conf,
+        count_transform=args.count_transform,
+        rule_conf_init=args.rule_conf_init,
+        rule_conf_log_every=args.rule_conf_log_every,
     )
     RulE_model.set_rules(rules)
 
@@ -179,7 +198,7 @@ def main():
     # load rule embedding and KGE embedding
 
     checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
-    RulE_model.load_state_dict(checkpoint['model'])
+    RulE_model.load_state_dict(checkpoint['model'],strict=False)
     
     
     logging.info('Test the results of pre-training')

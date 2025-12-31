@@ -72,19 +72,6 @@ class FuncToNodeSum(nn.Module):
         
         return output
 
-
-class RuleHyperNet(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim=128, dropout=0.0):
-        super(RuleHyperNet, self).__init__()
-        self.mlp = MLP(input_dim, [hidden_dim, output_dim], dropout=dropout)
-        self.layer_norm = nn.LayerNorm(output_dim)
-
-    def forward(self, x):
-        out = self.mlp(x)
-        out = self.layer_norm(out)
-        return torch.relu(out)
-
-
     # def forward(self, A_fn, x_f):
         
     #     # batch_size = b_n.max().item() + 1

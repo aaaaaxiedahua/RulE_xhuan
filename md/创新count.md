@@ -264,3 +264,288 @@
   - 每 step 更快，且不再出现 OOM
 
   ———
+
+  ================================新方案
+   - 1) 把 grounding 从“计数”改成“概率传播”(random-walk style)
+      - 现在 propagate 是 scatter(sum)，等价于路径数累加，hub 会爆
+        炸。
+      - 改成：每条边的 message 乘一个归一系数（例如按出度/入度做
+        1/deg 或 1/sqrt(deg)），再传播；再配一个 hop 衰减 λ^step。
+      - 落点：src/data.py 的 KnowledgeGraph.propagate()（只动这里
+        就全局生效）。
+      - 直觉：你在学“到达概率/可靠性”，不是“组合数”，通常更稳更
+        准。
+  - 2) 规则证据的合并从“加和”改成 Noisy-OR / LogSumExp（不需要
+    MLP）
+      - 现在多条规则命中同一实体会被线性叠加，容易把“重复证据”当
+        成“更真”。
+      - 改成：每条规则给一个支持概率 p_r(e)（可由 count 单调映射，
+        如 p=1-exp(-α·count) 或 sigmoid(α·log1p(count)+b)），多规
+        则合并 p(e)=1-∏(1-p_r(e))；最后用 logit(p) 当 score。
+      - 落点：src/model.py 里汇总 candidate_strength / rule_count
+        的地方。
+      - 直觉：更符合“至少一条规则成立”的逻辑语义，常见能提升
+        precision。
+  - 3) 规则嵌入的组合改成 RotatE 一致的“相位可组合”
+      - 你现在的 add_ruleE/add_ruleE_g 更像 TransE（body embedding
+        求和 + Lp 距离），但事实 KGE 用的是 RotatE（相位旋转）。
+      - 改成：把关系 embedding 映射到相位，规则体组合用相位相加
+        （考虑 inverse 符号），再和 head relation 相位对齐（距离/
+        相似度）。
+      - 落点：src/model.py 的 add_ruleE()、add_ruleE_g()（改动集
+        中，逻辑更自洽，常见提升泛化）。
+  - 4) “长度偏置/可靠性先验”用标量表而不是 MLP
+      - 很多数据集长规则噪声大：给每个 rule 一个可学习标量
+        c_rule（或按长度一个 c_len），在 grounding 结果上做单调缩
+        放（例如 count ← c_rule * log1p(count)）。
+      - 落点：src/model.py（加一个 nn.Embedding(num_rules, 1) 或
+        nn.Parameter 长度表）。
+      - 这不是 MLP，但常常能稳住规则噪声。
+
+
+
+
+=======================================================新方案2
+ ## 方案 1：count 压缩（log1p/sqrt）+（可选）归一化后再聚合（小改
+  动，最稳）
+
+  核心想法
+
+  - 你现在 count 是路径数累加，分布极长尾；少数 hub/多路径候选会把
+    信号“撑爆”，训练会学成“谁路径多谁靠前”。
+  - 用单调压缩把长尾拉平，让“有证据”更重要，“证据爆炸”不至于碾压。
+
+  怎么改（落点）
+
+  - 在 src/model.py:490 之后、src/model.py:497 之前插入变换：
+      - rule_count = log1p(rule_count) 或 rule_count =
+        sqrt(rule_count)
+      - 可选归一化（两种常用）：
+          - 按候选归一化（推荐先试）：对每个候选实体列归一化，让不
+            同规则对同一候选的贡献是“比例”
+              - rule_count /= (rule_count.sum(dim=0, keepdim=True)
+                + eps)
+          - 按规则归一化：对每条规则行归一化，减少“某条规则整体命
+            中特别多”导致的偏置
+              - rule_count /= (rule_count.sum(dim=1, keepdim=True)
+                + eps)
+
+  为什么可能提升效果
+
+  - 依然保留“命中次数越多越强”的排序趋势，但抑制组合爆炸，通常对
+    kinship/UMLS 这种规则密集图更稳。
+
+  需要调的超参
+
+  - eps：1e-8 或 1e-6
+  - 选 log1p 还是 sqrt：一般 log1p 更强力
+
+  风险
+
+  - 压缩过强可能损失“多路径=真”的有效信号（一般小于方案 3/6 的风
+    险）
+
+  ———
+
+  ## 方案 2：多规则融合改成 Noisy-OR / LogSumExp（小到中改动，语义
+  更像逻辑 OR）
+
+  核心想法
+
+  - 规则推理更接近“至少一条规则支持就成立”，而不是“支持越多越真
+    （线性叠加）”。
+  - 线性叠加会把重复规则/同质路径当作多份独立证据，容易过拟合噪
+    声。
+
+  两种实现形态
+
+  1. Noisy-OR（概率 OR）
+
+  - 对每条规则对实体的支持 count 先映射成概率 p_r(e)（单调即可）：
+      - 常用：p_r(e) = 1 - exp(-α * log1p(count))
+  - 合并：p(e) = 1 - ∏_r (1 - p_r(e))
+  - 输出分数：score_rule(e) = logit(p(e)) 或 log(p(e)+eps)
+
+  2. LogSumExp（软最大）
+
+  - 把每条规则给实体的“证据强度”当成 logit/score，用 LSE 合并：
+      - score_rule(e) = τ * logsumexp(score_r(e)/τ over r)
+  - 直觉：像“取最强的几条规则”，但可微、比 max 稳定
+
+  怎么改（落点）
+
+  - 你可以不经过 FuncToNodeSum，直接从 rule_count（src/
+    model.py:490）构造 score_rule，再写回 score.scatter_（src/
+    model.py:509）那套稀疏候选回填逻辑。
+
+  为什么可能提升效果
+
+  - 去掉“重复证据线性放大”的副作用，常见提升 precision（尤其
+    mined_rules 噪声时）。
+
+  需要调的超参
+
+  - Noisy-OR：α（0.5~5 常见），eps
+  - LSE：温度 τ（0.5~2），eps
+
+  风险
+
+  - 若数据确实需要“多条独立规则累加”才能区分（比如某些关系依赖计
+    数），Noisy-OR 可能削弱区分度；LSE 通常更稳。
+
+  ———
+
+  ## 方案 3：把传播从“路径数累加”改成“概率/度归一传播”（中改动，常
+  见更稳更准）
+
+  核心想法
+
+  - 现在 propagate 是 scatter(sum)：src/data.py:435，它天然偏向高
+    入度/高路径数节点。
+  - 用度归一（random-walk 风格）让传播更像“到达概率/可靠性”，抑制
+    hub。
+
+  怎么改（落点）
+
+  - 在 src/data.py:423 的 propagate() 里给每条边的 message 乘归一
+    系数再 scatter：
+      - 选项 A：按 node_in 的出度 归一（最像随机游走；但你现在未显
+        式维护 node_in 出度，需要在读图时补一个计数）
+      - 选项 B：按 node_out 的入度 归一（你现在已有
+        relation2outdegree，虽然命名是 outdegree，但存的是
+        node_out 被命中的次数；用它也能强力抑制 hub）
+  - 可选加 hop 衰减：在 grounding() 的 for-loop（src/data.py:416）
+    每跳乘 λ，长规则自然更弱。
+
+  为什么可能提升效果
+
+  - 直接从源头减少“组合爆炸+hub 偏置”，候选更干净、排序学习更容
+    易。
+
+  需要调的超参
+
+  - λ（0.6~0.95），归一方式
+
+  风险
+
+  - 改了 count 的语义，会影响已有超参（例如 gamma_rule、学习率）；
+    需要重新调一点点。
+
+  ———
+
+  ## 方案 4：每条规则一个“可靠性标量”（不靠 MLP，极小参数，常见对
+  噪声规则有效）
+
+  核心想法
+
+  - mined_rules 质量参差不齐；你现在每条规则在 grounding 分支里“同
+    等地参与”，只能靠下游学习去抵消噪声。
+  - 给每条规则加一个可学习的标量 c_rule（或按长度 c_len），相当于
+    学习规则置信度/温度。
+
+  怎么改（落点）
+
+  - 在 set_rules() 初始化完 self.mlp_feature 后（附近 src/
+    model.py:179 一带）加：
+      - self.rule_conf = nn.Embedding(num_rules, 1)（或
+        nn.Parameter(num_rules))
+  - 在 forward() 构造 rule_index 后（src/model.py:487），取 conf =
+    sigmoid(self.rule_conf(rule_index))
+  - 用它缩放 rule_count（src/model.py:490）或缩放
+    rule_weight_emb（src/model.py:492）：
+      - 推荐：rule_count = log1p(rule_count) * conf
+
+  为什么可能提升效果
+
+  - 规则多、噪声多时通常有效；特别是 kinship 这种规则命中强但也可
+    能有冗余规则的情况。
+
+  需要调的超参
+
+  - 正则：对 rule_conf 加 L2 或拉向某个先验（比如 0.5），避免全开/
+    全关
+  - 学习率：通常不需要单独调
+
+  风险
+
+  - 规则很少或质量很高的数据集提升不明显。
+
+  ———
+
+  ## 方案 5：让规则嵌入的组合“与 RotatE 几何一致”（大改动，偏提升
+  泛化）
+
+  核心想法
+
+  - 事实 KGE 用 RotatE（相位旋转），但你规则打分在 add_ruleE/
+    add_ruleE_g 里更像“向量平移 + Lp”（src/model.py:378、src/
+    model.py:415）。
+  - 规则体组合如果用 RotatE 的相位可组合（相位相加、inverse 用相位
+    取负），会更自洽，常见提升泛化/长尾关系。
+
+  怎么改（落点）
+
+  - 重写 src/model.py:376 的 add_ruleE() 和 src/model.py:389 的
+    add_ruleE_g()：
+      - 把关系 embedding 映射成相位：复用 RotatE 的 phase_relation
+        = relation / (range/pi) 思路
+      - body 相位求和（考虑 inverse 符号），得到 phase_body_sum
+      - head 相位 phase_head
+      - 定义周期距离（避免相位绕圈问题）：比如用 sin/cos 差或
+        atan2 的角距离
+      - 输出规则分数/规则权重用该距离
+
+  为什么可能提升效果
+
+  - 让“规则合理性”和“事实三元组合理性”在同一几何中一致，减少两套空
+    间打架。
+
+  需要调的超参
+
+  - 周期距离形式、温度/边界处理
+
+  风险
+
+  - 改动大，需要重新调 gamma_rule、可能影响 rules_weight_emb 的尺
+    度，属于论文级改法。
+
+  ———
+
+  ## 方案 6：Embedding-guided grounding（软加权传播，不是剪枝）
+  （大改动，最“神经符号”）
+
+  核心想法
+
+  - 现在传播只看结构：边存在就传播，完全不看语义相容性。
+  - 用 KGE/嵌入给每条边一个权重，让“语义更匹配的路径”贡献更大。
+
+  怎么改（落点）
+
+  - 需要把传播从 KnowledgeGraph 迁移/复制到模型侧（因为边权要用
+    entity_embedding/relation_embedding，图类拿不到）。
+  - 对每条边 (u -r-> v) 计算权重，例如：
+      - w = softplus( RotatE_score(u,r,v) / τ ) 或 sigmoid(score/
+        τ)
+  - 传播：scatter_add(x[u]*w, v)，再做归一化（防止数值爆炸）
+
+  为什么可能提升效果
+
+  - 从根上减少“结构可达但语义不对”的假候选，特别对噪声路径多的数据
+    集有效。
+
+  需要调的超参
+
+  - 温度 τ、归一方式、是否每 hop 重新归一
+
+  风险
+
+  - 计算量显著上升（通常要配合 beam 或稀疏 frontier 才能跑大图）。
+
+  ———
+
+  ### 推荐的实验顺序（最少代价找增益）
+
+  1. 方案 1（log1p + 可选归一化）
+  2. 方案 4（rule_conf 标量）
+  3. 方案 2（先试 LogSumExp 融合，比 Noisy-OR 更稳）
+  4. 再考虑方案 3/5/6（属于“改语义/大改”）
