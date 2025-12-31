@@ -248,14 +248,6 @@ class RulE(torch.nn.Module):
                     propagate_calls += 1
                     stack.append((child_id, x_child))
 
-        logging.info(
-            "Trie grounding relation=%s: visited_nodes=%s propagate_calls=%s end_nodes_hit=%s edges_to_remove=%s",
-            query_r,
-            visited_nodes,
-            propagate_calls,
-            len(node_count),
-            edges_to_remove is not None,
-        )
         return node_count, node_multiplicity
         
        
@@ -475,14 +467,6 @@ class RulE(torch.nn.Module):
 
 
         candidate_mask = candidate_strength > 0
-        try:
-            cand_per_query = candidate_mask.sum(dim=1).detach().cpu().tolist()
-            logging.info(
-                "Candidate entities (count>0) per query in batch: %s",
-                cand_per_query,
-            )
-        except Exception:
-            pass
         if candidate_strength.sum().item() == 0:
             score = candidate_strength + self.bias.unsqueeze(0)
             return score, candidate_mask, candidate_strength
