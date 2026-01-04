@@ -412,12 +412,8 @@ class GroundTrainer(object):
         logging.info('>>>>> RulE: Grounding-Training')
         if getattr(self.model, "use_rule_conf", False):
             logging.info(
-                "Grounding config: use_rule_conf=%s rule_conf_init=%s rule_conf_reg=%s rule_conf_log_every=%s count_transform=%s",
+                "Grounding config: use_rule_conf=%s",
                 getattr(args, "use_rule_conf", False),
-                getattr(args, "rule_conf_init", None),
-                getattr(args, "rule_conf_reg", 0.0),
-                getattr(args, "rule_conf_log_every", None),
-                getattr(args, "count_transform", "none"),
             )
         
 
@@ -511,10 +507,6 @@ class GroundTrainer(object):
             rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
             loss = -(rule_logits * target).sum() / torch.clamp(target.sum(), min=1)
 
-            rule_conf_reg = float(getattr(args, "rule_conf_reg", 0.0))
-            if rule_conf_reg > 0 and getattr(model, "use_rule_conf", False) and hasattr(model, "rule_conf"):
-                loss = loss + rule_conf_reg * (model.rule_conf.weight ** 2).mean()
-
             loss.backward()
 
             optimizer.step()
@@ -525,19 +517,22 @@ class GroundTrainer(object):
             
             if (batch_id + 1) % print_every == 0:
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
-                if getattr(model, "use_rule_conf", False) and hasattr(model, "rule_conf"):
-                    log_every = int(getattr(args, "rule_conf_log_every", 0) or 0)
-                    if log_every > 0 and ((batch_id + 1) % log_every == 0):
-                        with torch.no_grad():
-                            conf_all = torch.sigmoid(model.rule_conf.weight.detach())
-                            logging.info(
-                                "RuleConf global: rules=%s conf(mean=%.4g std=%.4g min=%.4g max=%.4g)",
-                                int(conf_all.numel()),
-                                conf_all.mean().item(),
-                                conf_all.std(unbiased=False).item() if conf_all.numel() > 1 else 0.0,
-                                conf_all.min().item(),
-                                conf_all.max().item(),
-                            )
+                if getattr(model, "use_rule_conf", False) and hasattr(model, "_last_rule_conf_stats"):
+                    stats = getattr(model, "_last_rule_conf_stats") or {}
+                    if stats:
+                        logging.info(
+                            "RuleConf L2: rel=%s rules=%s heads=%s cand=%s conf(mean=%.4g std=%.4g min=%.4g max=%.4g) top=%s bottom=%s",
+                            stats.get("relation"),
+                            stats.get("rules"),
+                            stats.get("heads"),
+                            stats.get("candidates"),
+                            stats.get("conf_mean", 0.0),
+                            stats.get("conf_std", 0.0),
+                            stats.get("conf_min", 0.0),
+                            stats.get("conf_max", 0.0),
+                            stats.get("top_rules", []),
+                            stats.get("bot_rules", []),
+                        )
                 
                 total_loss = 0.0
                 total_size = 0.0

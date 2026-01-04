@@ -87,19 +87,19 @@ def parse_args(args=None):
 
     # Grounding innovations
     parser.add_argument('--use_rule_conf', action='store_true', default=False)
-    parser.add_argument('--rule_conf_init', default=0.5, type=float)
-    parser.add_argument('--rule_conf_reg', default=0.0, type=float)
-    parser.add_argument('--rule_conf_log_every', default=200, type=int)
-    parser.add_argument('--count_transform', default="none", type=str)
+    parser.add_argument('--rule_conf_dim', default=256, type=int)
+    parser.add_argument('--rule_conf_num_layers', default=1, type=int)
+    parser.add_argument('--rule_conf_dropout', default=0.0, type=float)
+    parser.add_argument('--rule_conf_bidirectional', action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args(args)
 
 def _ensure_defaults(args):
     defaults = {
         "use_rule_conf": False,
-        "rule_conf_init": 0.5,
-        "rule_conf_reg": 0.0,
-        "rule_conf_log_every": 200,
-        "count_transform": "none",
+        "rule_conf_dim": 256,
+        "rule_conf_num_layers": 1,
+        "rule_conf_dropout": 0.0,
+        "rule_conf_bidirectional": True,
     }
     for key, value in defaults.items():
         if not hasattr(args, key):
@@ -114,8 +114,6 @@ def main():
         args = load_config(args.init_checkpoint_config)
         args = args[0]
     args = _ensure_defaults(args)
-    if args.use_rule_conf and args.count_transform == "none":
-        args.count_transform = "log1p"
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -159,9 +157,10 @@ def main():
         device,
         args.data_path,
         use_rule_conf=args.use_rule_conf,
-        count_transform=args.count_transform,
-        rule_conf_init=args.rule_conf_init,
-        rule_conf_log_every=args.rule_conf_log_every,
+        rule_conf_dim=args.rule_conf_dim,
+        rule_conf_num_layers=args.rule_conf_num_layers,
+        rule_conf_dropout=args.rule_conf_dropout,
+        rule_conf_bidirectional=args.rule_conf_bidirectional,
     )
     RulE_model.set_rules(rules)
 

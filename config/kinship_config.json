@@ -36,9 +36,9 @@
     "weight_decay": 0,
     "num_iters": 10,
 
-    "use_rule_conf": true,
-    "rule_conf_init": 0.5,
-    "rule_conf_reg": 0.0001,
-    "rule_conf_log_every": 10,
-    "count_transform": "log1p"
+    "use_rule_conf": false,
+    "rule_conf_dim": 256,
+    "rule_conf_num_layers": 1,
+    "rule_conf_dropout": 0.0,
+    "rule_conf_bidirectional": true
 }
