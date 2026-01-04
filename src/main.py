@@ -90,7 +90,11 @@ def parse_args(args=None):
     parser.add_argument('--rule_conf_dim', default=256, type=int)
     parser.add_argument('--rule_conf_num_layers', default=1, type=int)
     parser.add_argument('--rule_conf_dropout', default=0.0, type=float)
-    parser.add_argument('--rule_conf_bidirectional', action=argparse.BooleanOptionalAction, default=True)
+    # argparse.BooleanOptionalAction is only available in Python 3.9+
+    bidir = parser.add_mutually_exclusive_group()
+    bidir.add_argument('--rule_conf_bidirectional', dest='rule_conf_bidirectional', action='store_true')
+    bidir.add_argument('--no_rule_conf_bidirectional', dest='rule_conf_bidirectional', action='store_false')
+    parser.set_defaults(rule_conf_bidirectional=True)
     return parser.parse_args(args)
 
 def _ensure_defaults(args):
