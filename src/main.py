@@ -84,30 +84,13 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+    parser.add_argument('--topk_candidates', default=0, type=int)
 
-    # Grounding innovations
-    parser.add_argument('--use_rule_conf', action='store_true', default=False)
-    parser.add_argument('--rule_conf_dim', default=256, type=int)
-    parser.add_argument('--rule_conf_num_layers', default=1, type=int)
-    parser.add_argument('--rule_conf_dropout', default=0.0, type=float)
-    # argparse.BooleanOptionalAction is only available in Python 3.9+
-    bidir = parser.add_mutually_exclusive_group()
-    bidir.add_argument('--rule_conf_bidirectional', dest='rule_conf_bidirectional', action='store_true')
-    bidir.add_argument('--no_rule_conf_bidirectional', dest='rule_conf_bidirectional', action='store_false')
-    parser.set_defaults(rule_conf_bidirectional=True)
     return parser.parse_args(args)
 
 def _ensure_defaults(args):
-    defaults = {
-        "use_rule_conf": False,
-        "rule_conf_dim": 256,
-        "rule_conf_num_layers": 1,
-        "rule_conf_dropout": 0.0,
-        "rule_conf_bidirectional": True,
-    }
-    for key, value in defaults.items():
-        if not hasattr(args, key):
-            setattr(args, key, value)
+    if not hasattr(args, "topk_candidates"):
+        setattr(args, "topk_candidates", 0)
     return args
 
 def main():
@@ -160,11 +143,6 @@ def main():
         args.hidden_dim,
         device,
         args.data_path,
-        use_rule_conf=args.use_rule_conf,
-        rule_conf_dim=args.rule_conf_dim,
-        rule_conf_num_layers=args.rule_conf_num_layers,
-        rule_conf_dropout=args.rule_conf_dropout,
-        rule_conf_bidirectional=args.rule_conf_bidirectional,
     )
     RulE_model.set_rules(rules)
 

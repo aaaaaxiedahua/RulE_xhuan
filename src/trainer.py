@@ -410,11 +410,6 @@ class GroundTrainer(object):
 
         
         logging.info('>>>>> RulE: Grounding-Training')
-        if getattr(self.model, "use_rule_conf", False):
-            logging.info(
-                "Grounding config: use_rule_conf=%s",
-                getattr(args, "use_rule_conf", False),
-            )
         
 
         best_valid_mrr = 0.0 
@@ -441,7 +436,11 @@ class GroundTrainer(object):
             #     warm_up_steps = warm_up_steps * 3
 
             self.train_step( optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args)
-            valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+            topk_candidates = int(getattr(args, "topk_candidates", 0) or 0)
+            if topk_candidates > 0:
+                valid_mrr_iter = self.evaluate_t('valid', args.alpha, expectation=True, topk_candidates=topk_candidates)
+            else:
+                valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
             # test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
             # test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
             
@@ -459,9 +458,15 @@ class GroundTrainer(object):
         checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding.pt'))
         self.model.load_state_dict(checkpoint['model'])
         
-        test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
-        test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
-        test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+        topk_candidates = int(getattr(args, "topk_candidates", 0) or 0)
+        if topk_candidates > 0:
+            test_mrr_iter = self.evaluate_t('valid', args.alpha, expectation=True, topk_candidates=topk_candidates)
+            test_mrr_iter = self.evaluate_t('test', args.alpha, expectation=True, topk_candidates=topk_candidates)
+            test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True, topk_candidates=topk_candidates)
+        else:
+            test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+            test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
+            test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
 
 
        
@@ -473,6 +478,13 @@ class GroundTrainer(object):
         model = self.model
         
         model.train()
+
+        topk_candidates = int(getattr(args, "topk_candidates", 0) or 0)
+        if topk_candidates > 0:
+            topk_total = 0
+            topk_hit = 0
+            cand_total = 0
+            pos_total = 0
 
         total_loss = 0.0
         total_size = 0.0
@@ -504,8 +516,41 @@ class GroundTrainer(object):
             
             grounding_rule_score, _, _ = model(all_h, all_r, edges_to_remove)
 
-            rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
-            loss = -(rule_logits * target).sum() / torch.clamp(target.sum(), min=1)
+            if topk_candidates > 0:
+                k = min(topk_candidates, int(self.train_set.graph.entity_size))
+                with torch.no_grad():
+                    kge_score = model.compute_g_KGE(all_h, all_r)
+                    topk_idx = torch.topk(kge_score, k=k, dim=1).indices
+
+                    topk_total += int(all_t.numel())
+                    topk_hit += int((topk_idx == all_t.unsqueeze(1)).any(dim=1).sum().item())
+                    pos_total += int((target > 0).sum().item())
+
+                    cand_lists = []
+                    max_len = 0
+                    for row in range(int(all_h.numel())):
+                        pos = torch.nonzero(target[row] > 0, as_tuple=False).view(-1)
+                        cand = torch.unique(torch.cat([topk_idx[row], pos], dim=0))
+                        cand_lists.append(cand)
+                        cand_total += int(cand.numel())
+                        max_len = max(max_len, int(cand.numel()))
+
+                    cand_ids = torch.full((int(all_h.numel()), max_len), -1, dtype=torch.long, device=all_h.device)
+                    for row, cand in enumerate(cand_lists):
+                        cand_ids[row, : cand.numel()] = cand
+
+                gather_ids = cand_ids.clamp(min=0)
+                logits_c = grounding_rule_score.gather(1, gather_ids)
+                logits_c = logits_c.masked_fill(cand_ids < 0, -1e9)
+
+                target_c = target.gather(1, gather_ids)
+                target_c = target_c.masked_fill(cand_ids < 0, 0.0)
+
+                logp = torch.log_softmax(logits_c, dim=1)
+                loss = -(logp * target_c).sum() / torch.clamp(target_c.sum(), min=1)
+            else:
+                rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
+                loss = -(rule_logits * target).sum() / torch.clamp(target.sum(), min=1)
 
             loss.backward()
 
@@ -517,22 +562,18 @@ class GroundTrainer(object):
             
             if (batch_id + 1) % print_every == 0:
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
-                if getattr(model, "use_rule_conf", False) and hasattr(model, "_last_rule_conf_stats"):
-                    stats = getattr(model, "_last_rule_conf_stats") or {}
-                    if stats:
-                        logging.info(
-                            "RuleConf L2: rel=%s rules=%s heads=%s cand=%s conf(mean=%.4g std=%.4g min=%.4g max=%.4g) top=%s bottom=%s",
-                            stats.get("relation"),
-                            stats.get("rules"),
-                            stats.get("heads"),
-                            stats.get("candidates"),
-                            stats.get("conf_mean", 0.0),
-                            stats.get("conf_std", 0.0),
-                            stats.get("conf_min", 0.0),
-                            stats.get("conf_max", 0.0),
-                            stats.get("top_rules", []),
-                            stats.get("bot_rules", []),
-                        )
+                if topk_candidates > 0 and topk_total > 0:
+                    logging.info(
+                        "TopK train: K=%s hit@K=%.4f avg_candidates=%.2f avg_pos=%.2f",
+                        int(topk_candidates),
+                        float(topk_hit) / float(topk_total),
+                        float(cand_total) / float(topk_total),
+                        float(pos_total) / float(topk_total),
+                    )
+                    topk_total = 0
+                    topk_hit = 0
+                    cand_total = 0
+                    pos_total = 0
                 
                 total_loss = 0.0
                 total_size = 0.0
@@ -640,7 +681,7 @@ class GroundTrainer(object):
 
 
     @torch.no_grad()
-    def evaluate_t(self, split, alpha=3.0, expectation=True):
+    def evaluate_t(self, split, alpha=3.0, expectation=True, topk_candidates=0):
        
         logging.info('>>>>> Predictor: Evaluating on {}'.format(split))
         test_set = getattr(self, "%s_set" % split)
@@ -654,6 +695,8 @@ class GroundTrainer(object):
         concat_all_r = []
         concat_all_t = []
         concat_flag = []
+        topk_hit = 0
+        topk_total = 0
         
         for batch in tqdm(dataloader):
 
@@ -669,11 +712,20 @@ class GroundTrainer(object):
                 all_t = all_t.cuda(device=self.device)
                 flag = flag.cuda(device=self.device)
 
-            logits, _, _ = model(all_h, all_r, None)
+            rule_logits, _, _ = model(all_h, all_r, None)
+            kge_score = model.compute_g_KGE(all_h, all_r)
 
-            kge_score = model.compute_g_KGE(all_h,all_r)
-            
-            logits = logits + alpha * kge_score
+            topk_candidates = int(topk_candidates or 0)
+            if topk_candidates > 0:
+                k = min(topk_candidates, int(test_set.graph.entity_size))
+                topk_idx = torch.topk(kge_score, k=k, dim=1).indices
+                topk_total += int(all_t.numel())
+                topk_hit += int((topk_idx == all_t.unsqueeze(1)).any(dim=1).sum().item())
+                mask = torch.zeros_like(kge_score, dtype=torch.bool)
+                mask.scatter_(1, topk_idx, True)
+                logits = alpha * kge_score + rule_logits.masked_fill(~mask, 0.0)
+            else:
+                logits = rule_logits + alpha * kge_score
 
             concat_logits.append(logits)
             concat_all_h.append(all_h)
@@ -733,6 +785,12 @@ class GroundTrainer(object):
 
         
         logging.info('Data : {}'.format(len(query2LH)))
+        if int(topk_candidates or 0) > 0 and topk_total > 0:
+            logging.info(
+                'TopK recall@%d (KGE): %.6f',
+                int(topk_candidates),
+                float(topk_hit) / float(topk_total),
+            )
         logging.info('Hit1 : {:.6f}'.format(hit1))
         logging.info('Hit3 : {:.6f}'.format(hit3))
         logging.info('Hit10: {:.6f}'.format(hit10))

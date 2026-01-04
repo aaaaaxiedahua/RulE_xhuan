@@ -34,11 +34,5 @@
     "g_batch_size": 32,
     "g_lr": 0.0005,
     "weight_decay": 0,
-    "num_iters": 10,
-
-    "use_rule_conf": false,
-    "rule_conf_dim": 256,
-    "rule_conf_num_layers": 1,
-    "rule_conf_dropout": 0.0,
-    "rule_conf_bidirectional": true
+    "num_iters": 10
 }

@@ -4,7 +4,7 @@ import torch.nn as nn
 import logging, math
 from layers import MLP, FuncToNodeSum
 
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
+from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
     def __init__(
@@ -17,11 +17,6 @@ class RulE(torch.nn.Module):
         hidden_dim,
         device,
         dataset,
-        use_rule_conf=False,
-        rule_conf_dim=256,
-        rule_conf_num_layers=1,
-        rule_conf_dropout=0.0,
-        rule_conf_bidirectional=True,
     ):
         super(RulE, self).__init__()
         self.graph = graph
@@ -41,35 +36,7 @@ class RulE(torch.nn.Module):
 
         self.mlp_rule_dim = mlp_rule_dim
 
-        self.use_rule_conf = bool(use_rule_conf)
         self._forward_calls = 0
-
-        self.rule_conf_dim = int(rule_conf_dim)
-        self.rule_conf_num_layers = int(rule_conf_num_layers)
-        self.rule_conf_dropout = float(rule_conf_dropout)
-        self.rule_conf_bidirectional = bool(rule_conf_bidirectional)
-
-        if self.use_rule_conf:
-            self.rule_conf_rel_proj = nn.Linear(self.hidden_dim, self.rule_conf_dim)
-            self.rule_conf_ent_proj = nn.Linear(self.hidden_dim * 2, self.rule_conf_dim)
-
-            self.rule_conf_lstm = nn.LSTM(
-                input_size=self.hidden_dim,
-                hidden_size=self.rule_conf_dim,
-                num_layers=self.rule_conf_num_layers,
-                dropout=self.rule_conf_dropout if self.rule_conf_num_layers > 1 else 0.0,
-                bidirectional=self.rule_conf_bidirectional,
-                batch_first=True,
-            )
-            lstm_out_dim = self.rule_conf_dim * (2 if self.rule_conf_bidirectional else 1)
-            self.rule_conf_rule_proj = nn.Linear(lstm_out_dim, self.rule_conf_dim)
-
-            self.rule_conf_mlp = nn.Sequential(
-                nn.Linear(self.rule_conf_dim * 2, self.rule_conf_dim),
-                nn.ReLU(),
-                nn.Linear(self.rule_conf_dim, 1),
-            )
-            nn.init.zeros_(self.rule_conf_mlp[-1].bias)
 
         
         self.rule_to_entity = FuncToNodeSum(self.mlp_rule_dim)
@@ -490,83 +457,6 @@ class RulE(torch.nn.Module):
 
         rule_count = rule_count.reshape(rule_index.size(0), -1)[:, candidate_set]
 
-        if self.use_rule_conf:
-            if not hasattr(self, "rule_conf_lstm"):
-                raise RuntimeError("use_rule_conf=True but rule conf modules not initialized")
-
-            rule_features = self.rule_features.index_select(0, rule_index)
-            rule_masks = self.rule_masks.index_select(0, rule_index)
-            body_ids = rule_features[:, 2:]
-            body_mask = rule_masks
-            lengths = body_mask.long().sum(-1)
-            lengths_cpu = torch.clamp(lengths, min=1).cpu()
-
-            body_ids_clean = torch.where(body_mask, body_ids, torch.zeros_like(body_ids))
-            rel_flag = torch.pow(-1, body_ids_clean // self.num_relations).unsqueeze(-1)
-            rel_ids = body_ids_clean % self.num_relations
-            body_emb = self.relation_embedding(rel_ids) * rel_flag
-            body_emb = body_emb * body_mask.unsqueeze(-1).to(body_emb.dtype)
-
-            packed = pack_padded_sequence(body_emb, lengths_cpu, batch_first=True, enforce_sorted=False)
-            _, (h_n, _) = self.rule_conf_lstm(packed)
-
-            if self.rule_conf_bidirectional:
-                h_n = h_n.view(self.rule_conf_num_layers, 2, h_n.size(1), h_n.size(2))
-                h_last = torch.cat([h_n[-1, 0], h_n[-1, 1]], dim=-1)
-            else:
-                h_last = h_n[-1]
-            v_rule = self.rule_conf_rule_proj(h_last)
-
-            head_ctx = self.rule_conf_ent_proj(self.entity_embedding(all_h))
-            rel_id = int(query_r % self.num_relations)
-            rel_flag_q = -1.0 if int(query_r // self.num_relations) % 2 == 1 else 1.0
-            rel_ctx = self.rule_conf_rel_proj(self.relation_embedding(torch.tensor(rel_id, device=device)) * rel_flag_q)
-
-            a = v_rule * rel_ctx.unsqueeze(0)
-            b = v_rule.unsqueeze(1) * head_ctx.unsqueeze(0)
-            feat = torch.cat([a.unsqueeze(1).expand(-1, b.size(1), -1), b], dim=-1)
-            conf_rb = torch.sigmoid(self.rule_conf_mlp(feat).squeeze(-1))
-
-            head_of_col = (candidate_set // self.graph.entity_size).long()
-            conf_cols = conf_rb.index_select(1, head_of_col)
-            rule_count = rule_count * conf_cols
-
-            with torch.no_grad():
-                conf_flat = conf_rb.detach().reshape(-1).float()
-                conf_rule_mean = conf_rb.detach().mean(dim=1).float()
-                try:
-                    k = min(3, int(conf_rule_mean.numel()))
-                    top_vals, top_idx = torch.topk(conf_rule_mean, k=k, largest=True, sorted=True)
-                    bot_vals, bot_idx = torch.topk(conf_rule_mean, k=k, largest=False, sorted=True)
-                    top_rules = list(
-                        zip(
-                            rule_index.detach().index_select(0, top_idx).tolist(),
-                            top_vals.tolist(),
-                        )
-                    )
-                    bot_rules = list(
-                        zip(
-                            rule_index.detach().index_select(0, bot_idx).tolist(),
-                            bot_vals.tolist(),
-                        )
-                    )
-                except Exception:
-                    top_rules = []
-                    bot_rules = []
-
-                self._last_rule_conf_stats = {
-                    "relation": int(query_r),
-                    "rules": int(rule_index.numel()),
-                    "heads": int(all_h.numel()),
-                    "candidates": int(candidate_set.numel()),
-                    "conf_mean": float(conf_flat.mean().item()) if conf_flat.numel() else 0.0,
-                    "conf_std": float(conf_flat.std(unbiased=False).item()) if conf_flat.numel() > 1 else 0.0,
-                    "conf_min": float(conf_flat.min().item()) if conf_flat.numel() else 0.0,
-                    "conf_max": float(conf_flat.max().item()) if conf_flat.numel() else 0.0,
-                    "top_rules": top_rules,
-                    "bot_rules": bot_rules,
-                }
-        
         rule_weight_emb = self.rules_weight_emb[rule_index]
 
         mlp_feature = self.mlp_feature[rule_index]
