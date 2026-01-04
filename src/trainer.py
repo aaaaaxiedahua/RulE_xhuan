@@ -436,11 +436,7 @@ class GroundTrainer(object):
             #     warm_up_steps = warm_up_steps * 3
 
             self.train_step( optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args)
-            topk_candidates = int(getattr(args, "topk_candidates", 0) or 0)
-            if topk_candidates > 0:
-                valid_mrr_iter = self.evaluate_t('valid', args.alpha, expectation=True, topk_candidates=topk_candidates)
-            else:
-                valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+            valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
             # test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
             # test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
             
@@ -458,15 +454,9 @@ class GroundTrainer(object):
         checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding.pt'))
         self.model.load_state_dict(checkpoint['model'])
         
-        topk_candidates = int(getattr(args, "topk_candidates", 0) or 0)
-        if topk_candidates > 0:
-            test_mrr_iter = self.evaluate_t('valid', args.alpha, expectation=True, topk_candidates=topk_candidates)
-            test_mrr_iter = self.evaluate_t('test', args.alpha, expectation=True, topk_candidates=topk_candidates)
-            test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True, topk_candidates=topk_candidates)
-        else:
-            test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
-            test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
-            test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+        test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+        test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
+        test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
 
 
        
@@ -681,7 +671,7 @@ class GroundTrainer(object):
 
 
     @torch.no_grad()
-    def evaluate_t(self, split, alpha=3.0, expectation=True, topk_candidates=0):
+    def evaluate_t(self, split, alpha=3.0, expectation=True):
        
         logging.info('>>>>> Predictor: Evaluating on {}'.format(split))
         test_set = getattr(self, "%s_set" % split)
@@ -695,8 +685,6 @@ class GroundTrainer(object):
         concat_all_r = []
         concat_all_t = []
         concat_flag = []
-        topk_hit = 0
-        topk_total = 0
         
         for batch in tqdm(dataloader):
 
@@ -712,20 +700,9 @@ class GroundTrainer(object):
                 all_t = all_t.cuda(device=self.device)
                 flag = flag.cuda(device=self.device)
 
-            rule_logits, _, _ = model(all_h, all_r, None)
-            kge_score = model.compute_g_KGE(all_h, all_r)
-
-            topk_candidates = int(topk_candidates or 0)
-            if topk_candidates > 0:
-                k = min(topk_candidates, int(test_set.graph.entity_size))
-                topk_idx = torch.topk(kge_score, k=k, dim=1).indices
-                topk_total += int(all_t.numel())
-                topk_hit += int((topk_idx == all_t.unsqueeze(1)).any(dim=1).sum().item())
-                mask = torch.zeros_like(kge_score, dtype=torch.bool)
-                mask.scatter_(1, topk_idx, True)
-                logits = alpha * kge_score + rule_logits.masked_fill(~mask, 0.0)
-            else:
-                logits = rule_logits + alpha * kge_score
+            logits, _, _ = model(all_h, all_r, None)
+            kge_score = model.compute_g_KGE(all_h,all_r)
+            logits = logits + alpha * kge_score
 
             concat_logits.append(logits)
             concat_all_h.append(all_h)
@@ -785,12 +762,6 @@ class GroundTrainer(object):
 
         
         logging.info('Data : {}'.format(len(query2LH)))
-        if int(topk_candidates or 0) > 0 and topk_total > 0:
-            logging.info(
-                'TopK recall@%d (KGE): %.6f',
-                int(topk_candidates),
-                float(topk_hit) / float(topk_total),
-            )
         logging.info('Hit1 : {:.6f}'.format(hit1))
         logging.info('Hit3 : {:.6f}'.format(hit3))
         logging.info('Hit10: {:.6f}'.format(hit10))
