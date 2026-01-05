@@ -469,13 +469,6 @@ class GroundTrainer(object):
         
         model.train()
 
-        topk_candidates = int(getattr(args, "topk_candidates", 0) or 0)
-        if topk_candidates > 0:
-            topk_total = 0
-            topk_hit = 0
-            cand_total = 0
-            pos_total = 0
-
         total_loss = 0.0
         total_size = 0.0
 
@@ -506,41 +499,8 @@ class GroundTrainer(object):
             
             grounding_rule_score, _, _ = model(all_h, all_r, edges_to_remove)
 
-            if topk_candidates > 0:
-                k = min(topk_candidates, int(self.train_set.graph.entity_size))
-                with torch.no_grad():
-                    kge_score = model.compute_g_KGE(all_h, all_r)
-                    topk_idx = torch.topk(kge_score, k=k, dim=1).indices
-
-                    topk_total += int(all_t.numel())
-                    topk_hit += int((topk_idx == all_t.unsqueeze(1)).any(dim=1).sum().item())
-                    pos_total += int((target > 0).sum().item())
-
-                    cand_lists = []
-                    max_len = 0
-                    for row in range(int(all_h.numel())):
-                        pos = torch.nonzero(target[row] > 0, as_tuple=False).view(-1)
-                        cand = torch.unique(torch.cat([topk_idx[row], pos], dim=0))
-                        cand_lists.append(cand)
-                        cand_total += int(cand.numel())
-                        max_len = max(max_len, int(cand.numel()))
-
-                    cand_ids = torch.full((int(all_h.numel()), max_len), -1, dtype=torch.long, device=all_h.device)
-                    for row, cand in enumerate(cand_lists):
-                        cand_ids[row, : cand.numel()] = cand
-
-                gather_ids = cand_ids.clamp(min=0)
-                logits_c = grounding_rule_score.gather(1, gather_ids)
-                logits_c = logits_c.masked_fill(cand_ids < 0, -1e9)
-
-                target_c = target.gather(1, gather_ids)
-                target_c = target_c.masked_fill(cand_ids < 0, 0.0)
-
-                logp = torch.log_softmax(logits_c, dim=1)
-                loss = -(logp * target_c).sum() / torch.clamp(target_c.sum(), min=1)
-            else:
-                rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
-                loss = -(rule_logits * target).sum() / torch.clamp(target.sum(), min=1)
+            rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
+            loss = -(rule_logits * target).sum() / torch.clamp(target.sum(), min=1)
 
             loss.backward()
 
@@ -552,18 +512,6 @@ class GroundTrainer(object):
             
             if (batch_id + 1) % print_every == 0:
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
-                if topk_candidates > 0 and topk_total > 0:
-                    logging.info(
-                        "TopK train: K=%s hit@K=%.4f avg_candidates=%.2f avg_pos=%.2f",
-                        int(topk_candidates),
-                        float(topk_hit) / float(topk_total),
-                        float(cand_total) / float(topk_total),
-                        float(pos_total) / float(topk_total),
-                    )
-                    topk_total = 0
-                    topk_hit = 0
-                    cand_total = 0
-                    pos_total = 0
                 
                 total_loss = 0.0
                 total_size = 0.0

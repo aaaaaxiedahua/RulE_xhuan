@@ -254,6 +254,8 @@ class KnowledgeGraph(object):
         self.relation2adjacency = [[[], []] for k in range(self.relation_size*2)]
         self.relation2ht2index = [dict() for k in range(self.relation_size*2)]
         self.relation2outdegree = [[0 for i in range(self.entity_size)] for k in range(self.relation_size*2)]
+        # Outgoing degree by head entity for each relation (train graph only).
+        self.relation2head_outdegree = [[0 for i in range(self.entity_size)] for k in range(self.relation_size*2)]
 
         with open(os.path.join(data_path, "train.txt")) as fi:
             for line in fi:
@@ -279,6 +281,7 @@ class KnowledgeGraph(object):
             
                 self.relation2adjacency[r][0].append(t)
                 self.relation2adjacency[r][1].append(h)
+                self.relation2head_outdegree[r][h] += 1
 
                 ht_index = self.encode_ht(h, t)
                 assert ht_index not in self.relation2ht2index[r]
@@ -308,6 +311,7 @@ class KnowledgeGraph(object):
             
                 self.relation2adjacency[r][0].append(t)
                 self.relation2adjacency[r][1].append(h)
+                self.relation2head_outdegree[r][h] += 1
 
                 ht_index = self.encode_ht(h, t)
                 assert ht_index not in self.relation2ht2index[r]
@@ -378,6 +382,7 @@ class KnowledgeGraph(object):
             self.relation2adjacency[r] = [index, value]
 
             self.relation2outdegree[r] = torch.LongTensor(self.relation2outdegree[r])
+            self.relation2head_outdegree[r] = torch.LongTensor(self.relation2head_outdegree[r])
 
         print("Data loading | DONE!")
 
@@ -593,4 +598,3 @@ class BidirectionalOneShotIterator(object):
         while True:
             for data in dataloader:
                 yield data
-

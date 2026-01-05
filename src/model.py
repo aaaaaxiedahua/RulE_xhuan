@@ -103,6 +103,41 @@ class RulE(torch.nn.Module):
         # self.linear = torch.nn.Linear(self.rnn_hidden_dim, self.relation_dim)
         
         self.pi = 3.14159262358979323846
+        self.configure_elastic_grounding(enabled=False)
+
+    def configure_elastic_grounding(
+        self,
+        enabled=False,
+        k_soft=16,
+        u_soft_cap=32,
+        tau=2.0,
+        lambda_base=0.5,
+        position_lambda=True,
+        th_prob=None,
+        log_first_n=5,
+        log_every=1000,
+    ):
+        self.elastic_enabled = bool(enabled)
+        self.elastic_k_soft = int(k_soft)
+        self.elastic_u_soft_cap = int(u_soft_cap)
+        self.elastic_tau = float(tau)
+        self.elastic_lambda_base = float(lambda_base)
+        self.elastic_position_lambda = bool(position_lambda)
+        self.elastic_th_prob = None if th_prob is None else float(th_prob)
+        self.elastic_log_first_n = int(log_first_n)
+        self.elastic_log_every = int(log_every)
+        if not hasattr(self, "_elastic_log_calls"):
+            self._elastic_log_calls = 0
+
+    def _elastic_lambda_at_depth(self, hop_index):
+        lam = self.elastic_lambda_base
+        if lam <= 0:
+            return 0.0
+        if not self.elastic_position_lambda:
+            return min(float(lam), 1.0)
+        max_len = getattr(self, "max_length", 0)
+        exponent = max(int(max_len) - int(hop_index), 0)
+        return min(float(lam) ** exponent, 1.0)
 
     # def add_param(self):
 
@@ -211,21 +246,171 @@ class RulE(torch.nn.Module):
             if device.type == "cuda":
                 x0 = x0.cuda(device)
 
-            stack = [(0, x0)]
+            if not getattr(self, "elastic_enabled", False):
+                stack = [(0, x0)]
+                while stack:
+                    node_id, x = stack.pop()
+                    visited_nodes += 1
+
+                    if node_id in node_multiplicity:
+                        node_count[node_id] = x.squeeze(-1).transpose(0, 1).float()
+
+                    for rel, child_id in children[node_id].items():
+                        next_edges_to_remove = edges_to_remove if (rel == query_r) else None
+                        x_child = self.graph.propagate(x, rel, next_edges_to_remove)
+                        propagate_calls += 1
+                        stack.append((child_id, x_child))
+
+                return node_count, node_multiplicity
+
+            xH0 = x0.float()
+            xS0 = torch.zeros_like(xH0)
+            stats_dead_h_total = 0
+            stats_dead_h_selected = 0
+            stats_soft_u_kept = 0
+            stats_soft_candidates = 0
+            stats_soft_u_filtered = 0
+            stats_soft_dead_dropped = 0
+            stats_overlap_upgraded = 0
+            stack = [(0, 0, xH0, xS0)]
             while stack:
-                node_id, x = stack.pop()
+                node_id, depth, xH, xS = stack.pop()
                 visited_nodes += 1
 
                 if node_id in node_multiplicity:
-                    node_count[node_id] = x.squeeze(-1).transpose(0, 1).float()
+                    node_count[node_id] = (xH + xS).squeeze(-1).transpose(0, 1).float()
 
                 for rel, child_id in children[node_id].items():
                     next_edges_to_remove = edges_to_remove if (rel == query_r) else None
-                    x_child = self.graph.propagate(x, rel, next_edges_to_remove)
-                    propagate_calls += 1
-                    stack.append((child_id, x_child))
+                    hop_index = depth + 1
 
-        return node_count, node_multiplicity
+                    xH_hard = self.graph.propagate(xH, rel, next_edges_to_remove)
+                    xS_hard = self.graph.propagate(xS, rel, next_edges_to_remove)
+                    propagate_calls += 2
+
+                    xS_soft = torch.zeros_like(xS_hard)
+                    if self.elastic_k_soft > 0 and self.elastic_u_soft_cap > 0 and self.elastic_tau > 0:
+                        head_outdeg = self.graph.relation2head_outdegree[rel]
+                        if device.type == "cuda":
+                            head_outdeg = head_outdeg.to(device)
+
+                        xH_w = xH.squeeze(-1)
+                        dead_mask = (xH_w > 0) & (head_outdeg.unsqueeze(1) == 0)
+                        stats_dead_h_total += int(dead_mask.sum().item())
+
+                        xS_w = xS.squeeze(-1)
+                        dead_s_mask = (xS_w > 0) & (head_outdeg.unsqueeze(1) == 0)
+                        stats_soft_dead_dropped += int(dead_s_mask.sum().item())
+
+                        node_in = None
+                        node_out = None
+                        removed_head = None
+                        removed_tail = None
+                        if next_edges_to_remove is not None:
+                            node_in = self.graph.relation2adjacency[rel][0][1]
+                            node_out = self.graph.relation2adjacency[rel][0][0]
+                            if device.type == "cuda":
+                                node_in = node_in.to(device)
+                                node_out = node_out.to(device)
+                            removed_head = node_in[next_edges_to_remove]
+                            removed_tail = node_out[next_edges_to_remove]
+                            # If the removed edge is the only outgoing edge for that head, treat it as dead for this hop.
+                            only_one = head_outdeg[removed_head] == 1
+                            if only_one.any():
+                                b_idx = torch.arange(xH_w.size(1), device=device)[only_one]
+                                dead_mask[removed_head[only_one], b_idx] = True
+                                stats_dead_h_total += int(only_one.sum().item())
+
+                        dead_heads = []
+                        dead_batch = []
+                        dead_weight = []
+                        B = xH_w.size(1)
+                        for b in range(B):
+                            idx = torch.nonzero(dead_mask[:, b], as_tuple=False).squeeze(1)
+                            if idx.numel() == 0:
+                                continue
+                            w = xH_w[idx, b]
+                            cap = min(self.elastic_u_soft_cap, idx.numel())
+                            if cap < idx.numel():
+                                top = torch.topk(w, cap, largest=True).indices
+                                idx = idx[top]
+                                w = w[top]
+                            dead_heads.append(idx)
+                            dead_batch.append(torch.full((idx.numel(),), b, dtype=torch.long, device=device))
+                            dead_weight.append(w)
+
+                        if dead_heads:
+                            dead_heads = torch.cat(dead_heads, dim=0)
+                            dead_batch = torch.cat(dead_batch, dim=0)
+                            dead_weight = torch.cat(dead_weight, dim=0)
+                            stats_dead_h_selected += int(dead_heads.numel())
+
+                            rels = torch.full((dead_heads.size(0),), rel, dtype=torch.long, device=device)
+                            scores = self.compute_g_KGE(dead_heads, rels)
+
+                            if removed_head is not None:
+                                rh = removed_head[dead_batch]
+                                rt = removed_tail[dead_batch]
+                                forbid = dead_heads == rh
+                                if forbid.any():
+                                    rows = torch.nonzero(forbid, as_tuple=False).squeeze(1)
+                                    scores[rows, rt[rows]] = -1e9
+
+                            top_scores, top_tails = torch.topk(scores, k=self.elastic_k_soft, dim=1)
+                            probs = torch.softmax(top_scores / self.elastic_tau, dim=1)
+                            stats_soft_candidates += int(top_tails.numel())
+
+                            if self.elastic_th_prob is not None:
+                                keep = probs.max(dim=1).values >= self.elastic_th_prob
+                                if not keep.any():
+                                    stats_soft_u_filtered += int(probs.size(0))
+                                    probs = None
+                                else:
+                                    stats_soft_u_filtered += int((~keep).sum().item())
+                                    dead_batch = dead_batch[keep]
+                                    dead_weight = dead_weight[keep]
+                                    top_tails = top_tails[keep]
+                                    probs = probs[keep]
+
+                            if probs is not None:
+                                stats_soft_u_kept += int(probs.size(0))
+                                lam_i = self._elastic_lambda_at_depth(hop_index)
+                                if lam_i > 0:
+                                    contrib = dead_weight.unsqueeze(1) * (lam_i * probs)
+                                    flat = dead_batch.unsqueeze(1) * self.graph.entity_size + top_tails
+                                    xS_soft_flat = torch.zeros((B * self.graph.entity_size,), device=device)
+                                    xS_soft_flat.scatter_add_(0, flat.reshape(-1), contrib.reshape(-1))
+                                    xS_soft = xS_soft_flat.view(B, self.graph.entity_size).transpose(0, 1).unsqueeze(-1)
+
+                    xS_total = xS_hard + xS_soft
+                    overlap = (xH_hard > 0) & (xS_total > 0)
+                    stats_overlap_upgraded += int(overlap.sum().item())
+                    xH_child = xH_hard + xS_total * overlap.float()
+                    xS_child = xS_total * (~overlap).float()
+
+                    stack.append((child_id, hop_index, xH_child, xS_child))
+
+            self._elastic_log_calls = getattr(self, "_elastic_log_calls", 0) + 1
+            log_every = max(getattr(self, "elastic_log_every", 0), 0)
+            log_first_n = max(getattr(self, "elastic_log_first_n", 0), 0)
+            should_log = (self._elastic_log_calls <= log_first_n) or (log_every and self._elastic_log_calls % log_every == 0)
+            if should_log:
+                logging.info(
+                    "ElasticGrounding call=%d query_r=%d visited=%d propagate=%d deadH=%d selectedH=%d softU=%d filteredU=%d softCand=%d droppedSoftDead=%d upgraded=%d",
+                    self._elastic_log_calls,
+                    int(query_r),
+                    int(visited_nodes),
+                    int(propagate_calls),
+                    int(stats_dead_h_total),
+                    int(stats_dead_h_selected),
+                    int(stats_soft_u_kept),
+                    int(stats_soft_u_filtered),
+                    int(stats_soft_candidates),
+                    int(stats_soft_dead_dropped),
+                    int(stats_overlap_upgraded),
+                )
+
+            return node_count, node_multiplicity
         
        
     def compute_ruleE(self, sample, mode='single'):

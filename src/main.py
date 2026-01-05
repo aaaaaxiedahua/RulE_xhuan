@@ -84,14 +84,20 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
-    parser.add_argument('--topk_candidates', default=0, type=int)
+
+    # elastic grounding (bridge-once soft fallback)
+    parser.add_argument('--elastic_grounding', action='store_true', default=False)
+    parser.add_argument('--elastic_k_soft', default=16, type=int)
+    parser.add_argument('--elastic_u_soft_cap', default=32, type=int)
+    parser.add_argument('--elastic_tau', default=2.0, type=float)
+    parser.add_argument('--elastic_lambda_base', default=0.5, type=float)
+    parser.add_argument('--elastic_position_lambda', action='store_true', default=True)
+    parser.add_argument('--no_elastic_position_lambda', dest='elastic_position_lambda', action='store_false')
+    parser.add_argument('--elastic_th_prob', default=None, type=float)
+    parser.add_argument('--elastic_log_first_n', default=5, type=int)
+    parser.add_argument('--elastic_log_every', default=1000, type=int)
 
     return parser.parse_args(args)
-
-def _ensure_defaults(args):
-    if not hasattr(args, "topk_candidates"):
-        setattr(args, "topk_candidates", 0)
-    return args
 
 def main():
     args = parse_args()
@@ -100,7 +106,6 @@ def main():
     if args.init_checkpoint_config:
         args = load_config(args.init_checkpoint_config)
         args = args[0]
-    args = _ensure_defaults(args)
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -145,6 +150,17 @@ def main():
         args.data_path,
     )
     RulE_model.set_rules(rules)
+    RulE_model.configure_elastic_grounding(
+        enabled=getattr(args, "elastic_grounding", False),
+        k_soft=getattr(args, "elastic_k_soft", 16),
+        u_soft_cap=getattr(args, "elastic_u_soft_cap", 32),
+        tau=getattr(args, "elastic_tau", 2.0),
+        lambda_base=getattr(args, "elastic_lambda_base", 0.5),
+        position_lambda=getattr(args, "elastic_position_lambda", True),
+        th_prob=getattr(args, "elastic_th_prob", None),
+        log_first_n=getattr(args, "elastic_log_first_n", 5),
+        log_every=getattr(args, "elastic_log_every", 1000),
+    )
 
     
     # For pre-training 

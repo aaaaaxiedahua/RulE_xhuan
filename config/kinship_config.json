@@ -35,5 +35,14 @@
     "g_lr": 0.0005,
     "weight_decay": 0,
     "num_iters": 10,
-    "topk_candidates": 64
+
+    "elastic_grounding": true,
+    "elastic_k_soft": 16,
+    "elastic_u_soft_cap": 32,
+    "elastic_tau": 2.0,
+    "elastic_lambda_base": 0.5,
+    "elastic_position_lambda": true,
+    "elastic_th_prob": null,
+    "elastic_log_first_n": 20,
+    "elastic_log_every": 100
 }
