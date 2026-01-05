@@ -43,6 +43,5 @@
     "elastic_lambda_base": 0.5,
     "elastic_position_lambda": true,
     "elastic_th_prob": null,
-    "elastic_log_first_n": 20,
-    "elastic_log_every": 100
+    "elastic_log_every": 200
 }

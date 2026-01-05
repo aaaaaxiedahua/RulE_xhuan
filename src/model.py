@@ -114,7 +114,6 @@ class RulE(torch.nn.Module):
         lambda_base=0.5,
         position_lambda=True,
         th_prob=None,
-        log_first_n=5,
         log_every=1000,
     ):
         self.elastic_enabled = bool(enabled)
@@ -124,7 +123,6 @@ class RulE(torch.nn.Module):
         self.elastic_lambda_base = float(lambda_base)
         self.elastic_position_lambda = bool(position_lambda)
         self.elastic_th_prob = None if th_prob is None else float(th_prob)
-        self.elastic_log_first_n = int(log_first_n)
         self.elastic_log_every = int(log_every)
         if not hasattr(self, "_elastic_log_calls"):
             self._elastic_log_calls = 0
@@ -392,8 +390,7 @@ class RulE(torch.nn.Module):
 
             self._elastic_log_calls = getattr(self, "_elastic_log_calls", 0) + 1
             log_every = max(getattr(self, "elastic_log_every", 0), 0)
-            log_first_n = max(getattr(self, "elastic_log_first_n", 0), 0)
-            should_log = (self._elastic_log_calls <= log_first_n) or (log_every and self._elastic_log_calls % log_every == 0)
+            should_log = bool(log_every) and (self._elastic_log_calls % log_every == 0)
             if should_log:
                 logging.info(
                     "ElasticGrounding call=%d query_r=%d visited=%d propagate=%d deadH=%d selectedH=%d softU=%d filteredU=%d softCand=%d droppedSoftDead=%d upgraded=%d",

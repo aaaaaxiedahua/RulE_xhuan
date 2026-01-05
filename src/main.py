@@ -94,7 +94,6 @@ def parse_args(args=None):
     parser.add_argument('--elastic_position_lambda', action='store_true', default=True)
     parser.add_argument('--no_elastic_position_lambda', dest='elastic_position_lambda', action='store_false')
     parser.add_argument('--elastic_th_prob', default=None, type=float)
-    parser.add_argument('--elastic_log_first_n', default=5, type=int)
     parser.add_argument('--elastic_log_every', default=1000, type=int)
 
     return parser.parse_args(args)
@@ -158,7 +157,6 @@ def main():
         lambda_base=getattr(args, "elastic_lambda_base", 0.5),
         position_lambda=getattr(args, "elastic_position_lambda", True),
         th_prob=getattr(args, "elastic_th_prob", None),
-        log_first_n=getattr(args, "elastic_log_first_n", 5),
         log_every=getattr(args, "elastic_log_every", 1000),
     )
 
