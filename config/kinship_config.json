@@ -37,11 +37,23 @@
     "num_iters": 10,
 
     "elastic_grounding": true,
-    "elastic_k_soft": 16,
-    "elastic_u_soft_cap": 32,
+    "elastic_k_soft": 8,
+    "elastic_u_soft_cap": 16,
     "elastic_tau": 2.0,
     "elastic_lambda_base": 0.5,
     "elastic_position_lambda": true,
-    "elastic_th_prob": null,
-    "elastic_log_every": 200
+    "elastic_th_prob": 0.2,
+    "elastic_log_every": 10,
+
+    "dual_rerank_train": true,
+    "dual_rerank": false,
+    "dual_rerank_k": 64,
+    "dual_rerank_neighbors": 32,
+    "dual_rerank_beta": 0.5,
+    "dual_rerank_dim": 128,
+    "dual_rerank_lr": 0.001,
+    "dual_rerank_steps": 5000,
+    "dual_rerank_batch": 64,
+    "dual_rerank_neg": 32,
+    "dual_rerank_log_every": 200
 }

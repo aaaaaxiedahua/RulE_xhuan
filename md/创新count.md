@@ -656,3 +656,173 @@ $$ \mathcal{L}{CL} = - \log \frac{\exp(\text{sim}(e{rule}, e_{kge}^+) / \tau)}{\
 推荐优先级
 方案 1 (Rotational Path)：改动最小，收益可能最大。这是一个由于历史遗留代码（TransE 习惯）导致的逻辑 Bug，修正它符合“First Principles”。
 方案 3 (Contrastive Learning)：目前顶会（ICLR/NeurIPS）非常喜欢的方向，故事非常好讲（Consistency, Robustness）。
+
+
+
+============
+  ## 总体框架：两阶段 + 候选集推理
+
+  对每个查询 (h, r, ?)：
+
+  1. 检索（Retrieval）：用 KGE 打分得到 TopK 候选 tail 集合 C_kge
+  2. 构图（Subgraph）：从训练图中抽取围绕 h 的 k-hop 子图
+     G_sub（可选把 C_kge 的节点也包含进来）
+  3. 精排（Rerank）：用规则/子图推理器输出 score_rule_sub(t)（只对
+     候选 t∈C 计算）
+  4. 融合（可先固定）：score(t)=score_rule_sub(t)+α*score_kge(t)
+     或更进一步学一个 gate（这里不是 conf，是融合权重）
+
+  训练与测试尽量一致：训练时也在候选集上做 softmax/对比学习。
+
+  ———
+
+  # (2) Retrieval→Rerank：KGE TopK 召回 + 规则精排
+
+  ### 核心点
+
+  把“全实体排序”改成“候选集排序”，让 rule/推理模块只处理小集合。
+
+  ### 怎么做（落地步骤）
+
+  Step A：取候选集
+
+  - 对每个 (h,r,?)，计算 kge_score(h,r,all_t)，取 topK tails 得到
+    C_kge
+  - 确保 t_true 在候选里：C = C_kge ∪ {t_true}
+
+  Step B：在候选上计算 rule 分数
+  两种简单方式（优先简单版）：
+
+  - 简单版：你现有 rule 推理器仍返回全空间 logits_rule，然后
+    logits_rule_C = logits_rule[:, C]
+  - 高效版：只对 C 计算（需要改 forward，把 candidate_set 限制为
+    C）
+
+  Step C：候选集 loss
+
+  - loss = -log softmax(score_C)[t_true_index]（多分类）
+  - 或 pairwise ranking loss
+
+  ### 关键超参建议（kinship）
+
+  - K：64 或 128 起步；小图通常 64 已够
+  - 评估时也用候选集精排，再 scatter 回全空间（保持 filtered
+    ranking 兼容）
+
+  ### 为什么有效
+
+  - 噪声候选大幅减少
+  - 训练梯度集中，规则推理器不容易越训越坏
+  - 速度更快（尤其规则 grounding）
+
+  ### 消融怎么写
+
+  - KGE-only vs Rule-only vs TopK+RuleRerank vs
+    TopK+RuleRerank+Fusion
+  - K=32/64/128
+
+  ———
+
+  # (3) 子图推理精排：NBFNet/RED-GNN 风格的局部推理器
+
+  这里建议把“规则精排器”升级为“子图推理精排器”，规则用于缩小推理空
+  间或提供路径特征。
+
+  ### 两种设计路线（你选其一）
+
+  ## 3A) 纯子图推理精排（更像 NBFNet）
+
+  子图构建
+
+  - 节点：{h} ∪ C 再加 h 的 1~2 hop 邻居（或从候选反向扩一下）
+  - 边：训练图中的真实边（关系作为类型）
+
+  模型
+
+  - relation-aware message passing（2~3 层）
+  - 输入：节点初始特征可用 entity embedding；关系条件用 e_r 注入到
+    每层
+  - 输出：每个候选 tail 的得分（对 (h,r,t)）
+
+  优势
+
+  - 不依赖 mined rules 质量，纯结构推理
+  - 很强、论文味足
+
+  ## 3B) Rule-guided 子图推理（更像“神经符号融合”）
+
+  做法
+
+  - 规则先给出候选/路径集合（或 trie 给出“哪些状态/路径可达”）
+  - 把这些信息当成子图的额外特征：
+      - 节点特征：该节点被多少条规则到达（或最短规则路径长度）
+      - 边特征：是否在某些规则的匹配路径上
+  - 子图 GNN 用这些特征做精排
+
+  优势
+
+  - 解释性强：既有规则路径证据，又有局部结构推理
+  - 更符合你 RulE 项目定位
+
+  ### 关键实现要点/坑
+
+  - 子图抽取必须高效：邻接表缓存、batch 处理
+  - filtered setting：推理时要移除当前三元组对应边（你现有
+    edges_to_remove 可复用）
+
+  ### 消融怎么写
+
+  - TopK+RuleRerank vs TopK+SubgraphRerank
+  - hop=1/2/3
+  - 是否加入 rule 特征
+
+  ———
+
+  # (5) Hard Negatives + Distillation：用 KGE 当 teacher，提升精排
+  器
+
+  这是让 2+3 进一步“稳且涨”的关键。
+
+  ## 5A) Hard negatives（强烈建议）
+
+  ### 做法
+
+  对每个 query：
+
+  - 用 KGE topM（排除真值）当 hard negatives：N_hard
+  - 再混一点随机 negatives：N_rand
+  - 候选集 C = {t_true} ∪ N_hard ∪ N_rand（通常几十到一两百）
+
+  ### 为什么有效
+
+  - 随机负样本太简单，尤其小数据集
+  - hard neg 逼迫精排器学会细粒度区分
+
+  ## 5B) Distillation（可选但很论文）
+
+  ### 做法
+
+  在候选集 C 上：
+
+  - teacher: p_T = softmax(kge_score/τ)
+  - student: p_S = softmax(student_score/τ)
+  - loss = CE(student_score, t_true) + λ * KL(p_T || p_S)
+
+  ### 推荐超参
+
+  - τ：2.0（可试 1~4）
+  - λ：0.1~0.5
+
+  ### 消融怎么写
+
+  - 无 hard neg vs hard neg
+  - 无蒸馏 vs 蒸馏（τ/λ ablation）
+
+  ———
+
+  ## 给你一条最务实的落地路线（按工作量递增）
+
+  1. 先做 (2) TopK 检索 + 候选集训练（最容易、最可能立刻涨/更稳）
+  2. 加 (5A) hard negatives（一般会明显提升）
+  3. 再加 (5B) 蒸馏（提升稳定性与泛化）
+  4. 最后上 (3) 子图推理精排（工作量大但创新强）

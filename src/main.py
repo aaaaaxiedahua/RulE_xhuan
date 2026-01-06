@@ -6,6 +6,7 @@ from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDa
 from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
 from trainer import GroundTrainer, PreTrainer
+from dual_reranker import DualContextReranker, DualRerankConfig, DualRerankTrainer
 
 # torch.cuda.set_device(1)
 
@@ -95,6 +96,19 @@ def parse_args(args=None):
     parser.add_argument('--no_elastic_position_lambda', dest='elastic_position_lambda', action='store_false')
     parser.add_argument('--elastic_th_prob', default=None, type=float)
     parser.add_argument('--elastic_log_every', default=1000, type=int)
+
+    # dual-context GNN reranker (two-stage)
+    parser.add_argument('--dual_rerank', action='store_true', default=False)
+    parser.add_argument('--dual_rerank_train', action='store_true', default=False)
+    parser.add_argument('--dual_rerank_k', default=256, type=int)
+    parser.add_argument('--dual_rerank_neighbors', default=16, type=int)
+    parser.add_argument('--dual_rerank_beta', default=0.5, type=float)
+    parser.add_argument('--dual_rerank_dim', default=128, type=int)
+    parser.add_argument('--dual_rerank_lr', default=0.001, type=float)
+    parser.add_argument('--dual_rerank_steps', default=2000, type=int)
+    parser.add_argument('--dual_rerank_batch', default=16, type=int)
+    parser.add_argument('--dual_rerank_neg', default=32, type=int)
+    parser.add_argument('--dual_rerank_log_every', default=200, type=int)
 
     return parser.parse_args(args)
 
@@ -200,6 +214,48 @@ def main():
     
     valid_mrr = pre_trainer.evaluate('valid', expectation=True)
     test_mrr = pre_trainer.evaluate('test', expectation=True)
+
+    # Dual-context reranker as a grounding replacement (two-stage: KGE retrieval + GNN re-ranking)
+    if getattr(args, "dual_rerank", False) or getattr(args, "dual_rerank_train", False):
+        logging.info(">>>>> DualRerank: Enabled (replaces grounding stage)")
+        RulE_model.dual_reranker = DualContextReranker(
+            graph=graph,
+            entity_embedding=RulE_model.entity_embedding,
+            relation_embedding=RulE_model.relation_embedding,
+            num_relations=graph.relation_size,
+            dim=int(getattr(args, "dual_rerank_dim", 128)),
+        ).to(device)
+
+        cfg = DualRerankConfig(
+            k=int(getattr(args, "dual_rerank_k", 256)),
+            neighbors=int(getattr(args, "dual_rerank_neighbors", 16)),
+            beta=float(getattr(args, "dual_rerank_beta", 0.5)),
+            dim=int(getattr(args, "dual_rerank_dim", 128)),
+            lr=float(getattr(args, "dual_rerank_lr", 0.001)),
+            steps=int(getattr(args, "dual_rerank_steps", 2000)),
+            batch_size=int(getattr(args, "dual_rerank_batch", 16)),
+            neg_num=int(getattr(args, "dual_rerank_neg", 32)),
+            log_every=int(getattr(args, "dual_rerank_log_every", 200)),
+            base="kge",
+        )
+        dual_trainer = DualRerankTrainer(
+            model=RulE_model,
+            graph=graph,
+            device=device,
+            config=cfg,
+            save_path=args.save_path,
+        )
+        if getattr(args, "dual_rerank_train", False):
+            dual_trainer.train(alpha=float(getattr(args, "alpha", 3.0)))
+        else:
+            loaded = dual_trainer.load_if_exists()
+            if not loaded:
+                raise FileNotFoundError(os.path.join(args.save_path, "dual_reranker.pt"))
+
+        dual_trainer.evaluate_dataset(valid_set, split="valid", num_worker=args.cpu_num, expectation=True)
+        dual_trainer.evaluate_dataset(test_set, split="test", num_worker=args.cpu_num, expectation=True)
+        dual_trainer.evaluate_dataset(test_kge_set, split="test_kge", num_worker=args.cpu_num, expectation=True)
+        return
 
     # RulE_model.add_param()
 

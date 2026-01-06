@@ -9,6 +9,7 @@ from data import Iterator, RuleDataset, KGETrainDataset, BidirectionalOneShotIte
 import torch.nn.functional as F
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from dual_reranker import DualContextReranker, DualRerankConfig, DualRerankTrainer
 
 class PreTrainer(object):
 
@@ -384,6 +385,8 @@ class GroundTrainer(object):
         self.test_set = test_set
         self.test_kge_set = test_kge_set
         
+        self.dual_rerank_log_calls = 0
+
     def train(self, args):
         
         # fix the parameters of pre-training
@@ -407,6 +410,39 @@ class GroundTrainer(object):
         if hasattr(self.model, 'rules_weight_emb'):
             logging.info('rules_weight_emb shape: %s', tuple(self.model.rules_weight_emb.size()))
 
+        if getattr(args, "dual_rerank", False) or getattr(args, "dual_rerank_train", False):
+            if not hasattr(self.model, "dual_reranker"):
+                self.model.dual_reranker = DualContextReranker(
+                    graph=self.train_set.graph,
+                    entity_embedding=self.model.entity_embedding,
+                    relation_embedding=self.model.relation_embedding,
+                    num_relations=self.train_set.graph.relation_size,
+                    dim=int(getattr(args, "dual_rerank_dim", 128)),
+                ).to(self.device)
+
+            cfg = DualRerankConfig(
+                k=int(getattr(args, "dual_rerank_k", 256)),
+                neighbors=int(getattr(args, "dual_rerank_neighbors", 16)),
+                beta=float(getattr(args, "dual_rerank_beta", 0.5)),
+                dim=int(getattr(args, "dual_rerank_dim", 128)),
+                lr=float(getattr(args, "dual_rerank_lr", 0.001)),
+                steps=int(getattr(args, "dual_rerank_steps", 2000)),
+                batch_size=int(getattr(args, "dual_rerank_batch", 16)),
+                neg_num=int(getattr(args, "dual_rerank_neg", 32)),
+                log_every=int(getattr(args, "dual_rerank_log_every", 200)),
+                base="kge",
+            )
+            self._dual_rerank_trainer = DualRerankTrainer(
+                model=self.model,
+                graph=self.train_set.graph,
+                device=self.device,
+                config=cfg,
+                save_path=args.save_path,
+            )
+            if not getattr(args, "dual_rerank_train", False):
+                self._dual_rerank_ready = bool(self._dual_rerank_trainer.load_if_exists())
+            else:
+                self._dual_rerank_ready = False
 
         
         logging.info('>>>>> RulE: Grounding-Training')
@@ -457,6 +493,15 @@ class GroundTrainer(object):
         test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
         test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
         test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+
+        if getattr(args, "dual_rerank_train", False):
+            logging.info(">>>>> DualRerank: Training reranker...")
+            self._dual_rerank_trainer.train(alpha=float(args.alpha))
+            self._dual_rerank_ready = True
+            logging.info(">>>>> DualRerank: Evaluating with reranker enabled...")
+            _ = self.evaluate_t('valid', args.alpha, expectation=True)
+            _ = self.evaluate_t('test', args.alpha, expectation=True)
+            _ = self.evaluate_t('test_kge', args.alpha, expectation=True)
 
 
        
@@ -649,8 +694,38 @@ class GroundTrainer(object):
                 flag = flag.cuda(device=self.device)
 
             logits, _, _ = model(all_h, all_r, None)
-            kge_score = model.compute_g_KGE(all_h,all_r)
+            kge_score = model.compute_g_KGE(all_h, all_r)
             logits = logits + alpha * kge_score
+            logits_base = logits
+
+            dual_enabled = bool(getattr(self.args, "dual_rerank", False) or getattr(self.args, "dual_rerank_train", False))
+            if dual_enabled and bool(getattr(self, "_dual_rerank_ready", False)) and hasattr(model, "dual_reranker"):
+                K = int(getattr(self.args, "dual_rerank_k", 256))
+                K = min(K, kge_score.size(1))
+                cand_t = torch.topk(kge_score, k=K, dim=1).indices
+                base_cand = kge_score.gather(1, cand_t).detach()
+                delta, mask_h, mask_t = model.dual_reranker(all_h, all_r, cand_t, base_scores=base_cand, neighbors=int(getattr(self.args, "dual_rerank_neighbors", 16)))
+                delta = delta * mask_t.float()
+                logits = logits.clone()
+                logits.scatter_add_(1, cand_t, float(getattr(self.args, "dual_rerank_beta", 0.5)) * delta)
+
+                self.dual_rerank_log_calls += 1
+                log_every = int(getattr(self.args, "dual_rerank_log_every", 200))
+                if log_every > 0 and self.dual_rerank_log_calls % log_every == 0:
+                    t = int(all_t.item())
+                    in_c = bool((cand_t[0] == t).any().item())
+                    before = (logits_base[0][flag] > logits_base[0, t]).sum().item() + 1
+                    after = (logits[0][flag] > logits[0, t]).sum().item() + 1
+                    logging.info(
+                        "DualRerank split=%s r=%d inCand=%d rankBase=%d rankFinal=%d maskH=%d candK=%d",
+                        split,
+                        int(all_r.item()),
+                        int(in_c),
+                        int(before),
+                        int(after),
+                        int(mask_h.item()),
+                        int(K),
+                    )
 
             concat_logits.append(logits)
             concat_all_h.append(all_h)

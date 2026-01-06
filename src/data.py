@@ -384,7 +384,83 @@ class KnowledgeGraph(object):
             self.relation2outdegree[r] = torch.LongTensor(self.relation2outdegree[r])
             self.relation2head_outdegree[r] = torch.LongTensor(self.relation2head_outdegree[r])
 
+        self._neighbor_index_built = False
+        self._edge_head_sorted = None
+        self._edge_tail_sorted = None
+        self._edge_rel_sorted = None
+        self._head_ptr = None
+
         print("Data loading | DONE!")
+
+    def build_neighbor_index(self):
+        if getattr(self, "_neighbor_index_built", False):
+            return
+        edge_heads = []
+        edge_tails = []
+        edge_rels = []
+        for r in range(self.relation_size * 2):
+            node_out = self.relation2adjacency[r][0][0]  # tail
+            node_in = self.relation2adjacency[r][0][1]  # head
+            edge_heads.append(node_in)
+            edge_tails.append(node_out)
+            edge_rels.append(torch.full((node_in.size(0),), r, dtype=torch.long))
+
+        edge_head = torch.cat(edge_heads, dim=0)
+        edge_tail = torch.cat(edge_tails, dim=0)
+        edge_rel = torch.cat(edge_rels, dim=0)
+
+        perm = torch.argsort(edge_head)
+        edge_head = edge_head[perm]
+        edge_tail = edge_tail[perm]
+        edge_rel = edge_rel[perm]
+
+        counts = torch.bincount(edge_head, minlength=self.entity_size)
+        head_ptr = torch.zeros((self.entity_size + 1,), dtype=torch.long)
+        head_ptr[1:] = torch.cumsum(counts, dim=0)
+
+        self._edge_head_sorted = edge_head
+        self._edge_tail_sorted = edge_tail
+        self._edge_rel_sorted = edge_rel
+        self._head_ptr = head_ptr
+        self._neighbor_index_built = True
+
+    def sample_out_edges(self, seeds: torch.Tensor, neighbors: int = 16):
+        """
+        Sample outgoing edges for each seed entity from the augmented train graph (includes inverse edges).
+        Args:
+          seeds: [B] CPU LongTensor
+        Returns:
+          seed_pos: [E] CPU LongTensor in [0, B)
+          nbr: [E] CPU LongTensor (tail ids)
+          rel: [E] CPU LongTensor (relation ids in [0, 2R))
+        """
+        self.build_neighbor_index()
+        seeds = seeds.view(-1).long().to("cpu")
+        B = int(seeds.size(0))
+        k = int(neighbors)
+
+        seed_pos_list = []
+        nbr_list = []
+        rel_list = []
+        for i in range(B):
+            h = int(seeds[i].item())
+            start = int(self._head_ptr[h].item())
+            end = int(self._head_ptr[h + 1].item())
+            deg = end - start
+            if deg <= 0:
+                continue
+            if deg <= k:
+                idx = torch.arange(start, end, dtype=torch.long)
+            else:
+                idx = start + torch.randint(0, deg, (k,), dtype=torch.long)
+            seed_pos_list.append(torch.full((idx.numel(),), i, dtype=torch.long))
+            nbr_list.append(self._edge_tail_sorted[idx])
+            rel_list.append(self._edge_rel_sorted[idx])
+
+        if not seed_pos_list:
+            empty = torch.empty((0,), dtype=torch.long)
+            return empty, empty, empty
+        return torch.cat(seed_pos_list, dim=0), torch.cat(nbr_list, dim=0), torch.cat(rel_list, dim=0)
 
     def encode_hr(self, h, r):
         return r * self.entity_size + h
