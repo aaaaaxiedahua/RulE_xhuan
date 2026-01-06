@@ -24,6 +24,7 @@ class DualRerankConfig:
     steps: int = 2000
     batch_size: int = 16
     neg_num: int = 32
+    eval_every: int = 1000
     log_every: int = 200
     base: str = "kge"  # reserved; grounding-replacement uses KGE base
 
@@ -150,7 +151,7 @@ class DualRerankTrainer:
         base = (rule_logits + float(alpha) * kge).detach()
         return base, kge
 
-    def train(self, alpha: float = 3.0) -> None:
+    def train(self, alpha: float = 3.0, valid_set=None, num_worker: int = 0) -> None:
         cfg = self.config
         reranker: DualContextReranker = self.model.dual_reranker
         reranker.train()
@@ -168,6 +169,8 @@ class DualRerankTrainer:
         nentity = self.graph.entity_size
 
         loss_ema = None
+        best_valid_mrr = None
+        best_state = None
         for step in range(1, int(cfg.steps) + 1):
             idx = torch.randint(0, n, (int(cfg.batch_size),))
             batch = [facts[i] for i in idx.tolist()]
@@ -223,6 +226,16 @@ class DualRerankTrainer:
             if int(cfg.log_every) > 0 and step % int(cfg.log_every) == 0:
                 logging.info("DualRerank train step=%d loss=%.6f ema=%.6f", step, float(loss.item()), float(loss_ema))
 
+            eval_every = int(getattr(cfg, "eval_every", 0) or 0)
+            if valid_set is not None and eval_every > 0 and step % eval_every == 0:
+                valid_mrr = self.evaluate_dataset(valid_set, split="valid", num_worker=num_worker, expectation=True)
+                if best_valid_mrr is None or valid_mrr > best_valid_mrr:
+                    best_valid_mrr = float(valid_mrr)
+                    best_state = {k: v.detach().cpu().clone() for k, v in reranker.state_dict().items()}
+                    logging.info("DualRerank best valid MRR=%.6f at step=%d", best_valid_mrr, step)
+
+        if best_state is not None:
+            reranker.load_state_dict(best_state, strict=True)
         self.save()
 
     def save(self) -> None:
@@ -256,6 +269,7 @@ class DualRerankTrainer:
             all_r = all_r.squeeze(0).to(self.device)
             all_t = all_t.squeeze(0).to(self.device)
             flag = flag.squeeze(0).to(self.device)
+            B = int(all_h.numel())
 
             kge_score = model.compute_g_KGE(all_h, all_r)
             logits_base = kge_score
@@ -268,26 +282,36 @@ class DualRerankTrainer:
             logits = logits_base.clone()
             logits.scatter_add_(1, cand_t, float(cfg.beta) * delta)
 
-            t = int(all_t.item())
-            val = logits[0, t]
-            L = (logits[0][flag] > val).sum().item() + 1
-            H = (logits[0][flag] >= val).sum().item() + 2
-            ranks.append((int(all_h.item()), int(all_r.item()), t, int(L), int(H)))
+            for i in range(B):
+                t = int(all_t[i].item())
+                val = logits[i, t]
+                fi = flag[i]
+                L = (logits[i][fi] > val).sum().item() + 1
+                H = (logits[i][fi] >= val).sum().item() + 2
+                ranks.append((int(all_h[i].item()), int(all_r[i].item()), t, int(L), int(H)))
 
             log_calls += 1
             log_every = int(cfg.log_every)
             if log_every > 0 and log_calls % log_every == 0:
-                in_c = bool((cand_t[0] == t).any().item())
-                before = (logits_base[0][flag] > logits_base[0, t]).sum().item() + 1
-                after = (logits[0][flag] > logits[0, t]).sum().item() + 1
+                in_c_list = []
+                before_list = []
+                after_list = []
+                for i in range(B):
+                    t = int(all_t[i].item())
+                    fi = flag[i]
+                    in_c_list.append(float((cand_t[i] == t).any().item()))
+                    before_list.append(float((logits_base[i][fi] > logits_base[i, t]).sum().item() + 1))
+                    after_list.append(float((logits[i][fi] > logits[i, t]).sum().item() + 1))
+                in_c = sum(in_c_list) / max(len(in_c_list), 1)
+                before = sum(before_list) / max(len(before_list), 1)
+                after = sum(after_list) / max(len(after_list), 1)
                 logging.info(
-                    "DualRerank split=%s r=%d inCand=%d rankBase=%d rankFinal=%d maskH=%d candK=%d",
+                    "DualRerank split=%s inCandRate=%.3f rankBaseAvg=%.2f rankFinalAvg=%.2f maskHRate=%.3f candK=%d",
                     split,
-                    int(all_r.item()),
-                    int(in_c),
-                    int(before),
-                    int(after),
-                    int(mask_h.item()),
+                    float(in_c),
+                    float(before),
+                    float(after),
+                    float(mask_h.float().mean().item()),
                     int(K),
                 )
 

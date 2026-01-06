@@ -108,6 +108,7 @@ def parse_args(args=None):
     parser.add_argument('--dual_rerank_steps', default=2000, type=int)
     parser.add_argument('--dual_rerank_batch', default=16, type=int)
     parser.add_argument('--dual_rerank_neg', default=32, type=int)
+    parser.add_argument('--dual_rerank_eval_every', default=1000, type=int)
     parser.add_argument('--dual_rerank_log_every', default=200, type=int)
 
     return parser.parse_args(args)
@@ -235,6 +236,7 @@ def main():
             steps=int(getattr(args, "dual_rerank_steps", 2000)),
             batch_size=int(getattr(args, "dual_rerank_batch", 16)),
             neg_num=int(getattr(args, "dual_rerank_neg", 32)),
+            eval_every=int(getattr(args, "dual_rerank_eval_every", 1000)),
             log_every=int(getattr(args, "dual_rerank_log_every", 200)),
             base="kge",
         )
@@ -246,7 +248,7 @@ def main():
             save_path=args.save_path,
         )
         if getattr(args, "dual_rerank_train", False):
-            dual_trainer.train(alpha=float(getattr(args, "alpha", 3.0)))
+            dual_trainer.train(alpha=float(getattr(args, "alpha", 3.0)), valid_set=valid_set, num_worker=args.cpu_num)
         else:
             loaded = dual_trainer.load_if_exists()
             if not loaded:
