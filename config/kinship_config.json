@@ -55,6 +55,8 @@
     "dual_rerank_steps": 5000,
     "dual_rerank_batch": 64,
     "dual_rerank_neg": 16,
+    "dual_rerank_hops": 5,
+    "dual_rerank_max_nodes": 2048,
     "dual_rerank_eval_every": 1000,
     "dual_rerank_log_every": 10
 }

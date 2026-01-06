@@ -6,7 +6,7 @@ from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDa
 from model import RulE
 from utils import load_config, save_config, set_logger, set_seed
 from trainer import GroundTrainer, PreTrainer
-from dual_reranker import DualContextReranker, DualRerankConfig, DualRerankTrainer
+from dual_reranker import HeadGNNReranker, DualRerankConfig, DualRerankTrainer
 
 # torch.cuda.set_device(1)
 
@@ -108,6 +108,8 @@ def parse_args(args=None):
     parser.add_argument('--dual_rerank_steps', default=2000, type=int)
     parser.add_argument('--dual_rerank_batch', default=16, type=int)
     parser.add_argument('--dual_rerank_neg', default=32, type=int)
+    parser.add_argument('--dual_rerank_hops', default=2, type=int)
+    parser.add_argument('--dual_rerank_max_nodes', default=2048, type=int)
     parser.add_argument('--dual_rerank_eval_every', default=1000, type=int)
     parser.add_argument('--dual_rerank_log_every', default=200, type=int)
 
@@ -219,12 +221,14 @@ def main():
     # Dual-context reranker as a grounding replacement (two-stage: KGE retrieval + GNN re-ranking)
     if getattr(args, "dual_rerank", False) or getattr(args, "dual_rerank_train", False):
         logging.info(">>>>> DualRerank: Enabled (replaces grounding stage)")
-        RulE_model.dual_reranker = DualContextReranker(
+        RulE_model.dual_reranker = HeadGNNReranker(
             graph=graph,
             entity_embedding=RulE_model.entity_embedding,
             relation_embedding=RulE_model.relation_embedding,
             num_relations=graph.relation_size,
             dim=int(getattr(args, "dual_rerank_dim", 128)),
+            hops=int(getattr(args, "dual_rerank_hops", 2)),
+            max_nodes=int(getattr(args, "dual_rerank_max_nodes", 2048)),
         ).to(device)
 
         cfg = DualRerankConfig(
@@ -236,6 +240,8 @@ def main():
             steps=int(getattr(args, "dual_rerank_steps", 2000)),
             batch_size=int(getattr(args, "dual_rerank_batch", 16)),
             neg_num=int(getattr(args, "dual_rerank_neg", 32)),
+            hops=int(getattr(args, "dual_rerank_hops", 2)),
+            max_nodes=int(getattr(args, "dual_rerank_max_nodes", 2048)),
             eval_every=int(getattr(args, "dual_rerank_eval_every", 1000)),
             log_every=int(getattr(args, "dual_rerank_log_every", 200)),
             base="kge",

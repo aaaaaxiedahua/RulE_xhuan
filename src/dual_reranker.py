@@ -20,6 +20,8 @@ class DualRerankConfig:
     dim: int = 128
     lt_hops: int = 1
     lh_hops: int = 1
+    hops: int = 2
+    max_nodes: int = 2048
     lr: float = 1e-3
     steps: int = 2000
     batch_size: int = 16
@@ -135,6 +137,161 @@ class DualContextReranker(nn.Module):
         return delta, mask_h, mask_t
 
 
+class HeadGNNReranker(nn.Module):
+    """
+    Head-centered multi-hop message passing over a sampled subgraph from head.
+    Scores only candidate tails; if a candidate is not reached in the sampled subgraph, delta=0 for that candidate.
+    """
+
+    def __init__(
+        self,
+        graph,
+        entity_embedding: nn.Embedding,
+        relation_embedding: nn.Embedding,
+        num_relations: int,
+        dim: int = 128,
+        hops: int = 2,
+        max_nodes: int = 2048,
+    ):
+        super().__init__()
+        self.graph = graph
+        self.entity_embedding = entity_embedding
+        self.relation_embedding = relation_embedding
+        self.num_relations = int(num_relations)
+        self.dim = int(dim)
+        self.hops = int(hops)
+        self.max_nodes = int(max_nodes)
+
+        rel_dim = int(relation_embedding.embedding_dim)
+        self.layer_emb = nn.Embedding(max(self.hops, 1) + 1, rel_dim)
+        self.msg_mlp = MLP(self.dim + rel_dim + rel_dim + rel_dim, [self.dim, self.dim])
+        self.gru = nn.GRUCell(self.dim, self.dim)
+        self.score_mlp = MLP(self.dim + rel_dim + 1, [self.dim, 1])
+        self.start = nn.Parameter(torch.zeros(self.dim))
+
+    def forward(
+        self,
+        all_h: torch.Tensor,
+        all_r: torch.Tensor,
+        cand_t: torch.Tensor,
+        base_scores: Optional[torch.Tensor] = None,
+        neighbors: int = 16,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        device = all_h.device
+        B, K = int(cand_t.size(0)), int(cand_t.size(1))
+        if base_scores is None:
+            base_scores = torch.zeros((B, K), device=device)
+
+        q_emb = _signed_relation_embedding(self.relation_embedding, all_r, self.num_relations)
+
+        deltas = torch.zeros((B, K), device=device)
+        mask_t = torch.zeros((B, K), dtype=torch.bool, device=device)
+        mask_h = torch.ones((B,), dtype=torch.bool, device=device)
+
+        for i in range(B):
+            h = int(all_h[i].item())
+            r = int(all_r[i].item())
+            cand_cpu = cand_t[i].detach().to("cpu")
+            delta_i, mask_i = self._score_one(h, r, cand_cpu, q_emb[i], base_scores[i], neighbors=int(neighbors))
+            deltas[i] = delta_i
+            mask_t[i] = mask_i
+
+        return deltas, mask_h, mask_t
+
+    def _score_one(
+        self,
+        h: int,
+        r: int,
+        cand_t_cpu: torch.Tensor,
+        q_emb: torch.Tensor,
+        base_scores: torch.Tensor,
+        neighbors: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        device = q_emb.device
+        nodes, edge_src, edge_dst, edge_rel = self._sample_subgraph(h, hops=self.hops, neighbors=neighbors, max_nodes=self.max_nodes)
+        num_nodes = len(nodes)
+        K = int(cand_t_cpu.numel())
+        if num_nodes == 0:
+            return torch.zeros((K,), device=device), torch.zeros((K,), dtype=torch.bool, device=device)
+
+        x = torch.zeros((num_nodes, self.dim), device=device)
+        x[0] = self.start
+
+        if edge_src.numel() > 0:
+            src = edge_src.to(device)
+            dst = edge_dst.to(device)
+            rel = edge_rel.to(device)
+            rel_emb = _signed_relation_embedding(self.relation_embedding, rel, self.num_relations)
+
+            for hop in range(1, int(self.hops) + 1):
+                layer_e = self.layer_emb(torch.tensor([hop], device=device)).expand(rel_emb.size(0), -1)
+                q_e = q_emb.unsqueeze(0).expand(rel_emb.size(0), -1)
+                msg_in = torch.cat([x[src], rel_emb, q_e, layer_e], dim=-1)
+                msg = self.msg_mlp(msg_in)
+                agg = scatter(msg, dst, dim=0, dim_size=num_nodes, reduce="sum")
+                x = self.gru(agg, x)
+
+        mapping = {int(n): j for j, n in enumerate(nodes)}
+        idx = torch.zeros((K,), dtype=torch.long, device=device)
+        mask = torch.zeros((K,), dtype=torch.bool, device=device)
+        for j, t in enumerate(cand_t_cpu.tolist()):
+            lj = mapping.get(int(t), None)
+            if lj is not None:
+                idx[j] = int(lj)
+                mask[j] = True
+
+        xt = x[idx]
+        qk = q_emb.unsqueeze(0).expand(K, -1)
+        score_in = torch.cat([xt, qk, base_scores.unsqueeze(-1)], dim=-1)
+        delta = self.score_mlp(score_in).squeeze(-1)
+        delta = delta * mask.float()
+        return delta, mask
+
+    def _sample_subgraph(self, h: int, hops: int, neighbors: int, max_nodes: int):
+        nodes = [int(h)]
+        mapping = {int(h): 0}
+        frontier = [int(h)]
+
+        edge_src = []
+        edge_dst = []
+        edge_rel = []
+
+        for _ in range(int(hops)):
+            if not frontier:
+                break
+            seeds = torch.tensor(frontier, dtype=torch.long)
+            seed_pos, nbr, rel = self.graph.sample_out_edges(seeds, neighbors=int(neighbors))
+            if seed_pos.numel() == 0:
+                frontier = []
+                continue
+            new_frontier = []
+            for sp, v, rr in zip(seed_pos.tolist(), nbr.tolist(), rel.tolist()):
+                u = frontier[int(sp)]
+                u_local = mapping[u]
+                v = int(v)
+                if v not in mapping:
+                    if len(nodes) >= int(max_nodes):
+                        continue
+                    mapping[v] = len(nodes)
+                    nodes.append(v)
+                    new_frontier.append(v)
+                v_local = mapping[v]
+                edge_src.append(u_local)
+                edge_dst.append(v_local)
+                edge_rel.append(int(rr))
+            frontier = list(set(new_frontier))
+
+        if edge_src:
+            edge_src = torch.tensor(edge_src, dtype=torch.long)
+            edge_dst = torch.tensor(edge_dst, dtype=torch.long)
+            edge_rel = torch.tensor(edge_rel, dtype=torch.long)
+        else:
+            edge_src = torch.empty((0,), dtype=torch.long)
+            edge_dst = torch.empty((0,), dtype=torch.long)
+            edge_rel = torch.empty((0,), dtype=torch.long)
+        return nodes, edge_src, edge_dst, edge_rel
+
+
 class DualRerankTrainer:
     def __init__(self, model, graph, device, config: DualRerankConfig, save_path: str):
         self.model = model
@@ -153,7 +310,7 @@ class DualRerankTrainer:
 
     def train(self, alpha: float = 3.0, valid_set=None, num_worker: int = 0) -> None:
         cfg = self.config
-        reranker: DualContextReranker = self.model.dual_reranker
+        reranker: nn.Module = self.model.dual_reranker
         reranker.train()
 
         for p in self.model.entity_embedding.parameters():
@@ -242,16 +399,20 @@ class DualRerankTrainer:
             loss_ema = float(loss.item()) if loss_ema is None else (0.95 * loss_ema + 0.05 * float(loss.item()))
             stats_samples += int(cfg.batch_size)
             if int(cfg.log_every) > 0 and step % int(cfg.log_every) == 0:
+                pos_visited = mask_t.gather(1, labels.view(-1, 1)).float().mean().item()
+                cand_visited = mask_t.float().mean().item()
                 pos_in_topk_rate = stats_pos_in_topk / max(stats_samples, 1)
                 rand_neg_per_sample = stats_random_negs / max(stats_samples, 1)
                 filtered_true_per_sample = stats_filtered_true / max(stats_samples, 1)
                 logging.info(
-                    "DualRerank train step=%d loss=%.6f ema=%.6f K=%d posInTopK=%.3f randNeg=%.2f filteredTrue=%.2f",
+                    "DualRerank train step=%d loss=%.6f ema=%.6f K=%d posInTopK=%.3f posVisited=%.3f candVisited=%.3f randNeg=%.2f filteredTrue=%.2f",
                     step,
                     float(loss.item()),
                     float(loss_ema),
                     int(K),
                     float(pos_in_topk_rate),
+                    float(pos_visited),
+                    float(cand_visited),
                     float(rand_neg_per_sample),
                     float(filtered_true_per_sample),
                 )
@@ -327,26 +488,33 @@ class DualRerankTrainer:
             log_every = int(cfg.log_every)
             if log_every > 0 and log_calls % log_every == 0:
                 in_c_list = []
+                pos_visited_list = []
                 before_list = []
                 after_list = []
                 for i in range(B):
                     t = int(all_t[i].item())
                     fi = flag[i]
-                    in_c_list.append(float((cand_t[i] == t).any().item()))
+                    hit = (cand_t[i] == t)
+                    in_c = bool(hit.any().item())
+                    in_c_list.append(float(in_c))
+                    pos_visited_list.append(float((mask_t[i][hit].any().item()) if in_c else 0.0))
                     before_list.append(float((logits_base[i][fi] > logits_base[i, t]).sum().item() + 1))
                     after_list.append(float((logits[i][fi] > logits[i, t]).sum().item() + 1))
                 in_c = sum(in_c_list) / max(len(in_c_list), 1)
+                pos_v = sum(pos_visited_list) / max(len(pos_visited_list), 1)
                 before = sum(before_list) / max(len(before_list), 1)
                 after = sum(after_list) / max(len(after_list), 1)
                 delta_abs = float(delta.abs().mean().item())
                 delta_max = float(delta.abs().max().item())
+                cand_v = float(mask_t.float().mean().item())
                 logging.info(
-                    "DualRerank split=%s inCandRate=%.3f rankBaseAvg=%.2f rankFinalAvg=%.2f maskHRate=%.3f candK=%d | deltaAbs=%.4f deltaMax=%.4f",
+                    "DualRerank split=%s inCandRate=%.3f posVisited=%.3f candVisited=%.3f rankBaseAvg=%.2f rankFinalAvg=%.2f candK=%d | deltaAbs=%.4f deltaMax=%.4f",
                     split,
                     float(in_c),
+                    float(pos_v),
+                    float(cand_v),
                     float(before),
                     float(after),
-                    float(mask_h.float().mean().item()),
                     int(K),
                     delta_abs,
                     delta_max,
