@@ -47,14 +47,14 @@
 
     "dual_rerank_train": true,
     "dual_rerank": false,
-    "dual_rerank_k": 64,
-    "dual_rerank_neighbors": 32,
+    "dual_rerank_k": 32,
+    "dual_rerank_neighbors": 64,
     "dual_rerank_beta": 0.5,
     "dual_rerank_dim": 128,
     "dual_rerank_lr": 0.001,
     "dual_rerank_steps": 5000,
     "dual_rerank_batch": 64,
-    "dual_rerank_neg": 32,
+    "dual_rerank_neg": 16,
     "dual_rerank_eval_every": 1000,
     "dual_rerank_log_every": 10
 }

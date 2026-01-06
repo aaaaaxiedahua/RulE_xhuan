@@ -171,6 +171,10 @@ class DualRerankTrainer:
         loss_ema = None
         best_valid_mrr = None
         best_state = None
+        stats_pos_in_topk = 0
+        stats_random_negs = 0
+        stats_filtered_true = 0
+        stats_samples = 0
         for step in range(1, int(cfg.steps) + 1):
             idx = torch.randint(0, n, (int(cfg.batch_size),))
             batch = [facts[i] for i in idx.tolist()]
@@ -179,7 +183,8 @@ class DualRerankTrainer:
             all_t = torch.tensor([t for _, _, t in batch], device=self.device, dtype=torch.long)
 
             base_all, kge_all = self._get_base_logits(all_h, all_r, alpha=alpha)
-            topk_idx = torch.topk(kge_all, k=int(cfg.k), dim=1).indices.detach().to("cpu")
+            K = int(cfg.k)
+            topk_idx = torch.topk(kge_all, k=K, dim=1).indices.detach().to("cpu")
 
             cand = []
             labels = []
@@ -190,30 +195,42 @@ class DualRerankTrainer:
                 key = self.graph.encode_hr(h, r)
                 true_tails = set(hr2o.get(key, []))
 
-                c = [t_pos]
-                for t in topk_idx[b].tolist():
-                    if len(c) >= 1 + int(cfg.neg_num):
-                        break
+                negs = []
+                topk_list = topk_idx[b].tolist()
+                stats_pos_in_topk += int(t_pos in topk_list)
+                for t in topk_list:
                     if t == t_pos or (t in true_tails):
+                        stats_filtered_true += int(t != t_pos and (t in true_tails))
                         continue
-                    c.append(int(t))
-                while len(c) < 1 + int(cfg.neg_num):
+                    negs.append(int(t))
+                    if len(negs) >= K - 1:
+                        break
+                while len(negs) < K - 1:
                     t = int(torch.randint(0, nentity, (1,)).item())
                     if t == t_pos or (t in true_tails):
                         continue
-                    c.append(t)
+                    negs.append(t)
+                    stats_random_negs += 1
 
-                cand.append(torch.tensor(c, dtype=torch.long))
-                labels.append(0)
+                c = [t_pos] + negs[: K - 1]
+                perm = torch.randperm(K)
+                c_tensor = torch.tensor(c, dtype=torch.long)[perm]
+                label = int((perm == 0).nonzero(as_tuple=False).item())
 
-            cand_t = torch.stack(cand, dim=0).to(self.device)  # [B, 1+neg]
+                cand.append(c_tensor)
+                labels.append(label)
+
+            cand_t = torch.stack(cand, dim=0).to(self.device)  # [B, K]
             labels = torch.tensor(labels, device=self.device, dtype=torch.long)
 
             base_cand = base_all.gather(1, cand_t)
             kge_cand = kge_all.gather(1, cand_t).detach()
 
             delta, _, mask_t = reranker(all_h, all_r, cand_t, base_scores=kge_cand, neighbors=int(cfg.neighbors))
-            delta = delta * mask_t.float()
+            delta = torch.tanh(delta)
+            active = mask_t.float()
+            mean = (delta * active).sum(dim=1, keepdim=True) / active.sum(dim=1, keepdim=True).clamp(min=1)
+            delta = (delta - mean) * active
 
             logits = base_cand + float(cfg.beta) * delta
             loss = F.cross_entropy(logits, labels)
@@ -223,8 +240,21 @@ class DualRerankTrainer:
             optimizer.step()
 
             loss_ema = float(loss.item()) if loss_ema is None else (0.95 * loss_ema + 0.05 * float(loss.item()))
+            stats_samples += int(cfg.batch_size)
             if int(cfg.log_every) > 0 and step % int(cfg.log_every) == 0:
-                logging.info("DualRerank train step=%d loss=%.6f ema=%.6f", step, float(loss.item()), float(loss_ema))
+                pos_in_topk_rate = stats_pos_in_topk / max(stats_samples, 1)
+                rand_neg_per_sample = stats_random_negs / max(stats_samples, 1)
+                filtered_true_per_sample = stats_filtered_true / max(stats_samples, 1)
+                logging.info(
+                    "DualRerank train step=%d loss=%.6f ema=%.6f K=%d posInTopK=%.3f randNeg=%.2f filteredTrue=%.2f",
+                    step,
+                    float(loss.item()),
+                    float(loss_ema),
+                    int(K),
+                    float(pos_in_topk_rate),
+                    float(rand_neg_per_sample),
+                    float(filtered_true_per_sample),
+                )
 
             eval_every = int(getattr(cfg, "eval_every", 0) or 0)
             if valid_set is not None and eval_every > 0 and step % eval_every == 0:
@@ -278,7 +308,10 @@ class DualRerankTrainer:
             cand_t = torch.topk(kge_score, k=K, dim=1).indices
             base_cand = kge_score.gather(1, cand_t).detach()
             delta, mask_h, mask_t = reranker(all_h, all_r, cand_t, base_scores=base_cand, neighbors=int(cfg.neighbors))
-            delta = delta * mask_t.float()
+            delta = torch.tanh(delta)
+            active = mask_t.float()
+            mean = (delta * active).sum(dim=1, keepdim=True) / active.sum(dim=1, keepdim=True).clamp(min=1)
+            delta = (delta - mean) * active
             logits = logits_base.clone()
             logits.scatter_add_(1, cand_t, float(cfg.beta) * delta)
 
@@ -305,14 +338,18 @@ class DualRerankTrainer:
                 in_c = sum(in_c_list) / max(len(in_c_list), 1)
                 before = sum(before_list) / max(len(before_list), 1)
                 after = sum(after_list) / max(len(after_list), 1)
+                delta_abs = float(delta.abs().mean().item())
+                delta_max = float(delta.abs().max().item())
                 logging.info(
-                    "DualRerank split=%s inCandRate=%.3f rankBaseAvg=%.2f rankFinalAvg=%.2f maskHRate=%.3f candK=%d",
+                    "DualRerank split=%s inCandRate=%.3f rankBaseAvg=%.2f rankFinalAvg=%.2f maskHRate=%.3f candK=%d | deltaAbs=%.4f deltaMax=%.4f",
                     split,
                     float(in_c),
                     float(before),
                     float(after),
                     float(mask_h.float().mean().item()),
                     int(K),
+                    delta_abs,
+                    delta_max,
                 )
 
         ranks = torch.tensor(ranks, dtype=torch.long, device=self.device)
