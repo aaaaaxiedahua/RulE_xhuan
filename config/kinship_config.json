@@ -55,5 +55,5 @@
     "dual_rerank_steps": 5000,
     "dual_rerank_batch": 64,
     "dual_rerank_neg": 32,
-    "dual_rerank_log_every": 200
+    "dual_rerank_log_every": 10
 }
