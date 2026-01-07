@@ -422,13 +422,11 @@ class GroundTrainer(object):
 
             cfg = DualRerankConfig(
                 k=int(getattr(args, "dual_rerank_k", 256)),
-                neighbors=int(getattr(args, "dual_rerank_neighbors", 16)),
                 beta=float(getattr(args, "dual_rerank_beta", 0.5)),
                 dim=int(getattr(args, "dual_rerank_dim", 128)),
                 lr=float(getattr(args, "dual_rerank_lr", 0.001)),
                 steps=int(getattr(args, "dual_rerank_steps", 2000)),
                 batch_size=int(getattr(args, "dual_rerank_batch", 16)),
-                neg_num=int(getattr(args, "dual_rerank_neg", 32)),
                 log_every=int(getattr(args, "dual_rerank_log_every", 200)),
                 base="kge",
             )
@@ -704,7 +702,7 @@ class GroundTrainer(object):
                 K = min(K, kge_score.size(1))
                 cand_t = torch.topk(kge_score, k=K, dim=1).indices
                 base_cand = kge_score.gather(1, cand_t).detach()
-                delta, mask_h, mask_t = model.dual_reranker(all_h, all_r, cand_t, base_scores=base_cand, neighbors=int(getattr(self.args, "dual_rerank_neighbors", 16)))
+                delta, mask_h, mask_t = model.dual_reranker(all_h, all_r, cand_t, base_scores=base_cand)
                 delta = delta * mask_t.float()
                 logits = logits.clone()
                 logits.scatter_add_(1, cand_t, float(getattr(self.args, "dual_rerank_beta", 0.5)) * delta)

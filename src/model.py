@@ -683,9 +683,9 @@ class RulE(torch.nn.Module):
         batch = 128
         self.rule_masks = self.rule_masks.to(device)
         self.rule_features = self.rule_features.to(device)
-        split_num = self.rule_features.size(0) // batch 
-        rule_batches = torch.split(self.rule_features, split_num, 0)
-        rule_mask_batches = torch.split(self.rule_masks, split_num, 0)
+        # torch.split expects a positive split size; use fixed batch chunks.
+        rule_batches = torch.split(self.rule_features, int(batch), 0)
+        rule_mask_batches = torch.split(self.rule_masks, int(batch), 0)
         rules_weight_emb = list()
 
         for rules, rules_mask in zip(rule_batches, rule_mask_batches):

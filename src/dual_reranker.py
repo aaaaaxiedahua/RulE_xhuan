@@ -1,6 +1,7 @@
 import os
 import logging
 from dataclasses import dataclass
+from collections import Counter
 from typing import Optional, Tuple
 
 import torch
@@ -15,17 +16,16 @@ from layers import MLP
 @dataclass
 class DualRerankConfig:
     k: int = 256
-    neighbors: int = 16
     beta: float = 0.5
     dim: int = 128
-    lt_hops: int = 1
-    lh_hops: int = 1
-    hops: int = 2
-    max_nodes: int = 2048
+    layers: int = 2
+    node_topk: int = 128
+    rule_gamma: float = 0.0
+    rule_eps: float = 1e-3
+    use_rule_weight: bool = True
     lr: float = 1e-3
     steps: int = 2000
     batch_size: int = 16
-    neg_num: int = 32
     eval_every: int = 1000
     log_every: int = 200
     base: str = "kge"  # reserved; grounding-replacement uses KGE base
@@ -104,7 +104,6 @@ class DualContextReranker(nn.Module):
         all_r: torch.Tensor,
         cand_t: torch.Tensor,
         base_scores: Optional[torch.Tensor] = None,
-        neighbors: int = 16,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -120,11 +119,12 @@ class DualContextReranker(nn.Module):
         device = all_h.device
         B, K = int(cand_t.size(0)), int(cand_t.size(1))
 
-        ctx_h, mask_h = self._encode_nodes(all_h, all_r, neighbors=neighbors)
+        # DualContextReranker is kept for backward experimentation; not used in the dual_rerank path by default.
+        ctx_h, mask_h = self._encode_nodes(all_h, all_r, neighbors=16)
 
         flat_t = cand_t.reshape(-1)
         flat_r = all_r.unsqueeze(1).expand(-1, K).reshape(-1)
-        ctx_t, mask_t_flat = self._encode_nodes(flat_t, flat_r, neighbors=neighbors)
+        ctx_t, mask_t_flat = self._encode_nodes(flat_t, flat_r, neighbors=16)
         ctx_t = ctx_t.view(B, K, -1)
         mask_t = mask_t_flat.view(B, K)
 
@@ -150,8 +150,11 @@ class HeadGNNReranker(nn.Module):
         relation_embedding: nn.Embedding,
         num_relations: int,
         dim: int = 128,
-        hops: int = 2,
-        max_nodes: int = 2048,
+        layers: int = 2,
+        node_topk: int = 128,
+        rule_gamma: float = 0.0,
+        rule_eps: float = 1e-3,
+        use_rule_weight: bool = True,
     ):
         super().__init__()
         self.graph = graph
@@ -159,15 +162,86 @@ class HeadGNNReranker(nn.Module):
         self.relation_embedding = relation_embedding
         self.num_relations = int(num_relations)
         self.dim = int(dim)
-        self.hops = int(hops)
-        self.max_nodes = int(max_nodes)
+        self.layers = int(layers)
+        self.node_topk = int(node_topk)
+        self.rule_gamma = float(rule_gamma)
+        self.rule_eps = float(rule_eps)
+        self.use_rule_weight = bool(use_rule_weight)
 
+        ent_dim = int(entity_embedding.embedding_dim)
         rel_dim = int(relation_embedding.embedding_dim)
-        self.layer_emb = nn.Embedding(max(self.hops, 1) + 1, rel_dim)
-        self.msg_mlp = MLP(self.dim + rel_dim + rel_dim + rel_dim, [self.dim, self.dim])
+        self.ent_proj = nn.Linear(ent_dim, self.dim)
+        self.layer_emb = nn.Embedding(max(self.layers, 1) + 1, rel_dim)
+        self.msg_mlp = MLP(2 * self.dim + 3 * rel_dim, [self.dim, self.dim])
         self.gru = nn.GRUCell(self.dim, self.dim)
+        self.select_mlp = MLP(self.dim + rel_dim, [self.dim, 1])
         self.score_mlp = MLP(self.dim + rel_dim + 1, [self.dim, 1])
         self.start = nn.Parameter(torch.zeros(self.dim))
+
+        self.relation2rules = None
+        self._rule_weight = None  # CPU float tensor after sigmoid
+        self._prior_cache = {}
+        self.last_stats = None
+
+    def set_rules(self, relation2rules, rules_weight_emb: Optional[torch.Tensor] = None) -> None:
+        self.relation2rules = relation2rules
+        self._prior_cache = {}
+        self._rule_weight = None
+        if rules_weight_emb is None or not self.use_rule_weight:
+            return
+        try:
+            w = torch.sigmoid(rules_weight_emb.detach().to("cpu").float()).view(-1)
+        except Exception:
+            w = None
+        self._rule_weight = w
+
+    def _rule_prior_tensor(self, query_r: int, hop: int) -> Optional[torch.Tensor]:
+        if self.relation2rules is None:
+            return None
+        if query_r < 0 or query_r >= len(self.relation2rules):
+            return None
+        key = (int(query_r), int(hop))
+        if key in self._prior_cache:
+            return self._prior_cache[key]
+
+        rules = self.relation2rules[int(query_r)]
+        if not rules:
+            self._prior_cache[key] = None
+            return None
+
+        prior = torch.zeros((self.num_relations * 2,), dtype=torch.float)
+        for rule_id, (_, body) in rules:
+            pos = int(hop) - 1
+            if pos < 0 or pos >= len(body):
+                continue
+            rel = int(body[pos])
+            if rel < 0 or rel >= int(prior.numel()):
+                continue
+            w = 1.0
+            if self._rule_weight is not None and int(rule_id) < int(self._rule_weight.numel()):
+                w = float(self._rule_weight[int(rule_id)].item())
+            if w <= 0:
+                continue
+            prior[rel] += float(w)
+
+        if float(prior.sum().item()) <= 0:
+            self._prior_cache[key] = None
+            return None
+        prior = prior / prior.sum()
+        self._prior_cache[key] = prior
+        return prior
+
+    def _get_out_edges_cpu(self, node_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        self.graph.build_neighbor_index()
+        start = int(self.graph._head_ptr[int(node_id)].item())
+        end = int(self.graph._head_ptr[int(node_id) + 1].item())
+        if end <= start:
+            empty = torch.empty((0,), dtype=torch.long)
+            return empty, empty
+        return self.graph._edge_tail_sorted[start:end], self.graph._edge_rel_sorted[start:end]
+
+    def _sample_edges_cpu(self, node_id: int, k: int, rel_prior: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        raise RuntimeError("_sample_edges_cpu removed: this reranker no longer performs per-node neighbor sampling.")
 
     def forward(
         self,
@@ -175,7 +249,6 @@ class HeadGNNReranker(nn.Module):
         all_r: torch.Tensor,
         cand_t: torch.Tensor,
         base_scores: Optional[torch.Tensor] = None,
-        neighbors: int = 16,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device = all_h.device
         B, K = int(cand_t.size(0)), int(cand_t.size(1))
@@ -186,15 +259,34 @@ class HeadGNNReranker(nn.Module):
 
         deltas = torch.zeros((B, K), device=device)
         mask_t = torch.zeros((B, K), dtype=torch.bool, device=device)
-        mask_h = torch.ones((B,), dtype=torch.bool, device=device)
+        mask_h = torch.zeros((B,), dtype=torch.bool, device=device)
+        stats = {
+            "visited_nodes": 0.0,
+            "sampled_edges": 0.0,
+            "prior_edges": 0.0,
+            "prior_nonempty": 0.0,
+        }
 
         for i in range(B):
             h = int(all_h[i].item())
             r = int(all_r[i].item())
             cand_cpu = cand_t[i].detach().to("cpu")
-            delta_i, mask_i = self._score_one(h, r, cand_cpu, q_emb[i], base_scores[i], neighbors=int(neighbors))
+            delta_i, mask_i, head_ok, one_stats = self._score_one(h, r, cand_cpu, q_emb[i], base_scores[i])
             deltas[i] = delta_i
             mask_t[i] = mask_i
+            mask_h[i] = bool(head_ok)
+            stats["visited_nodes"] += float(one_stats.get("visited_nodes", 0.0))
+            stats["sampled_edges"] += float(one_stats.get("sampled_edges", 0.0))
+            stats["prior_edges"] += float(one_stats.get("prior_edges", 0.0))
+            stats["prior_nonempty"] += float(one_stats.get("prior_nonempty", 0.0))
+
+        denom = max(B, 1)
+        self.last_stats = {
+            "visited_nodes": float(stats["visited_nodes"] / denom),
+            "sampled_edges": float(stats["sampled_edges"] / denom),
+            "prior_edges": float(stats["prior_edges"] / denom),
+            "prior_nonempty": float(stats["prior_nonempty"] / denom),
+        }
 
         return deltas, mask_h, mask_t
 
@@ -205,33 +297,127 @@ class HeadGNNReranker(nn.Module):
         cand_t_cpu: torch.Tensor,
         q_emb: torch.Tensor,
         base_scores: torch.Tensor,
-        neighbors: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, bool, dict]:
         device = q_emb.device
-        nodes, edge_src, edge_dst, edge_rel = self._sample_subgraph(h, hops=self.hops, neighbors=neighbors, max_nodes=self.max_nodes)
-        num_nodes = len(nodes)
         K = int(cand_t_cpu.numel())
-        if num_nodes == 0:
-            return torch.zeros((K,), device=device), torch.zeros((K,), dtype=torch.bool, device=device)
 
-        x = torch.zeros((num_nodes, self.dim), device=device)
-        x[0] = self.start
+        nodes = [int(h)]
+        mapping = {int(h): 0}
+        visited = {int(h)}
+        frontier = [int(h)]
 
-        if edge_src.numel() > 0:
-            src = edge_src.to(device)
-            dst = edge_dst.to(device)
-            rel = edge_rel.to(device)
-            rel_emb = _signed_relation_embedding(self.relation_embedding, rel, self.num_relations)
+        h_emb = self.entity_embedding(torch.tensor([int(h)], device=device))
+        x = self.ent_proj(h_emb).view(1, -1) + self.start.view(1, -1)
 
-            for hop in range(1, int(self.hops) + 1):
-                layer_e = self.layer_emb(torch.tensor([hop], device=device)).expand(rel_emb.size(0), -1)
-                q_e = q_emb.unsqueeze(0).expand(rel_emb.size(0), -1)
-                msg_in = torch.cat([x[src], rel_emb, q_e, layer_e], dim=-1)
-                msg = self.msg_mlp(msg_in)
-                agg = scatter(msg, dst, dim=0, dim_size=num_nodes, reduce="sum")
-                x = self.gru(agg, x)
+        head_ok = False
+        sampled_edges_total = 0
+        prior_edges_total = 0
+        prior_nonempty = 0
 
-        mapping = {int(n): j for j, n in enumerate(nodes)}
+        for layer in range(1, int(self.layers) + 1):
+            max_nodes = min(int(self.graph.entity_size), 1 + int(self.layers) * max(int(self.node_topk), 0))
+            if not frontier or len(nodes) >= int(max_nodes):
+                break
+
+            rel_prior = self._rule_prior_tensor(int(r), int(layer))
+            prior_nonempty += float(rel_prior is not None)
+
+            edges = []
+            rel_hist = Counter()
+            for u in frontier:
+                tails, rels = self._get_out_edges_cpu(int(u))
+                if int(tails.numel()) == 0:
+                    continue
+                if layer == 1 and int(u) == int(h):
+                    head_ok = True
+                for v, rr in zip(tails.tolist(), rels.tolist()):
+                    edges.append((int(u), int(rr), int(v)))
+                    rel_hist[int(rr)] += 1
+
+            sampled_edges_total += int(len(edges))
+            if rel_prior is not None and len(edges) > 0:
+                for _, rr, _ in edges:
+                    prior_edges_total += int(float(rel_prior[int(rr)].item()) > 0.0)
+
+            if not edges:
+                frontier = []
+                continue
+
+            # Optional rule bias weight on messages (AdaProp style expands full neighbors; we bias the message, not sampling).
+            edge_w = None
+            if rel_prior is not None and float(self.rule_gamma) > 0:
+                edge_w = (1.0 - float(self.rule_gamma)) + float(self.rule_gamma) * rel_prior
+
+            new_nodes = []
+            new_pos = {}
+            edge_src_local = []
+            edge_rel = []
+            edge_dst_pos = []
+            edge_weight = []
+            for u, rr, v in edges:
+                if v in visited:
+                    continue
+                pos = new_pos.get(v)
+                if pos is None:
+                    pos = len(new_nodes)
+                    new_pos[v] = pos
+                    new_nodes.append(v)
+                edge_src_local.append(mapping[int(u)])
+                edge_rel.append(int(rr))
+                edge_dst_pos.append(int(pos))
+                if edge_w is None:
+                    edge_weight.append(1.0)
+                else:
+                    edge_weight.append(float(edge_w[int(rr)].item()) + float(self.rule_eps))
+
+            if not new_nodes:
+                frontier = []
+                continue
+
+            remaining = int(max_nodes) - int(len(nodes))
+            if remaining <= 0:
+                break
+
+            # Compute hidden for all newly discovered nodes (before layer topk filtering).
+            src_idx = torch.tensor(edge_src_local, dtype=torch.long, device=device)
+            dst_pos_t = torch.tensor(edge_dst_pos, dtype=torch.long, device=device)
+            rel_ids = torch.tensor(edge_rel, dtype=torch.long, device=device)
+
+            new_ids = torch.tensor(new_nodes, dtype=torch.long, device=device)
+            dst_init = self.ent_proj(self.entity_embedding(new_ids))
+
+            rel_emb = _signed_relation_embedding(self.relation_embedding, rel_ids, self.num_relations)
+            layer_e = self.layer_emb(torch.tensor([int(layer)], device=device)).expand(rel_emb.size(0), -1)
+            q_e = q_emb.unsqueeze(0).expand(rel_emb.size(0), -1)
+
+            msg_in = torch.cat([x[src_idx], rel_emb, q_e, layer_e, dst_init[dst_pos_t]], dim=-1)
+            msg = self.msg_mlp(msg_in)
+            if edge_weight:
+                ew = torch.tensor(edge_weight, device=device, dtype=msg.dtype).unsqueeze(-1)
+                msg = msg * ew
+            agg = scatter(msg, dst_pos_t, dim=0, dim_size=int(new_ids.size(0)), reduce="sum")
+            new_hidden = self.gru(agg, dst_init)
+
+            # AdaProp-style: select topk NEW nodes only; no duplicates across layers.
+            k_keep = min(int(self.node_topk), int(new_hidden.size(0)), int(remaining))
+            if k_keep <= 0:
+                break
+
+            sel_in = torch.cat([new_hidden, q_emb.unsqueeze(0).expand(new_hidden.size(0), -1)], dim=-1)
+            sel = self.select_mlp(sel_in).squeeze(-1)
+            top_idx = torch.topk(sel, k=int(k_keep), dim=0).indices.detach().to("cpu")
+
+            selected_nodes = [int(new_nodes[j]) for j in top_idx.tolist()]
+            selected_hidden = new_hidden[top_idx.to(device)]
+
+            for nid in selected_nodes:
+                visited.add(int(nid))
+                mapping[int(nid)] = len(nodes)
+                nodes.append(int(nid))
+
+            x = torch.cat([x, selected_hidden], dim=0)
+            frontier = selected_nodes
+
         idx = torch.zeros((K,), dtype=torch.long, device=device)
         mask = torch.zeros((K,), dtype=torch.bool, device=device)
         for j, t in enumerate(cand_t_cpu.tolist()):
@@ -245,51 +431,13 @@ class HeadGNNReranker(nn.Module):
         score_in = torch.cat([xt, qk, base_scores.unsqueeze(-1)], dim=-1)
         delta = self.score_mlp(score_in).squeeze(-1)
         delta = delta * mask.float()
-        return delta, mask
-
-    def _sample_subgraph(self, h: int, hops: int, neighbors: int, max_nodes: int):
-        nodes = [int(h)]
-        mapping = {int(h): 0}
-        frontier = [int(h)]
-
-        edge_src = []
-        edge_dst = []
-        edge_rel = []
-
-        for _ in range(int(hops)):
-            if not frontier:
-                break
-            seeds = torch.tensor(frontier, dtype=torch.long)
-            seed_pos, nbr, rel = self.graph.sample_out_edges(seeds, neighbors=int(neighbors))
-            if seed_pos.numel() == 0:
-                frontier = []
-                continue
-            new_frontier = []
-            for sp, v, rr in zip(seed_pos.tolist(), nbr.tolist(), rel.tolist()):
-                u = frontier[int(sp)]
-                u_local = mapping[u]
-                v = int(v)
-                if v not in mapping:
-                    if len(nodes) >= int(max_nodes):
-                        continue
-                    mapping[v] = len(nodes)
-                    nodes.append(v)
-                    new_frontier.append(v)
-                v_local = mapping[v]
-                edge_src.append(u_local)
-                edge_dst.append(v_local)
-                edge_rel.append(int(rr))
-            frontier = list(set(new_frontier))
-
-        if edge_src:
-            edge_src = torch.tensor(edge_src, dtype=torch.long)
-            edge_dst = torch.tensor(edge_dst, dtype=torch.long)
-            edge_rel = torch.tensor(edge_rel, dtype=torch.long)
-        else:
-            edge_src = torch.empty((0,), dtype=torch.long)
-            edge_dst = torch.empty((0,), dtype=torch.long)
-            edge_rel = torch.empty((0,), dtype=torch.long)
-        return nodes, edge_src, edge_dst, edge_rel
+        stats = {
+            "visited_nodes": float(len(nodes)),
+            "sampled_edges": float(sampled_edges_total),
+            "prior_edges": float(prior_edges_total),
+            "prior_nonempty": float(prior_nonempty),
+        }
+        return delta, mask, bool(head_ok), stats
 
 
 class DualRerankTrainer:
@@ -383,7 +531,7 @@ class DualRerankTrainer:
             base_cand = base_all.gather(1, cand_t)
             kge_cand = kge_all.gather(1, cand_t).detach()
 
-            delta, _, mask_t = reranker(all_h, all_r, cand_t, base_scores=kge_cand, neighbors=int(cfg.neighbors))
+            delta, _, mask_t = reranker(all_h, all_r, cand_t, base_scores=kge_cand)
             delta = torch.tanh(delta)
             active = mask_t.float()
             mean = (delta * active).sum(dim=1, keepdim=True) / active.sum(dim=1, keepdim=True).clamp(min=1)
@@ -404,8 +552,17 @@ class DualRerankTrainer:
                 pos_in_topk_rate = stats_pos_in_topk / max(stats_samples, 1)
                 rand_neg_per_sample = stats_random_negs / max(stats_samples, 1)
                 filtered_true_per_sample = stats_filtered_true / max(stats_samples, 1)
+                extra = ""
+                if hasattr(reranker, "last_stats") and isinstance(getattr(reranker, "last_stats"), dict):
+                    ls = reranker.last_stats
+                    extra = " | visited=%.1f edges=%.1f priorEdges=%.1f priorNonEmpty=%.2f" % (
+                        float(ls.get("visited_nodes", 0.0)),
+                        float(ls.get("sampled_edges", 0.0)),
+                        float(ls.get("prior_edges", 0.0)),
+                        float(ls.get("prior_nonempty", 0.0)),
+                    )
                 logging.info(
-                    "DualRerank train step=%d loss=%.6f ema=%.6f K=%d posInTopK=%.3f posVisited=%.3f candVisited=%.3f randNeg=%.2f filteredTrue=%.2f",
+                    "DualRerank train step=%d loss=%.6f ema=%.6f K=%d posInTopK=%.3f posVisited=%.3f candVisited=%.3f randNeg=%.2f filteredTrue=%.2f%s",
                     step,
                     float(loss.item()),
                     float(loss_ema),
@@ -415,6 +572,7 @@ class DualRerankTrainer:
                     float(cand_visited),
                     float(rand_neg_per_sample),
                     float(filtered_true_per_sample),
+                    extra,
                 )
 
             eval_every = int(getattr(cfg, "eval_every", 0) or 0)
@@ -452,7 +610,9 @@ class DualRerankTrainer:
         reranker.eval()
 
         dataloader = DataLoader(dataset, batch_size=1, num_workers=num_worker)
-        ranks = []
+        ranks_base = []
+        ranks_final = []
+        improved = 0
         log_calls = 0
         for batch in dataloader:
             all_h, all_r, all_t, flag = batch
@@ -468,7 +628,7 @@ class DualRerankTrainer:
             K = min(int(cfg.k), int(kge_score.size(1)))
             cand_t = torch.topk(kge_score, k=K, dim=1).indices
             base_cand = kge_score.gather(1, cand_t).detach()
-            delta, mask_h, mask_t = reranker(all_h, all_r, cand_t, base_scores=base_cand, neighbors=int(cfg.neighbors))
+            delta, mask_h, mask_t = reranker(all_h, all_r, cand_t, base_scores=base_cand)
             delta = torch.tanh(delta)
             active = mask_t.float()
             mean = (delta * active).sum(dim=1, keepdim=True) / active.sum(dim=1, keepdim=True).clamp(min=1)
@@ -480,9 +640,15 @@ class DualRerankTrainer:
                 t = int(all_t[i].item())
                 val = logits[i, t]
                 fi = flag[i]
-                L = (logits[i][fi] > val).sum().item() + 1
-                H = (logits[i][fi] >= val).sum().item() + 2
-                ranks.append((int(all_h[i].item()), int(all_r[i].item()), t, int(L), int(H)))
+                val0 = logits_base[i, t]
+                L0 = (logits_base[i][fi] > val0).sum().item() + 1
+                H0 = (logits_base[i][fi] >= val0).sum().item() + 2
+                L1 = (logits[i][fi] > val).sum().item() + 1
+                H1 = (logits[i][fi] >= val).sum().item() + 2
+                ranks_base.append((int(all_h[i].item()), int(all_r[i].item()), t, int(L0), int(H0)))
+                ranks_final.append((int(all_h[i].item()), int(all_r[i].item()), t, int(L1), int(H1)))
+                if (L1 + H1) < (L0 + H0):
+                    improved += 1
 
             log_calls += 1
             log_every = int(cfg.log_every)
@@ -507,8 +673,17 @@ class DualRerankTrainer:
                 delta_abs = float(delta.abs().mean().item())
                 delta_max = float(delta.abs().max().item())
                 cand_v = float(mask_t.float().mean().item())
+                extra = ""
+                if hasattr(reranker, "last_stats") and isinstance(getattr(reranker, "last_stats"), dict):
+                    ls = reranker.last_stats
+                    extra = " | visited=%.1f edges=%.1f priorEdges=%.1f priorNonEmpty=%.2f" % (
+                        float(ls.get("visited_nodes", 0.0)),
+                        float(ls.get("sampled_edges", 0.0)),
+                        float(ls.get("prior_edges", 0.0)),
+                        float(ls.get("prior_nonempty", 0.0)),
+                    )
                 logging.info(
-                    "DualRerank split=%s inCandRate=%.3f posVisited=%.3f candVisited=%.3f rankBaseAvg=%.2f rankFinalAvg=%.2f candK=%d | deltaAbs=%.4f deltaMax=%.4f",
+                    "DualRerank split=%s inCandRate=%.3f posVisited=%.3f candVisited=%.3f rankBaseAvg=%.2f rankFinalAvg=%.2f candK=%d | deltaAbs=%.4f deltaMax=%.4f%s",
                     split,
                     float(in_c),
                     float(pos_v),
@@ -518,46 +693,49 @@ class DualRerankTrainer:
                     int(K),
                     delta_abs,
                     delta_max,
+                    extra,
                 )
 
-        ranks = torch.tensor(ranks, dtype=torch.long, device=self.device)
-        query2LH = {(int(h), int(r), int(t)): (int(L), int(H)) for h, r, t, L, H in ranks.data.cpu().numpy().tolist()}
+        query2LH_base = {(int(h), int(r), int(t)): (int(L), int(H)) for h, r, t, L, H in ranks_base}
+        query2LH_final = {(int(h), int(r), int(t)): (int(L), int(H)) for h, r, t, L, H in ranks_final}
 
-        hit1 = hit3 = hit10 = mr = mrr = 0.0
-        for (L, H) in query2LH.values():
-            if expectation:
-                for rank in range(L, H):
+        def _metrics(query2lh):
+            hit1 = hit3 = hit10 = mr = mrr = 0.0
+            for (L, H) in query2lh.values():
+                if expectation:
+                    for rank in range(L, H):
+                        p = 1.0 / (H - L)
+                        if rank <= 1:
+                            hit1 += p
+                        if rank <= 3:
+                            hit3 += p
+                        if rank <= 10:
+                            hit10 += p
+                        mr += rank * p
+                        mrr += (1.0 / rank) * p
+                else:
+                    rank = H - 1
                     if rank <= 1:
-                        hit1 += 1.0 / (H - L)
+                        hit1 += 1
                     if rank <= 3:
-                        hit3 += 1.0 / (H - L)
+                        hit3 += 1
                     if rank <= 10:
-                        hit10 += 1.0 / (H - L)
-                    mr += rank / (H - L)
-                    mrr += 1.0 / rank / (H - L)
-            else:
-                rank = H - 1
-                if rank <= 1:
-                    hit1 += 1
-                if rank <= 3:
-                    hit3 += 1
-                if rank <= 10:
-                    hit10 += 1
-                mr += rank
-                mrr += 1.0 / rank
+                        hit10 += 1
+                    mr += rank
+                    mrr += 1.0 / rank
 
-        denom = max(len(ranks), 1)
-        hit1 /= denom
-        hit3 /= denom
-        hit10 /= denom
-        mr /= denom
-        mrr /= denom
+            denom = max(len(query2lh), 1)
+            return (hit1 / denom, hit3 / denom, hit10 / denom, mr / denom, mrr / denom)
+
+        b1, b3, b10, bmr, bmrr = _metrics(query2LH_base)
+        f1, f3, f10, fmr, fmrr = _metrics(query2LH_final)
+
+        denom = max(len(query2LH_final), 1)
+        imp_rate = float(improved) / float(denom)
 
         logging.info(">>>>> DualRerank: Evaluating on %s", split)
-        logging.info("Data : %d", len(query2LH))
-        logging.info("Hit1 : %.6f", hit1)
-        logging.info("Hit3 : %.6f", hit3)
-        logging.info("Hit10: %.6f", hit10)
-        logging.info("MR   : %.6f", mr)
-        logging.info("MRR  : %.6f", mrr)
-        return float(mrr)
+        logging.info("Data : %d | improved(midRank): %.3f", len(query2LH_final), imp_rate)
+        logging.info("Base : Hit1 %.6f | Hit3 %.6f | Hit10 %.6f | MR %.6f | MRR %.6f", b1, b3, b10, bmr, bmrr)
+        logging.info("Final: Hit1 %.6f | Hit3 %.6f | Hit10 %.6f | MR %.6f | MRR %.6f", f1, f3, f10, fmr, fmrr)
+        logging.info("Delta: Hit1 %+0.6f | Hit3 %+0.6f | Hit10 %+0.6f | MR %+0.6f | MRR %+0.6f", f1 - b1, f3 - b3, f10 - b10, fmr - bmr, fmrr - bmrr)
+        return float(fmrr)
