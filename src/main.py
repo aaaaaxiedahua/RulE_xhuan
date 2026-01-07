@@ -114,6 +114,8 @@ def parse_args(args=None):
     parser.add_argument('--dual_rerank_rule_eps', default=1e-3, type=float)
     parser.add_argument('--dual_rerank_use_rule_weight', action='store_true', default=True)
     parser.add_argument('--no_dual_rerank_use_rule_weight', dest='dual_rerank_use_rule_weight', action='store_false')
+    parser.add_argument('--dual_rerank_tau', default=1.0, type=float)
+    parser.add_argument('--dual_rerank_edge_topk', default=-1, type=int)
     parser.add_argument('--dual_rerank_eval_every', default=1000, type=int)
     parser.add_argument('--dual_rerank_log_every', default=200, type=int)
 
@@ -236,6 +238,8 @@ def main():
             rule_gamma=float(getattr(args, "dual_rerank_rule_gamma", 0.0)),
             rule_eps=float(getattr(args, "dual_rerank_rule_eps", 1e-3)),
             use_rule_weight=bool(getattr(args, "dual_rerank_use_rule_weight", True)),
+            tau=float(getattr(args, "dual_rerank_tau", 1.0)),
+            edge_topk=int(getattr(args, "dual_rerank_edge_topk", -1)),
         ).to(device)
 
         # Provide explicit rules (no trie) to guide sampling.
@@ -262,6 +266,8 @@ def main():
             rule_gamma=float(getattr(args, "dual_rerank_rule_gamma", 0.0)),
             rule_eps=float(getattr(args, "dual_rerank_rule_eps", 1e-3)),
             use_rule_weight=bool(getattr(args, "dual_rerank_use_rule_weight", True)),
+            tau=float(getattr(args, "dual_rerank_tau", 1.0)),
+            edge_topk=int(getattr(args, "dual_rerank_edge_topk", -1)),
             eval_every=int(getattr(args, "dual_rerank_eval_every", 1000)),
             log_every=int(getattr(args, "dual_rerank_log_every", 200)),
             base="kge",

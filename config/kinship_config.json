@@ -58,6 +58,8 @@
     "dual_rerank_rule_gamma": 0.5,
     "dual_rerank_rule_eps": 0.001,
     "dual_rerank_use_rule_weight": true,
+    "dual_rerank_tau": 1.0,
+    "dual_rerank_edge_topk": -1,
     "dual_rerank_eval_every": 100,
     "dual_rerank_log_every": 10
 }
