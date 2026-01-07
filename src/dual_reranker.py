@@ -241,14 +241,23 @@ class AdaPropGNNLayer(nn.Module):
         bool_diff = tmp_diff.bool()
         diff_node = nodes[bool_diff]
 
+        # No new nodes to sample from: keep everything (all nodes are "old").
+        if diff_node.numel() == 0:
+            return hidden_new, nodes, torch.ones((n_node,), dtype=torch.bool, device=device)
+
         diff_logit = self.W_samp(hidden_new[bool_diff]).squeeze(-1)
 
         node_scores = torch.full((int(batch_size), self.n_ent), float("-inf"), device=device)
         node_scores[diff_node[:, 0], diff_node[:, 1]] = diff_logit
+        # Some batches may have no diff nodes (row stays all -inf); make them uniform to avoid NaNs.
+        empty_row = torch.isinf(node_scores).all(dim=1)
+        if empty_row.any():
+            node_scores[empty_row] = 0.0
         node_scores = self._softmax(node_scores)
 
-        topk_index = torch.topk(node_scores, int(self.n_node_topk), dim=1).indices.reshape(-1)
-        topk_batchidx = torch.arange(int(batch_size), device=device).repeat(int(self.n_node_topk), 1).T.reshape(-1)
+        k = min(int(self.n_node_topk), int(self.n_ent))
+        topk_index = torch.topk(node_scores, k, dim=1).indices.reshape(-1)
+        topk_batchidx = torch.arange(int(batch_size), device=device).repeat(k, 1).T.reshape(-1)
         batch_topk_nodes = torch.zeros((int(batch_size), self.n_ent), device=device)
         batch_topk_nodes[topk_batchidx, topk_index] = 1.0
 
