@@ -652,6 +652,8 @@ class DualRerankTrainer:
                     best_valid_mrr = float(valid_mrr)
                     best_state = {k: v.detach().cpu().clone() for k, v in reranker.state_dict().items()}
                     logging.info("DualRerank best valid MRR=%.6f at step=%d", best_valid_mrr, step)
+                # evaluate_dataset() switches model/ reranker to eval(); restore training mode for backprop.
+                reranker.train()
 
         if best_state is not None:
             reranker.load_state_dict(best_state, strict=True)
