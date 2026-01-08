@@ -100,20 +100,16 @@ def parse_args(args=None):
     # dual-context GNN reranker (two-stage)
     parser.add_argument('--dual_rerank', action='store_true', default=False)
     parser.add_argument('--dual_rerank_train', action='store_true', default=False)
-    parser.add_argument('--dual_rerank_k', default=256, type=int)
-    parser.add_argument('--dual_rerank_beta', default=0.5, type=float)
     parser.add_argument('--dual_rerank_dim', default=128, type=int)
     parser.add_argument('--dual_rerank_lr', default=0.001, type=float)
-    parser.add_argument('--dual_rerank_steps', default=2000, type=int)
+    parser.add_argument('--dual_rerank_epochs', default=300, type=int)
+    # backward-compatible alias: steps -> epochs
+    parser.add_argument('--dual_rerank_steps', dest='dual_rerank_epochs', type=int)
     parser.add_argument('--dual_rerank_batch', default=16, type=int)
     parser.add_argument('--dual_rerank_layers', default=2, type=int)
     # backward-compatible alias
     parser.add_argument('--dual_rerank_hops', dest='dual_rerank_layers', default=2, type=int)
     parser.add_argument('--dual_rerank_node_topk', default=128, type=int)
-    parser.add_argument('--dual_rerank_rule_gamma', default=0.0, type=float)
-    parser.add_argument('--dual_rerank_rule_eps', default=1e-3, type=float)
-    parser.add_argument('--dual_rerank_use_rule_weight', action='store_true', default=True)
-    parser.add_argument('--no_dual_rerank_use_rule_weight', dest='dual_rerank_use_rule_weight', action='store_false')
     parser.add_argument('--dual_rerank_tau', default=1.0, type=float)
     parser.add_argument('--dual_rerank_edge_topk', default=-1, type=int)
     parser.add_argument('--dual_rerank_eval_every', default=1000, type=int)
@@ -235,42 +231,26 @@ def main():
             dim=int(getattr(args, "dual_rerank_dim", 128)),
             layers=int(getattr(args, "dual_rerank_layers", 2)),
             node_topk=int(getattr(args, "dual_rerank_node_topk", 128)),
-            rule_gamma=float(getattr(args, "dual_rerank_rule_gamma", 0.0)),
-            rule_eps=float(getattr(args, "dual_rerank_rule_eps", 1e-3)),
-            use_rule_weight=bool(getattr(args, "dual_rerank_use_rule_weight", True)),
             tau=float(getattr(args, "dual_rerank_tau", 1.0)),
             edge_topk=int(getattr(args, "dual_rerank_edge_topk", -1)),
         ).to(device)
 
-        # Provide explicit rules (no trie) to guide sampling.
-        if hasattr(RulE_model, "relation2rules"):
-            rule_weight = None
-            if bool(getattr(args, "dual_rerank_use_rule_weight", True)) and hasattr(RulE_model, "eval_compute_rule_weight"):
-                try:
-                    RulE_model.eval_compute_rule_weight(device)
-                    rule_weight = getattr(RulE_model, "rules_weight_emb", None)
-                    logging.info("DualRerank: computed rule weights for sampling prior.")
-                except Exception as e:
-                    logging.warning("DualRerank: failed to compute rule weights; fallback to uniform. err=%s", str(e))
-            RulE_model.dual_reranker.set_rules(RulE_model.relation2rules, rule_weight)
+        dual_epochs = getattr(args, "dual_rerank_epochs", None)
+        if dual_epochs is None:
+            dual_epochs = getattr(args, "dual_rerank_steps", 300)
 
         cfg = DualRerankConfig(
-            k=int(getattr(args, "dual_rerank_k", 256)),
-            beta=float(getattr(args, "dual_rerank_beta", 0.5)),
             dim=int(getattr(args, "dual_rerank_dim", 128)),
             lr=float(getattr(args, "dual_rerank_lr", 0.001)),
-            steps=int(getattr(args, "dual_rerank_steps", 2000)),
+            epochs=int(dual_epochs),
             batch_size=int(getattr(args, "dual_rerank_batch", 16)),
             layers=int(getattr(args, "dual_rerank_layers", 2)),
             node_topk=int(getattr(args, "dual_rerank_node_topk", 128)),
-            rule_gamma=float(getattr(args, "dual_rerank_rule_gamma", 0.0)),
-            rule_eps=float(getattr(args, "dual_rerank_rule_eps", 1e-3)),
-            use_rule_weight=bool(getattr(args, "dual_rerank_use_rule_weight", True)),
             tau=float(getattr(args, "dual_rerank_tau", 1.0)),
             edge_topk=int(getattr(args, "dual_rerank_edge_topk", -1)),
             eval_every=int(getattr(args, "dual_rerank_eval_every", 1000)),
             log_every=int(getattr(args, "dual_rerank_log_every", 200)),
-            base="kge",
+            base="gnn",
         )
         dual_trainer = DualRerankTrainer(
             model=RulE_model,
@@ -280,7 +260,7 @@ def main():
             save_path=args.save_path,
         )
         if getattr(args, "dual_rerank_train", False):
-            dual_trainer.train(alpha=float(getattr(args, "alpha", 3.0)), valid_set=valid_set, num_worker=args.cpu_num)
+            dual_trainer.train(valid_set=valid_set, num_worker=args.cpu_num)
         else:
             loaded = dual_trainer.load_if_exists()
             if not loaded:
