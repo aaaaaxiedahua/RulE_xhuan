@@ -1,0 +1,26 @@
+{
+  "data_path": "../data/wn18rr",
+  "rule_file": "../data/wn18rr/mined_rules.txt",
+  "save_path": "projerule_wn18rr",
+  "cuda": true,
+  "seed": 800,
+  "weight_decay": 0.0,
+
+  "g_batch_size": 32,
+  "g_lr": 0.002,
+  "num_iters": 10,
+  "batch_per_epoch": 6000,
+  "smoothing": 0.3,
+  "print_every": 200,
+
+  "projerule_dim": 200,
+  "projerule_lambda_rule": 1.0,
+  "projerule_tau_rule": 0.5,
+  "projerule_tau_edge": 1.0,
+  "projerule_beta1": 10.0,
+  "projerule_beta2": -5.0,
+  "projerule_init_phase_scale": 3.141592653589793,
+
+  "chunk_size": 2048
+}
+
