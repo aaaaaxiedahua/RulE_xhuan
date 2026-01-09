@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import json
+import time
 
 import numpy as np
 import torch
@@ -79,6 +80,11 @@ def evaluate(model: ProjeRulE, dataset, device: torch.device, expectation: bool 
     concat_all_r = []
     concat_all_t = []
     concat_flag = []
+    alpha_sum = 0.0
+    alpha_cnt = 0
+    wmax_sum = 0.0
+    went_sum = 0.0
+    rc_sum = 0.0
 
     for batch in tqdm(dataloader, desc="eval", leave=False):
         all_h, all_r, all_t, flag = batch
@@ -88,6 +94,15 @@ def evaluate(model: ProjeRulE, dataset, device: torch.device, expectation: bool 
         flag = flag.squeeze(0).to(device)
 
         logits, _aux = model.score_all_tails(all_h, all_r, chunk_size=chunk_size)
+        if "alpha" in _aux:
+            alpha_sum += float(_aux["alpha"].detach().mean().item())
+            alpha_cnt += 1
+        if "w_max" in _aux:
+            wmax_sum += float(_aux["w_max"].detach().mean().item())
+        if "w_entropy" in _aux:
+            went_sum += float(_aux["w_entropy"].detach().mean().item())
+        if "rule_count" in _aux:
+            rc_sum += float(_aux["rule_count"].detach().mean().item())
         concat_logits.append(logits)
         concat_all_h.append(all_h)
         concat_all_r.append(all_r)
@@ -146,6 +161,14 @@ def evaluate(model: ProjeRulE, dataset, device: torch.device, expectation: bool 
     logging.info("Hit@10: %.6f", hit10)
     logging.info("MR    : %.6f", mr)
     logging.info("MRR   : %.6f", mrr)
+    if alpha_cnt > 0:
+        logging.info(
+            "Eval alpha_mean: %.4f | w_max: %.4f | w_entropy: %.4f | rule_count: %.1f",
+            alpha_sum / alpha_cnt,
+            wmax_sum / alpha_cnt,
+            went_sum / alpha_cnt,
+            rc_sum / alpha_cnt,
+        )
     return mrr
 
 
@@ -198,12 +221,18 @@ def main():
     best_valid_mrr = 0.0
 
     for it in range(num_iters):
+        t0 = time.time()
         logging.info("Iteration %d/%d", it + 1, num_iters)
         model.train()
         total_loss = 0.0
         total_count = 0
         alpha_sum = 0.0
         alpha_count = 0
+        alpha_gt_05 = 0
+        c_sum = 0.0
+        wmax_sum = 0.0
+        went_sum = 0.0
+        rc_sum = 0.0
 
         for step, batch in enumerate(train_loader):
             if step >= batch_per_epoch:
@@ -227,21 +256,58 @@ def main():
             total_loss += float(loss.item())
             total_count += 1
             if "alpha" in _aux:
-                alpha_sum += float(_aux["alpha"].detach().mean().item())
+                a = _aux["alpha"].detach()
+                alpha_sum += float(a.mean().item())
+                alpha_gt_05 += int((a > 0.5).sum().item())
                 alpha_count += 1
+            if "c" in _aux:
+                c_sum += float(_aux["c"].detach().mean().item())
+            if "w_max" in _aux:
+                wmax_sum += float(_aux["w_max"].detach().mean().item())
+            if "w_entropy" in _aux:
+                went_sum += float(_aux["w_entropy"].detach().mean().item())
+            if "rule_count" in _aux:
+                rc_sum += float(_aux["rule_count"].detach().mean().item())
 
             if args.print_every and (step + 1) % int(args.print_every) == 0:
                 alpha_mean = alpha_sum / max(alpha_count, 1)
+                alpha_ratio = alpha_gt_05 / max(int(alpha_count * all_h.numel()), 1)
+                c_mean = c_sum / max(alpha_count, 1)
+                wmax_mean = wmax_sum / max(alpha_count, 1)
+                went_mean = went_sum / max(alpha_count, 1)
+                rc_mean = rc_sum / max(alpha_count, 1)
                 logging.info(
-                    "step=%d loss=%.6f alpha_mean=%.4f",
+                    "step=%d loss=%.6f alpha_mean=%.4f alpha>0.5=%.3f c=%.4f w_max=%.4f w_ent=%.4f rules=%.1f",
                     step + 1,
                     total_loss / max(total_count, 1),
                     alpha_mean,
+                    alpha_ratio,
+                    c_mean,
+                    wmax_mean,
+                    went_mean,
+                    rc_mean,
                 )
 
         alpha_mean = alpha_sum / max(alpha_count, 1)
         logging.info("Train loss: %.6f", total_loss / max(total_count, 1))
         logging.info("Train alpha_mean: %.4f", alpha_mean)
+        if alpha_count > 0:
+            alpha_ratio = alpha_gt_05 / max(int(alpha_count * args.g_batch_size), 1)
+            logging.info(
+                "Train alpha>0.5: %.3f | c: %.4f | w_max: %.4f | w_entropy: %.4f | rule_count: %.1f",
+                alpha_ratio,
+                c_sum / alpha_count,
+                wmax_sum / alpha_count,
+                went_sum / alpha_count,
+                rc_sum / alpha_count,
+            )
+        # Embedding health checks (cheap, once per iter)
+        with torch.no_grad():
+            ent_w = model.entity_embedding.weight
+            ent_c = ent_w.view(ent_w.size(0), -1, 2)
+            ent_norm = torch.sqrt(ent_c[..., 0] ** 2 + ent_c[..., 1] ** 2 + 1e-12).mean().item()
+            rel_std = model.relation_phase.weight.std().item()
+        logging.info("Emb stats: mean|ent|=%.4f rel_phase_std=%.4f", ent_norm, rel_std)
 
         logging.info("Valid...")
         valid_mrr = evaluate(model, valid_set, device=device, expectation=True, chunk_size=int(args.chunk_size))
@@ -249,6 +315,7 @@ def main():
             best_valid_mrr = valid_mrr
             _save_checkpoint(model, optimizer, args.save_path)
         logging.info("Valid MRR: %.6f | Best: %.6f", valid_mrr, best_valid_mrr)
+        logging.info("Iter time: %.2fs", time.time() - t0)
 
     logging.info("Load best checkpoint and evaluate test...")
     ckpt_path = os.path.join(args.save_path, "checkpoint_projerule.pt")

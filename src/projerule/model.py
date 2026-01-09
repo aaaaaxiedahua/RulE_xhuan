@@ -133,6 +133,10 @@ class ProjeRulE(nn.Module):
         alpha = torch.zeros(B, device=device)
         T_hat = torch.zeros(B, self.dim, 2, device=device)
         T_hat[..., 0] = 1.0  # identity rotation
+        c_out = torch.zeros(B, device=device)
+        w_max_out = torch.zeros(B, device=device)
+        w_entropy_out = torch.zeros(B, device=device)
+        rule_count_out = torch.zeros(B, device=device)
 
         for rel_val in rel_target.unique():
             rel_int = int(rel_val.item())
@@ -140,6 +144,10 @@ class ProjeRulE(nn.Module):
             ops = self._compile_rule_ops(rel_int, device=device)  # (K, dim, 2)
             if ops.numel() == 0:
                 alpha[idx] = 0.0
+                c_out[idx] = 0.0
+                w_max_out[idx] = 0.0
+                w_entropy_out[idx] = 0.0
+                rule_count_out[idx] = 0.0
                 continue
 
             v = v_ctx.index_select(0, idx)  # (b, dim, 2)
@@ -152,8 +160,19 @@ class ProjeRulE(nn.Module):
 
             alpha[idx] = a_val
             T_hat[idx] = complex_normalize_per_dim(T_agg)
+            c_out[idx] = c
+            w_max_out[idx] = w.max(dim=1).values
+            w_entropy_out[idx] = -(w * torch.log(w + 1e-12)).sum(dim=1)
+            rule_count_out[idx] = float(ops.size(0))
 
-        return alpha, T_hat
+        stats = {
+            "alpha": alpha,
+            "c": c_out,
+            "w_max": w_max_out,
+            "w_entropy": w_entropy_out,
+            "rule_count": rule_count_out,
+        }
+        return alpha, T_hat, stats
 
     def score_all_tails(
         self,
@@ -167,7 +186,7 @@ class ProjeRulE(nn.Module):
         r_base = self._rel_rot_full(rel_target)  # (B, dim, 2)
 
         v_ctx = self.encoder(heads, rel_target, self.relation_phase.weight, tau_edge=self.tau_edge)  # (B, dim, 2)
-        alpha, T_hat = self._rule_resonance(v_ctx, rel_target)  # (B,), (B, dim, 2)
+        alpha, T_hat, stats = self._rule_resonance(v_ctx, rel_target)  # (B,), (B, dim, 2)
         alpha = alpha.view(-1, 1)  # (B, 1)
 
         h_base = complex_mul(h, r_base)
@@ -189,4 +208,7 @@ class ProjeRulE(nn.Module):
             scores_parts.append(score)
 
         scores = torch.cat(scores_parts, dim=1)
-        return scores, {"alpha": alpha.squeeze(1), "v_ctx": v_ctx}
+        aux = dict(stats)
+        aux["alpha"] = alpha.squeeze(1)
+        aux["v_ctx"] = v_ctx
+        return scores, aux
