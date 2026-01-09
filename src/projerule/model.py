@@ -39,6 +39,10 @@ class ProjeRulE(nn.Module):
         lambda_rule: float = 1.0,
         tau_rule: float = 1.0,
         tau_edge: float = 1.0,
+        encoder_hops: int = 2,
+        encoder_max_2hop_paths: int = 5000,
+        encoder_max_edges_per_node: int = 50,
+        encoder_limit_paths: bool = True,
         beta1: float = 10.0,
         beta2: float = -5.0,
         init_phase_scale: float = math.pi,
@@ -62,7 +66,14 @@ class ProjeRulE(nn.Module):
 
         self.bias = nn.Parameter(torch.zeros(self.num_entities))
 
-        self.encoder = HoGCNRelationEncoder(graph, num_relations=self.num_relations)
+        self.encoder = HoGCNRelationEncoder(
+            graph,
+            num_relations=self.num_relations,
+            num_hops=int(encoder_hops),
+            max_paths_per_hop=int(encoder_max_2hop_paths),
+            max_edges_per_node=int(encoder_max_edges_per_node),
+            limit_paths=bool(encoder_limit_paths),
+        )
         self.rules_by_head: Dict[int, List[Rule]] = defaultdict(list)
 
     def set_rules(self, rules: Sequence[Sequence[int]]) -> None:
@@ -179,4 +190,3 @@ class ProjeRulE(nn.Module):
 
         scores = torch.cat(scores_parts, dim=1)
         return scores, {"alpha": alpha.squeeze(1), "v_ctx": v_ctx}
-

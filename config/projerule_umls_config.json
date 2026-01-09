@@ -16,10 +16,14 @@
 
   "projerule_dim": 200,
   "projerule_lambda_rule": 1.0,
-  "projerule_tau_rule": 1.0,
+  "projerule_tau_rule": 0.5,
   "projerule_tau_edge": 1.0,
+  "projerule_hops": 2,
+  "projerule_max_2hop_paths": 5000,
+  "projerule_max_edges_per_node": 50,
+  "projerule_limit_paths": false,
   "projerule_beta1": 10.0,
-  "projerule_beta2": -5.0,
+  "projerule_beta2": -2.0,
   "projerule_init_phase_scale": 3.141592653589793,
   "chunk_size": 4096
 }

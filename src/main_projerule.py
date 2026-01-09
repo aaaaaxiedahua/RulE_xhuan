@@ -43,6 +43,10 @@ def parse_args(args=None):
     parser.add_argument("--projerule_lambda_rule", default=1.0, type=float)
     parser.add_argument("--projerule_tau_rule", default=1.0, type=float)
     parser.add_argument("--projerule_tau_edge", default=1.0, type=float)
+    parser.add_argument("--projerule_hops", default=2, type=int)
+    parser.add_argument("--projerule_max_2hop_paths", default=5000, type=int, help="cap sampled paths per hop (used for all hops)")
+    parser.add_argument("--projerule_max_edges_per_node", default=50, type=int)
+    parser.add_argument("--projerule_limit_paths", default=True, type=lambda x: str(x).lower() in ("1", "true", "yes", "y", "t"))
     parser.add_argument("--projerule_beta1", default=10.0, type=float)
     parser.add_argument("--projerule_beta2", default=-5.0, type=float)
     parser.add_argument("--projerule_init_phase_scale", default=3.141592653589793, type=float)
@@ -172,6 +176,10 @@ def main():
         lambda_rule=float(args.projerule_lambda_rule),
         tau_rule=float(args.projerule_tau_rule),
         tau_edge=float(args.projerule_tau_edge),
+        encoder_hops=int(args.projerule_hops),
+        encoder_max_2hop_paths=int(args.projerule_max_2hop_paths),
+        encoder_max_edges_per_node=int(args.projerule_max_edges_per_node),
+        encoder_limit_paths=bool(args.projerule_limit_paths),
         beta1=float(args.projerule_beta1),
         beta2=float(args.projerule_beta2),
         init_phase_scale=float(args.projerule_init_phase_scale),
