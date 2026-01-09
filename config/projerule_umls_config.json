@@ -1,0 +1,25 @@
+{
+  "data_path": "../data/umls",
+  "rule_file": "../data/umls/mined_rules.txt",
+  "cuda": true,
+  "seed": 800,
+  "weight_decay": 0,
+
+  "save_path": "projerule_umls",
+
+  "g_batch_size": 16,
+  "g_lr": 0.0001,
+  "num_iters": 20,
+  "batch_per_epoch": 1000000,
+  "smoothing": 0.2,
+  "print_every": 1000,
+
+  "projerule_dim": 200,
+  "projerule_lambda_rule": 1.0,
+  "projerule_tau_rule": 1.0,
+  "projerule_tau_edge": 1.0,
+  "projerule_beta1": 10.0,
+  "projerule_beta2": -5.0,
+  "projerule_init_phase_scale": 3.141592653589793,
+  "chunk_size": 4096
+}
