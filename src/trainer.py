@@ -442,14 +442,14 @@ class GroundTrainer(object):
             if valid_mrr_iter > best_valid_mrr:
                 best_valid_mrr = valid_mrr_iter
                 # test_mrr = test_mrr_iter
-                self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+                self.save(args, os.path.join(args.save_path, 'grounding_best.pt'))
         
 
         logging.info('-------------------------')
         logging.info('| Final Test MRR: {:.6f}'.format(test_mrr))
         logging.info('-------------------------')
 
-        checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding.pt'))
+        checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding_best.pt'))
         self.model.load_state_dict(checkpoint['model'])
         
         test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
@@ -532,7 +532,7 @@ class GroundTrainer(object):
                 
                 total_loss = 0.0
                 total_size = 0.0
-                self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+                self.save(args, os.path.join(args.save_path, 'grounding_last.pt'))
         
 
     @torch.no_grad()
