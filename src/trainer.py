@@ -513,6 +513,22 @@ class GroundTrainer(object):
                 
                 
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
+                if getattr(self.model, "_last_context_log", None):
+                    c = self.model._last_context_log
+                    msg = "context | r=%s mode=%s B=%s Nr=%s mean=%.4f min=%.4f max=%.4f" % (
+                        c.get("query_r", "NA"),
+                        c.get("mode", "NA"),
+                        c.get("batch", "NA"),
+                        c.get("nrules", "NA"),
+                        c.get("mean", 0.0),
+                        c.get("min", 0.0),
+                        c.get("max", 0.0),
+                    )
+                    if "entropy_mean" in c:
+                        msg += " H=%.4f" % (c["entropy_mean"],)
+                    if "top_rule_id" in c:
+                        msg += " top_rule_id=%s top_w=%s" % (c["top_rule_id"], c.get("top_weight", []))
+                    logging.info(msg)
                 
                 total_loss = 0.0
                 total_size = 0.0
