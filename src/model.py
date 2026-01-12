@@ -150,7 +150,7 @@ class RulE(torch.nn.Module):
         if rebuild:
             self._build_context_modules()
 
-    def _compute_rule_weights(self, all_h, rule_emb):
+    def _compute_rule_logits(self, all_h, rule_emb):
         entity = self.entity_embedding(all_h)
         if self.use_adapter:
             entity = entity + self.adapter_mlp(entity)
@@ -160,30 +160,15 @@ class RulE(torch.nn.Module):
 
         if self.use_logic_attention:
             logits = self.attn_v(torch.tanh(query.unsqueeze(1) + key.unsqueeze(0))).squeeze(-1)
-            logits = self.attn_dropout(logits)
-            weights = torch.softmax(logits, dim=1)
         else:
             logits = torch.matmul(query, key.t()) / self.gate_scale
-            logits = self.attn_dropout(logits)
-            weights = torch.sigmoid(logits)
 
-        with torch.no_grad():
-            w = weights.detach()
-            stats = {
-                "mode": "softmax" if self.use_logic_attention else "sigmoid",
-                "batch": int(w.size(0)),
-                "nrules": int(w.size(1)),
-                "mean": float(w.mean().item()),
-                "min": float(w.min().item()),
-                "max": float(w.max().item()),
-            }
-            if self.use_logic_attention:
-                eps = 1e-12
-                ent = -(w * (w + eps).log()).sum(dim=1)  # [B]
-                stats["entropy_mean"] = float(ent.mean().item())
-            self._last_context_log = stats
+        logits = self.attn_dropout(logits)
+        return logits
 
-        return weights
+    def _compute_rule_gate(self, all_h, rule_emb):
+        logits = self._compute_rule_logits(all_h, rule_emb)
+        return 2.0 * torch.sigmoid(logits)
 
     # def add_param(self):
 
@@ -466,21 +451,66 @@ class RulE(torch.nn.Module):
         
         rule_emb = self.rules_weight_emb[rule_index]
 
-        if self.use_adapter or self.use_logic_attention:
-            weights = self._compute_rule_weights(all_h, rule_emb)
-            with torch.no_grad():
-                if self._last_context_log is not None:
-                    k = min(5, int(weights.size(1)))
-                    if k > 0:
-                        top_val, top_idx = torch.topk(weights[0].detach(), k=k, dim=0)
-                        top_rule_id = rule_index[top_idx].detach().cpu().tolist()
-                        top_val = top_val.detach().cpu().tolist()
-                        self._last_context_log["query_r"] = int(query_r)
-                        self._last_context_log["top_rule_id"] = top_rule_id
-                        self._last_context_log["top_weight"] = [float(v) for v in top_val]
+        if self.use_logic_attention:
             batch_id = candidate_set // self.graph.entity_size
-            weights_candidate = weights[batch_id].transpose(0, 1)
-            rule_count = rule_count * weights_candidate
+            logits = self._compute_rule_logits(all_h, rule_emb)  # [B, Nr]
+            logits_candidate = logits[batch_id]  # [C, Nr]
+
+            active_mask = (rule_count > 0).transpose(0, 1)  # [C, Nr]
+            logits_candidate = logits_candidate.masked_fill(~active_mask, -1e9)
+
+            attn = torch.softmax(logits_candidate, dim=1)  # [C, Nr]
+            active_cnt = active_mask.sum(dim=1, keepdim=True).float().clamp(min=1.0)
+            weights_candidate = attn * active_cnt
+            rule_count = rule_count * weights_candidate.transpose(0, 1)
+
+            with torch.no_grad():
+                p = attn.detach()
+                stats = {
+                    "mode": "masked_softmax_scaled",
+                    "batch": int(all_h.size(0)),
+                    "nrules": int(rule_index.size(0)),
+                    "candidates": int(candidate_set.size(0)),
+                    "active_rules_mean": float(active_cnt.mean().item()),
+                    "mean": float(weights_candidate.detach().mean().item()),
+                    "min": float(weights_candidate.detach().min().item()),
+                    "max": float(weights_candidate.detach().max().item()),
+                }
+                eps = 1e-12
+                ent = -(p * (p + eps).log()).sum(dim=1)
+                stats["entropy_mean"] = float(ent.mean().item())
+                k = min(5, int(weights_candidate.size(1)))
+                if k > 0:
+                    top_val, top_idx = torch.topk(weights_candidate[0].detach(), k=k, dim=0)
+                    stats["query_r"] = int(query_r)
+                    stats["top_rule_id"] = rule_index[top_idx].detach().cpu().tolist()
+                    stats["top_weight"] = [float(v) for v in top_val.detach().cpu().tolist()]
+                self._last_context_log = stats
+
+        elif self.use_adapter:
+            batch_id = candidate_set // self.graph.entity_size
+            gate = self._compute_rule_gate(all_h, rule_emb)  # [B, Nr]
+            weights_candidate = gate[batch_id]  # [C, Nr]
+            rule_count = rule_count * weights_candidate.transpose(0, 1)
+
+            with torch.no_grad():
+                w = weights_candidate.detach()
+                stats = {
+                    "mode": "sigmoid2_gate",
+                    "batch": int(all_h.size(0)),
+                    "nrules": int(rule_index.size(0)),
+                    "candidates": int(candidate_set.size(0)),
+                    "mean": float(w.mean().item()),
+                    "min": float(w.min().item()),
+                    "max": float(w.max().item()),
+                    "query_r": int(query_r),
+                }
+                k = min(5, int(w.size(1)))
+                if k > 0:
+                    top_val, top_idx = torch.topk(w[0], k=k, dim=0)
+                    stats["top_rule_id"] = rule_index[top_idx].detach().cpu().tolist()
+                    stats["top_weight"] = [float(v) for v in top_val.detach().cpu().tolist()]
+                self._last_context_log = stats
 
         # mlp_feature = self.mlp_feature[rule_index] * rule_emb.unsqueeze(-1)
         mlp_feature = self.mlp_feature[rule_index]
