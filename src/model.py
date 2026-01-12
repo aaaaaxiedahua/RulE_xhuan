@@ -89,8 +89,82 @@ class RulE(torch.nn.Module):
         # self.num_layers = num_layers
         # self.rnn = torch.nn.LSTM(self.relation_dim + self.rule_dim, self.rnn_hidden_dim, self.num_layers, batch_first=True)
         # self.linear = torch.nn.Linear(self.rnn_hidden_dim, self.relation_dim)
-        
+
         self.pi = 3.14159262358979323846
+
+        self.use_adapter = False
+        self.use_logic_attention = False
+        self.attn_dim = 64
+        self.adapter_hidden_dim = 1024
+        self.adapter_dropout_p = 0.0
+        self.attn_dropout_p = 0.0
+        self._build_context_modules()
+
+    def _build_context_modules(self):
+        entity_dim = self.hidden_dim * 2
+        self.adapter_mlp = nn.Sequential(
+            nn.Linear(entity_dim, self.adapter_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(self.adapter_dropout_p),
+            nn.Linear(self.adapter_hidden_dim, entity_dim),
+            nn.Tanh(),
+        )
+
+        self.query_proj = nn.Linear(entity_dim, self.attn_dim, bias=False)
+        self.rule_key_proj = nn.Linear(self.hidden_dim, self.attn_dim, bias=False)
+        self.attn_v = nn.Linear(self.attn_dim, 1, bias=False)
+
+        self.query_dropout = nn.Dropout(self.attn_dropout_p)
+        self.attn_dropout = nn.Dropout(self.attn_dropout_p)
+        self.gate_scale = math.sqrt(self.attn_dim)
+
+    def configure_context_modules(
+        self,
+        use_adapter=False,
+        use_logic_attention=False,
+        attn_dim=64,
+        adapter_hidden_dim=1024,
+        adapter_dropout=0.0,
+        attn_dropout=0.0,
+    ):
+        attn_dim = int(attn_dim)
+        adapter_hidden_dim = int(adapter_hidden_dim)
+        adapter_dropout = float(adapter_dropout)
+        attn_dropout = float(attn_dropout)
+
+        rebuild = (
+            attn_dim != self.attn_dim
+            or adapter_hidden_dim != self.adapter_hidden_dim
+            or adapter_dropout != self.adapter_dropout_p
+            or attn_dropout != self.attn_dropout_p
+        )
+
+        self.use_adapter = bool(use_adapter)
+        self.use_logic_attention = bool(use_logic_attention)
+        self.attn_dim = attn_dim
+        self.adapter_hidden_dim = adapter_hidden_dim
+        self.adapter_dropout_p = adapter_dropout
+        self.attn_dropout_p = attn_dropout
+
+        if rebuild:
+            self._build_context_modules()
+
+    def _compute_rule_weights(self, all_h, rule_emb):
+        entity = self.entity_embedding(all_h)
+        if self.use_adapter:
+            entity = entity + self.adapter_mlp(entity)
+
+        query = self.query_dropout(self.query_proj(entity))
+        key = self.rule_key_proj(rule_emb)
+
+        if self.use_logic_attention:
+            logits = self.attn_v(torch.tanh(query.unsqueeze(1) + key.unsqueeze(0))).squeeze(-1)
+            logits = self.attn_dropout(logits)
+            return torch.softmax(logits, dim=1)
+
+        logits = torch.matmul(query, key.t()) / self.gate_scale
+        logits = self.attn_dropout(logits)
+        return torch.sigmoid(logits)
 
     # def add_param(self):
 
@@ -372,6 +446,12 @@ class RulE(torch.nn.Module):
         rule_count = rule_count.reshape(rule_index.size(0), -1)[:, candidate_set]
         
         rule_emb = self.rules_weight_emb[rule_index]
+
+        if self.use_adapter or self.use_logic_attention:
+            weights = self._compute_rule_weights(all_h, rule_emb)
+            batch_id = candidate_set // self.graph.entity_size
+            weights_candidate = weights[batch_id].transpose(0, 1)
+            rule_count = rule_count * weights_candidate
 
         # mlp_feature = self.mlp_feature[rule_index] * rule_emb.unsqueeze(-1)
         mlp_feature = self.mlp_feature[rule_index]

@@ -34,5 +34,11 @@
     "g_batch_size": 16,
     "g_lr": 0.0001,
     "weight_decay": 0,
-    "num_iters": 20
+    "num_iters": 20,
+    "use_adapter": true,
+    "use_logic_attention": true,
+    "attn_dim": 64,
+    "adapter_hidden_dim": 512,
+    "adapter_dropout": 0.1,
+    "attn_dropout": 0.1
 }
