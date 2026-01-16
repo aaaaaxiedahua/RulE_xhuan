@@ -193,6 +193,8 @@ class RulE(torch.nn.Module):
 
         # 构造路径序列
         batch_sequences = []
+        lengths = []
+
         for path in paths:
             sequence = construct_path_sequence(
                 path,
@@ -200,16 +202,23 @@ class RulE(torch.nn.Module):
                 self.relation_embedding,
                 self.type_aware_emb,
                 self.entity_to_type,
-                self.device
+                self.device,
+                entity_proj=self.critic.entity_proj,
+                relation_proj=self.critic.relation_proj
             )
             batch_sequences.append(sequence)
+            lengths.append(len(path))  # 记录真实长度
 
-        # 堆叠成batch
-        batch_sequences = torch.stack(batch_sequences, dim=0)
+        # 使用pad_sequence进行padding（支持不同长度的路径）
+        from torch.nn.utils.rnn import pad_sequence
+        batch_sequences = pad_sequence(batch_sequences, batch_first=True, padding_value=0.0)
 
-        # Critic打分
+        # 长度转为tensor（必须在CPU上）
+        lengths = torch.tensor(lengths, dtype=torch.long, device='cpu')
+
+        # Critic打分（传入lengths以使用pack_padded_sequence）
         with torch.no_grad():
-            scores = self.critic(batch_sequences)  # [num_paths, 1]
+            scores = self.critic(batch_sequences, lengths=lengths)  # [num_paths, 1]
 
         return scores.squeeze(-1)  # [num_paths]
 
@@ -502,16 +511,12 @@ class RulE(torch.nn.Module):
                     path_scores = self._apply_critic_filter(paths, r_head, r_body)
                     if path_scores is not None:
                         # 根据Critic分数调整count
-                        # 这里简化处理：将路径分数累加到对应的尾实体上
+                        # 将路径分数累加到对应的尾实体上
                         for path, score in zip(paths, path_scores):
-                            if len(path) == 5:  # 2-hop: (e0, r1, e1, r2, e2)
-                                h_idx = path[0]
-                                t_idx = path[4]
-                            elif len(path) == 7:  # 3-hop: (e0, r1, e1, r2, e2, r3, e3)
-                                h_idx = path[0]
-                                t_idx = path[6]
-                            else:
-                                continue
+                            # 通用方式：路径格式 (e0, r1, e1, r2, e2, ..., rN, eN)
+                            # 头实体总是第一个元素，尾实体总是最后一个元素
+                            h_idx = path[0]
+                            t_idx = path[-1]
 
                             # 找到对应的batch索引
                             batch_idx = (all_h == h_idx).nonzero(as_tuple=True)[0]

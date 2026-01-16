@@ -251,6 +251,19 @@ def main():
             max_path_length=3
         )
         logging.info(f"数据集构建完成，共{len(critic_dataset)}个样本")
+
+        # 划分训练集和验证集（80% / 20%）
+        from torch.utils.data import random_split
+        train_size = int(0.8 * len(critic_dataset))
+        val_size = len(critic_dataset) - train_size
+        train_dataset, val_dataset = random_split(
+            critic_dataset,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(args.seed)
+        )
+        logging.info(f"数据集划分:")
+        logging.info(f"  - 训练集: {len(train_dataset)}个样本")
+        logging.info(f"  - 验证集: {len(val_dataset)}个样本")
         logging.info("=" * 50)
 
         # 步骤3: 训练PathCritic
@@ -273,8 +286,8 @@ def main():
 
         critic_save_dir = os.path.join(args.save_path, 'critic_checkpoints')
         best_acc = critic_trainer.train(
-            train_dataset=critic_dataset,
-            val_dataset=None,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
             num_epochs=getattr(args, 'critic_epochs', 10),
             batch_size=getattr(args, 'critic_batch_size', 32),
             save_dir=critic_save_dir
