@@ -14,25 +14,39 @@ class PathCritic(nn.Module):
     使用Bi-GRU编码路径序列，判断路径的语义合理性
     """
 
-    def __init__(self, input_dim, hidden_dim=256, num_layers=1, dropout=0.1):
+    def __init__(self, entity_dim, relation_dim, proj_dim=512, hidden_dim=256, num_layers=1, dropout=0.1):
         """
         初始化路径判别器
 
         参数:
-            input_dim: 输入维度（实体嵌入维度，通常是hidden_dim*2）
+            entity_dim: 实体嵌入维度（例如4000）
+            relation_dim: 关系嵌入维度（例如2000）
+            proj_dim: 投影后的统一维度（默认512）
             hidden_dim: GRU隐藏层维度
             num_layers: GRU层数
             dropout: Dropout概率
         """
         super(PathCritic, self).__init__()
 
-        self.input_dim = input_dim
+        self.entity_dim = entity_dim
+        self.relation_dim = relation_dim
+        self.proj_dim = proj_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
 
-        # Bi-GRU编码器
+        # 特征投影层：将不同维度的嵌入投影到统一维度
+        self.entity_proj = nn.Linear(entity_dim, proj_dim)
+        self.relation_proj = nn.Linear(relation_dim, proj_dim)
+
+        # 初始化投影层
+        nn.init.xavier_uniform_(self.entity_proj.weight)
+        nn.init.zeros_(self.entity_proj.bias)
+        nn.init.xavier_uniform_(self.relation_proj.weight)
+        nn.init.zeros_(self.relation_proj.bias)
+
+        # Bi-GRU编码器（输入维度为proj_dim）
         self.bi_gru = nn.GRU(
-            input_size=input_dim,
+            input_size=proj_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
@@ -52,8 +66,8 @@ class PathCritic(nn.Module):
         # 类型嵌入（后续挂载）
         self.type_embeddings = None
 
-        logging.info(f"PathCritic初始化: input_dim={input_dim}, "
-                    f"hidden_dim={hidden_dim}, num_layers={num_layers}")
+        logging.info(f"PathCritic初始化: entity_dim={entity_dim}, relation_dim={relation_dim}, "
+                    f"proj_dim={proj_dim}, hidden_dim={hidden_dim}, num_layers={num_layers}")
 
     def forward(self, path_sequences):
         """
@@ -141,9 +155,10 @@ class TypeAwareEmbedding(nn.Module):
 
 
 def construct_path_sequence(path, entity_emb_layer, relation_emb_layer,
-                            type_aware_emb, entity_to_type, device):
+                            type_aware_emb, entity_to_type, device,
+                            entity_proj=None, relation_proj=None):
     """
-    构造路径的输入序列 - 通用版本，支持任意长度路径
+    构造路径的输入序列 - 通用版本，支持任意长度路径，支持特征投影
 
     参数:
         path: Tuple 路径元组，格式: (e0, r1, e1, r2, e2, ..., rN, eN)
@@ -153,9 +168,11 @@ def construct_path_sequence(path, entity_emb_layer, relation_emb_layer,
         type_aware_emb: TypeAwareEmbedding实例
         entity_to_type: 实体到类型的映射
         device: 设备
+        entity_proj: 实体投影层（可选，用于统一维度）
+        relation_proj: 关系投影层（可选，用于统一维度）
 
     返回:
-        sequence: [seq_len, embedding_dim] 交错序列
+        sequence: [seq_len, proj_dim] 交错序列（如果使用投影）或 [seq_len, embedding_dim]（不使用投影）
     """
     sequences = []
 
@@ -172,6 +189,11 @@ def construct_path_sequence(path, entity_emb_layer, relation_emb_layer,
             entity_tensor = torch.tensor([entity_id], dtype=torch.long, device=device)
             # 融合实体嵌入（类型注入）
             entity_emb = type_aware_emb(entity_tensor, entity_emb_layer, entity_to_type)
+
+            # 如果提供了投影层，则进行投影
+            if entity_proj is not None:
+                entity_emb = entity_proj(entity_emb)
+
             sequences.append(entity_emb)
         else:  # 奇数位置是关系
             relation_id = path[i]
@@ -194,6 +216,11 @@ def construct_path_sequence(path, entity_emb_layer, relation_emb_layer,
             relation_tensor = torch.tensor([actual_relation_id], dtype=torch.long, device=device)
             # 获取关系嵌入并乘以flag
             relation_emb = relation_emb_layer(relation_tensor) * relation_flag
+
+            # 如果提供了投影层，则进行投影
+            if relation_proj is not None:
+                relation_emb = relation_proj(relation_emb)
+
             sequences.append(relation_emb)
 
     # 拼接成完整序列

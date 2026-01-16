@@ -23,7 +23,7 @@ class CriticTrainer:
 
     def __init__(self, graph, entity_to_type, entity_emb_layer, relation_emb_layer,
                  hidden_dim=256, num_layers=1, dropout=0.1, lambda_weight=0.3,
-                 lr=0.001, device='cuda'):
+                 proj_dim=512, lr=0.001, device='cuda'):
         """
         初始化训练器
 
@@ -36,6 +36,7 @@ class CriticTrainer:
             num_layers: GRU层数
             dropout: Dropout概率
             lambda_weight: 类型融合权重
+            proj_dim: 投影维度（用于统一实体和关系嵌入维度）
             lr: 学习率
             device: 设备
         """
@@ -46,20 +47,22 @@ class CriticTrainer:
         self.device = device
 
         # 获取嵌入维度
-        embedding_dim = entity_emb_layer.weight.shape[1]
+        entity_dim = entity_emb_layer.weight.shape[1]
+        relation_dim = relation_emb_layer.weight.shape[1]
         num_clusters = max(entity_to_type.values()) + 1
 
-        # 初始化类型感知嵌入
+        # 初始化类型感知嵌入（使用entity_dim）
         self.type_aware_emb = TypeAwareEmbedding(
             num_clusters=num_clusters,
-            embedding_dim=embedding_dim,
+            embedding_dim=entity_dim,
             lambda_weight=lambda_weight
         ).to(device)
 
-        # 初始化PathCritic
-        # 输入维度是embedding_dim（因为实体和关系嵌入维度相同）
+        # 初始化PathCritic（使用特征投影）
         self.critic = PathCritic(
-            input_dim=embedding_dim,
+            entity_dim=entity_dim,
+            relation_dim=relation_dim,
+            proj_dim=proj_dim,
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             dropout=dropout
@@ -75,7 +78,9 @@ class CriticTrainer:
         self.criterion = nn.BCELoss()
 
         logging.info(f"CriticTrainer初始化完成:")
-        logging.info(f"  - 输入维度: {embedding_dim}")
+        logging.info(f"  - 实体嵌入维度: {entity_dim}")
+        logging.info(f"  - 关系嵌入维度: {relation_dim}")
+        logging.info(f"  - 投影维度: {proj_dim}")
         logging.info(f"  - 隐藏层维度: {hidden_dim}")
         logging.info(f"  - GRU层数: {num_layers}")
         logging.info(f"  - Dropout: {dropout}")
@@ -109,14 +114,16 @@ class CriticTrainer:
             batch_sequences = []
 
             for path in paths:
-                # path: (e0, r1, e1, r2, e2)
+                # path: (e0, r1, e1, r2, e2, ...) - 通用路径格式
                 sequence = construct_path_sequence(
                     path,
                     self.entity_emb_layer,
                     self.relation_emb_layer,
                     self.type_aware_emb,
                     self.entity_to_type,
-                    self.device
+                    self.device,
+                    entity_proj=self.critic.entity_proj,
+                    relation_proj=self.critic.relation_proj
                 )
                 batch_sequences.append(sequence)
 
@@ -184,7 +191,9 @@ class CriticTrainer:
                         self.relation_emb_layer,
                         self.type_aware_emb,
                         self.entity_to_type,
-                        self.device
+                        self.device,
+                        entity_proj=self.critic.entity_proj,
+                        relation_proj=self.critic.relation_proj
                     )
                     batch_sequences.append(sequence)
 

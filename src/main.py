@@ -266,6 +266,7 @@ def main():
             num_layers=getattr(args, 'critic_num_layers', 1),
             dropout=getattr(args, 'critic_dropout', 0.1),
             lambda_weight=getattr(args, 'lambda_weight', 0.3),
+            proj_dim=getattr(args, 'critic_proj_dim', 512),
             lr=getattr(args, 'critic_lr', 0.001),
             device=device
         )

@@ -36,14 +36,14 @@
     "weight_decay": 0,
     "num_iters": 10,
 
-    "use_adapter": true,
-    "use_logic_attention": true,
+    "use_adapter": false,
+    "use_logic_attention": false,
     "attn_dim": 64,
     "adapter_hidden_dim": 512,
     "adapter_dropout": 0.1,
     "attn_dropout": 0.1,
  
-    "use_tapc": false,
+    "use_tapc": true,
     "num_clusters": 15,
     "lambda_weight": 0.3,
     "critic_hidden_dim": 128,
@@ -53,5 +53,6 @@
     "critic_epochs": 10,
     "critic_batch_size": 32,
     "num_path_samples": 50000,
-    "neg_ratio": 1.0
+    "neg_ratio": 1.0,
+    "critic_proj_dim": 512
 }
