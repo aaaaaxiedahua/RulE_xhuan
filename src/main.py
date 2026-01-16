@@ -93,6 +93,19 @@ def parse_args(args=None):
     parser.add_argument('--adapter_dropout', default=0.0, type=float)
     parser.add_argument('--attn_dropout', default=0.0, type=float)
 
+    # TAPC-RulE switches (optional)
+    parser.add_argument('--use_tapc', action='store_true', default=False, help='use TAPC-RulE')
+    parser.add_argument('--num_clusters', default=50, type=int, help='number of type clusters')
+    parser.add_argument('--lambda_weight', default=0.3, type=float, help='type fusion weight')
+    parser.add_argument('--critic_hidden_dim', default=256, type=int, help='critic hidden dimension')
+    parser.add_argument('--critic_num_layers', default=1, type=int, help='critic GRU layers')
+    parser.add_argument('--critic_dropout', default=0.1, type=float, help='critic dropout')
+    parser.add_argument('--critic_lr', default=0.001, type=float, help='critic learning rate')
+    parser.add_argument('--critic_epochs', default=10, type=int, help='critic training epochs')
+    parser.add_argument('--critic_batch_size', default=32, type=int, help='critic batch size')
+    parser.add_argument('--num_path_samples', default=100000, type=int, help='number of path samples')
+    parser.add_argument('--neg_ratio', default=1.0, type=float, help='negative sample ratio')
+
     return parser.parse_args(args)
 
 def main():
@@ -146,7 +159,6 @@ def main():
         attn_dropout=getattr(args, 'attn_dropout', 0.0),
     )
 
-    
     # For pre-training 
 
     pre_trainer = PreTrainer(
@@ -187,6 +199,118 @@ def main():
     valid_mrr = pre_trainer.evaluate('valid', expectation=True)
     test_mrr = pre_trainer.evaluate('test', expectation=True)
 
+    # TAPC-RulE训练流程（在pre-training之后，ground-training之前）
+    if getattr(args, 'use_tapc', False):
+        logging.info("=" * 50)
+        logging.info("开始TAPC-RulE训练流程（基于训练好的embedding）")
+        logging.info("=" * 50)
+
+        from tapc_type_discovery import TypeDiscovery, extract_entity_embeddings
+        from tapc_dataset import PathCriticDataset
+        from tapc_critic import PathCritic, TypeAwareEmbedding
+        from tapc_trainer import CriticTrainer
+
+        # 步骤1: 类型发现（使用训练好的embedding）
+        logging.info("=" * 50)
+        logging.info("步骤1: 执行类型发现（K-Means聚类）")
+        logging.info("=" * 50)
+        num_clusters = getattr(args, 'num_clusters', 50)
+        logging.info(f"聚类参数: num_clusters={num_clusters}, random_state={args.seed}")
+        type_discovery = TypeDiscovery(
+            num_clusters=num_clusters,
+            random_state=args.seed
+        )
+
+        entity_embeddings = extract_entity_embeddings(RulE_model)
+        entity_to_type = type_discovery.fit(entity_embeddings)
+
+        type_save_path = os.path.join(args.save_path, 'type_discovery')
+        type_discovery.save(type_save_path)
+        logging.info(f"类型发现完成，共{type_discovery.num_clusters}个类型")
+        logging.info("=" * 50)
+
+        # 步骤2: 构建Critic训练数据集（基于规则grounding）
+        logging.info("=" * 50)
+        logging.info("步骤2: 构建PathCritic训练数据集（基于规则grounding）")
+        logging.info("=" * 50)
+        num_path_samples = getattr(args, 'num_path_samples', 100000)
+        neg_ratio = getattr(args, 'neg_ratio', 1.0)
+        logging.info(f"数据集参数:")
+        logging.info(f"  - 目标正样本数: {num_path_samples}")
+        logging.info(f"  - 负样本比例: {neg_ratio}")
+        logging.info(f"  - 类型感知采样: True")
+        logging.info(f"  - 规则数量: {len(rules)}")
+
+        critic_dataset = PathCriticDataset(
+            graph=graph,
+            entity_to_type=entity_to_type,
+            rules=rules,  # 传入规则（line 143已定义）
+            num_samples=num_path_samples,
+            neg_ratio=neg_ratio,
+            type_aware_sampling=True,
+            max_path_length=3
+        )
+        logging.info(f"数据集构建完成，共{len(critic_dataset)}个样本")
+        logging.info("=" * 50)
+
+        # 步骤3: 训练PathCritic
+        logging.info("=" * 50)
+        logging.info("步骤3: 训练PathCritic模型")
+        logging.info("=" * 50)
+        critic_trainer = CriticTrainer(
+            graph=graph,
+            entity_to_type=entity_to_type,
+            entity_emb_layer=RulE_model.entity_embedding,
+            relation_emb_layer=RulE_model.relation_embedding,
+            hidden_dim=getattr(args, 'critic_hidden_dim', 256),
+            num_layers=getattr(args, 'critic_num_layers', 1),
+            dropout=getattr(args, 'critic_dropout', 0.1),
+            lambda_weight=getattr(args, 'lambda_weight', 0.3),
+            lr=getattr(args, 'critic_lr', 0.001),
+            device=device
+        )
+
+        critic_save_dir = os.path.join(args.save_path, 'critic_checkpoints')
+        best_acc = critic_trainer.train(
+            train_dataset=critic_dataset,
+            val_dataset=None,
+            num_epochs=getattr(args, 'critic_epochs', 10),
+            batch_size=getattr(args, 'critic_batch_size', 32),
+            save_dir=critic_save_dir
+        )
+        logging.info(f"Critic训练完成，最佳准确率: {best_acc:.4f}")
+        logging.info("=" * 50)
+
+        # 步骤4: 配置RulE模型使用TAPC-RulE
+        logging.info("=" * 50)
+        logging.info("步骤4: 配置RulE模型使用TAPC-RulE")
+        logging.info("=" * 50)
+
+        # 冻结Critic参数（Stage 3要求：Critic参数不参与后续训练）
+        for param in critic_trainer.critic.parameters():
+            param.requires_grad = False
+        for param in critic_trainer.type_aware_emb.parameters():
+            param.requires_grad = False
+
+        # 统计冻结的参数数量
+        critic_params = sum(p.numel() for p in critic_trainer.critic.parameters())
+        type_emb_params = sum(p.numel() for p in critic_trainer.type_aware_emb.parameters())
+        logging.info(f"Critic参数已冻结:")
+        logging.info(f"  - PathCritic参数量: {critic_params:,}")
+        logging.info(f"  - TypeAwareEmbedding参数量: {type_emb_params:,}")
+        logging.info(f"  - 总冻结参数量: {critic_params + type_emb_params:,}")
+
+        RulE_model.configure_tapc(
+            use_tapc=True,
+            critic=critic_trainer.critic,
+            type_aware_emb=critic_trainer.type_aware_emb,
+            entity_to_type=entity_to_type
+        )
+        logging.info("TAPC-RulE配置完成")
+        logging.info("=" * 50)
+        logging.info("TAPC-RulE训练流程全部完成！")
+        logging.info("=" * 50)
+
     # RulE_model.add_param()
 
     # checkpoint = torch.load(os.path.join(args.save_path, 'grounding.pt'))
@@ -214,5 +338,5 @@ def main():
 
 
 if __name__ == '__main__':
-    
+
     main()

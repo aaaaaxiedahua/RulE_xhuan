@@ -100,6 +100,12 @@ class RulE(torch.nn.Module):
         self.attn_dropout_p = 0.0
         self._build_context_modules()
 
+        # TAPC-RulE相关参数
+        self.use_tapc = False
+        self.critic = None
+        self.type_aware_emb = None
+        self.entity_to_type = None
+
     def _build_context_modules(self):
         entity_dim = self.hidden_dim * 2
         self.adapter_mlp = nn.Sequential(
@@ -149,6 +155,63 @@ class RulE(torch.nn.Module):
 
         if rebuild:
             self._build_context_modules()
+
+    def configure_tapc(self, use_tapc=False, critic=None, type_aware_emb=None, entity_to_type=None):
+        """
+        配置TAPC-RulE模块
+
+        参数:
+            use_tapc: 是否使用TAPC
+            critic: PathCritic实例
+            type_aware_emb: TypeAwareEmbedding实例
+            entity_to_type: 实体到类型的映射
+        """
+        self.use_tapc = bool(use_tapc)
+        self.critic = critic
+        self.type_aware_emb = type_aware_emb
+        self.entity_to_type = entity_to_type
+
+        if self.use_tapc:
+            logging.info("TAPC-RulE已启用")
+
+    def _apply_critic_filter(self, paths, r_head, r_body):
+        """
+        使用Critic对路径进行过滤和打分
+
+        参数:
+            paths: List[Tuple] 路径列表
+            r_head: 目标关系
+            r_body: 规则体
+
+        返回:
+            filtered_count: 过滤后的计数矩阵
+        """
+        if not self.use_tapc or self.critic is None or len(paths) == 0:
+            return None
+
+        from tapc_critic import construct_path_sequence
+
+        # 构造路径序列
+        batch_sequences = []
+        for path in paths:
+            sequence = construct_path_sequence(
+                path,
+                self.entity_embedding,
+                self.relation_embedding,
+                self.type_aware_emb,
+                self.entity_to_type,
+                self.device
+            )
+            batch_sequences.append(sequence)
+
+        # 堆叠成batch
+        batch_sequences = torch.stack(batch_sequences, dim=0)
+
+        # Critic打分
+        with torch.no_grad():
+            scores = self.critic(batch_sequences)  # [num_paths, 1]
+
+        return scores.squeeze(-1)  # [num_paths]
 
     def _compute_rule_logits(self, all_h, rule_emb):
         entity = self.entity_embedding(all_h)
@@ -429,8 +492,35 @@ class RulE(torch.nn.Module):
 
             assert r_head == query_r
 
-            count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
-            
+            # TAPC-RulE: 使用grounding_with_paths获取路径
+            if self.use_tapc and hasattr(self.graph, 'grounding_with_paths'):
+                paths, count = self.graph.grounding_with_paths(all_h, r_head, r_body, edges_to_remove)
+                count = count.float()
+
+                # 应用Critic过滤
+                if len(paths) > 0:
+                    path_scores = self._apply_critic_filter(paths, r_head, r_body)
+                    if path_scores is not None:
+                        # 根据Critic分数调整count
+                        # 这里简化处理：将路径分数累加到对应的尾实体上
+                        for path, score in zip(paths, path_scores):
+                            if len(path) == 5:  # 2-hop: (e0, r1, e1, r2, e2)
+                                h_idx = path[0]
+                                t_idx = path[4]
+                            elif len(path) == 7:  # 3-hop: (e0, r1, e1, r2, e2, r3, e3)
+                                h_idx = path[0]
+                                t_idx = path[6]
+                            else:
+                                continue
+
+                            # 找到对应的batch索引
+                            batch_idx = (all_h == h_idx).nonzero(as_tuple=True)[0]
+                            if len(batch_idx) > 0:
+                                count[batch_idx[0], t_idx] *= score.item()
+            else:
+                # 原始grounding方法
+                count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
+
             mask += count
 
             rule_index.append(index)

@@ -446,6 +446,171 @@ class KnowledgeGraph(object):
 
         return x
 
+    def get_neighbors_with_relations(self, entity_id):
+        """
+        获取实体的所有邻居及对应的关系
+        用于路径采样
+
+        参数:
+            entity_id: 实体ID
+
+        返回:
+            neighbors: List[(relation_id, neighbor_id)]
+        """
+        neighbors = []
+
+        # 遍历所有关系
+        for r in range(self.relation_size * 2):
+            # 获取该关系的邻接表
+            adjacency = self.relation2adjacency[r]
+            node_in = adjacency[0][1]  # 头实体列表
+            node_out = adjacency[0][0]  # 尾实体列表
+
+            # 查找entity_id作为头实体的边
+            if isinstance(node_in, torch.Tensor):
+                node_in = node_in.cpu().numpy()
+                node_out = node_out.cpu().numpy()
+
+            indices = np.where(node_in == entity_id)[0]
+            for idx in indices:
+                neighbor = int(node_out[idx])
+                neighbors.append((r, neighbor))
+
+        return neighbors
+
+    def grounding_with_paths(self, h, r, rule, edges_to_remove):
+        """
+        扩展的grounding方法，返回具体路径实例
+
+        参数:
+            h: [batch_size] 头实体tensor
+            r: 目标关系ID
+            rule: 规则体（关系序列）
+            edges_to_remove: 需要移除的边
+
+        返回:
+            paths: List[Tuple] 路径列表，格式: [(e0, r1, e1, r2, e2), ...]
+            count: [batch_size, num_entities] 计数矩阵（保持兼容）
+        """
+        # 首先调用原始grounding获取计数矩阵
+        count = self.grounding(h, r, rule, edges_to_remove)
+
+        # 根据规则长度选择路径搜索方法
+        rule_length = len(rule)
+
+        if rule_length == 2:
+            paths = self._grounding_2hop(h, rule, edges_to_remove)
+        elif rule_length == 3:
+            paths = self._grounding_3hop(h, rule, edges_to_remove)
+        else:
+            # 对于其他长度，暂时返回空路径列表
+            paths = []
+
+        return paths, count
+
+    def _grounding_2hop(self, h, rule, edges_to_remove):
+        """
+        搜索2跳路径: h -> e1 -> e2
+
+        参数:
+            h: [batch_size] 头实体tensor
+            rule: [r1, r2] 规则体
+            edges_to_remove: 需要移除的边
+
+        返回:
+            paths: List[Tuple] 格式: [(h, r1, e1, r2, e2), ...]
+        """
+        paths = []
+        r1, r2 = rule[0], rule[1]
+
+        # 将tensor转为numpy以便处理
+        if isinstance(h, torch.Tensor):
+            h_list = h.cpu().numpy().tolist()
+        else:
+            h_list = [h] if not isinstance(h, list) else h
+
+        # 对batch中的每个头实体进行路径搜索
+        for h_entity in h_list:
+            # 第一跳: h -> e1
+            neighbors_1 = self.get_neighbors_with_relations(h_entity)
+
+            for rel_1, e1 in neighbors_1:
+                # 检查关系是否匹配
+                if rel_1 != r1:
+                    continue
+
+                # 第二跳: e1 -> e2
+                neighbors_2 = self.get_neighbors_with_relations(e1)
+
+                for rel_2, e2 in neighbors_2:
+                    # 检查关系是否匹配
+                    if rel_2 != r2:
+                        continue
+
+                    # 避免自环
+                    if e2 == h_entity:
+                        continue
+
+                    # 构造路径
+                    path = (h_entity, r1, e1, r2, e2)
+                    paths.append(path)
+
+        return paths
+
+    def _grounding_3hop(self, h, rule, edges_to_remove):
+        """
+        搜索3跳路径: h -> e1 -> e2 -> e3
+
+        参数:
+            h: [batch_size] 头实体tensor
+            rule: [r1, r2, r3] 规则体
+            edges_to_remove: 需要移除的边
+
+        返回:
+            paths: List[Tuple] 格式: [(h, r1, e1, r2, e2, r3, e3), ...]
+        """
+        paths = []
+        r1, r2, r3 = rule[0], rule[1], rule[2]
+
+        # 将tensor转为numpy以便处理
+        if isinstance(h, torch.Tensor):
+            h_list = h.cpu().numpy().tolist()
+        else:
+            h_list = [h] if not isinstance(h, list) else h
+
+        # 对batch中的每个头实体进行路径搜索
+        for h_entity in h_list:
+            # 第一跳: h -> e1
+            neighbors_1 = self.get_neighbors_with_relations(h_entity)
+
+            for rel_1, e1 in neighbors_1:
+                if rel_1 != r1:
+                    continue
+
+                # 第二跳: e1 -> e2
+                neighbors_2 = self.get_neighbors_with_relations(e1)
+
+                for rel_2, e2 in neighbors_2:
+                    if rel_2 != r2:
+                        continue
+
+                    # 第三跳: e2 -> e3
+                    neighbors_3 = self.get_neighbors_with_relations(e2)
+
+                    for rel_3, e3 in neighbors_3:
+                        if rel_3 != r3:
+                            continue
+
+                        # 避免自环
+                        if e3 == h_entity:
+                            continue
+
+                        # 构造路径
+                        path = (h_entity, r1, e1, r2, e2, r3, e3)
+                        paths.append(path)
+
+        return paths
+
 class TrainDataset(Dataset):
     def __init__(self, graph, batch_size):
         self.graph = graph
