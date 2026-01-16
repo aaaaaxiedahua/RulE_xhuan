@@ -480,7 +480,7 @@ class KnowledgeGraph(object):
 
     def grounding_with_paths(self, h, r, rule, edges_to_remove):
         """
-        扩展的grounding方法，返回具体路径实例
+        扩展的grounding方法，返回具体路径实例（通用版本，支持任意长度规则）
 
         参数:
             h: [batch_size] 头实体tensor
@@ -489,24 +489,86 @@ class KnowledgeGraph(object):
             edges_to_remove: 需要移除的边
 
         返回:
-            paths: List[Tuple] 路径列表，格式: [(e0, r1, e1, r2, e2), ...]
+            paths: List[Tuple] 路径列表，格式: (e0, r1, e1, r2, e2, ..., rN, eN)
             count: [batch_size, num_entities] 计数矩阵（保持兼容）
         """
         # 首先调用原始grounding获取计数矩阵
         count = self.grounding(h, r, rule, edges_to_remove)
 
-        # 根据规则长度选择路径搜索方法
-        rule_length = len(rule)
-
-        if rule_length == 2:
-            paths = self._grounding_2hop(h, rule, edges_to_remove)
-        elif rule_length == 3:
-            paths = self._grounding_3hop(h, rule, edges_to_remove)
-        else:
-            # 对于其他长度，暂时返回空路径列表
-            paths = []
+        # 使用通用方法搜索路径（支持任意长度规则）
+        paths = self._grounding_generic(h, rule, edges_to_remove)
 
         return paths, count
+
+    def _grounding_generic(self, h, rule, edges_to_remove):
+        """
+        通用的路径搜索方法，支持任意长度的规则
+        使用递归方式搜索路径
+
+        参数:
+            h: [batch_size] 头实体tensor
+            rule: 规则体（关系序列）[r1, r2, ..., rN]
+            edges_to_remove: 需要移除的边
+
+        返回:
+            paths: List[Tuple] 路径列表，格式: (e0, r1, e1, r2, e2, ..., rN, eN)
+        """
+        paths = []
+
+        # 将tensor转为列表
+        if isinstance(h, torch.Tensor):
+            h_list = h.cpu().numpy().tolist()
+        else:
+            h_list = [h] if not isinstance(h, list) else h
+
+        # 对每个头实体进行路径搜索
+        for h_entity in h_list:
+            # 从头实体开始递归搜索
+            current_paths = self._search_paths_recursive(h_entity, rule, 0, [h_entity])
+            paths.extend(current_paths)
+
+        return paths
+
+    def _search_paths_recursive(self, current_entity, rule, rule_index, current_path):
+        """
+        递归搜索路径
+
+        参数:
+            current_entity: 当前实体
+            rule: 规则体（关系序列）
+            rule_index: 当前处理到规则的第几个关系
+            current_path: 当前路径（已经走过的实体和关系）
+
+        返回:
+            paths: 从current_entity出发，按照rule剩余部分能到达的所有路径
+        """
+        # 递归终止条件：规则已经全部匹配完
+        if rule_index >= len(rule):
+            return [tuple(current_path)]
+
+        paths = []
+        current_relation = rule[rule_index]
+
+        # 获取当前实体的所有邻居
+        neighbors = self.get_neighbors_with_relations(current_entity)
+
+        for rel, next_entity in neighbors:
+            # 检查关系是否匹配
+            if rel != current_relation:
+                continue
+
+            # 避免回到起始实体（避免自环）
+            if next_entity == current_path[0]:
+                continue
+
+            # 构造新路径：添加关系和下一个实体
+            new_path = current_path + [current_relation, next_entity]
+
+            # 递归搜索下一跳
+            sub_paths = self._search_paths_recursive(next_entity, rule, rule_index + 1, new_path)
+            paths.extend(sub_paths)
+
+        return paths
 
     def _grounding_2hop(self, h, rule, edges_to_remove):
         """

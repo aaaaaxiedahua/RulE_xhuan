@@ -104,11 +104,11 @@ class PathCriticDataset(Dataset):
                         h_tensor, r_head, r_body, edges_to_remove=None
                     )
 
-                    # 筛选：只保留能连接到真实尾实体t的路径
+                    # 筛选：只保留能连接到真实尾实体t的路径（通用判断）
                     for path in rule_paths:
-                        if len(path) == 5 and path[0] == h and path[4] == t:  # 2-hop
-                            paths.append(path)
-                        elif len(path) == 7 and path[0] == h and path[6] == t:  # 3-hop
+                        # 路径格式：(e0, r1, e1, r2, e2, ..., rN, eN)
+                        # 尾实体总是最后一个元素
+                        if len(path) > 0 and path[0] == h and path[-1] == t:
                             paths.append(path)
 
                         # 达到目标数量就停止
@@ -133,46 +133,54 @@ class PathCriticDataset(Dataset):
 
         logging.info(f"正样本采样完成，共{len(paths)}条路径（目标: {self.num_samples}）")
 
-        # 统计路径长度分布
-        path_2hop = sum(1 for p in paths if len(p) == 5)
-        path_3hop = sum(1 for p in paths if len(p) == 7)
-        logging.info(f"  - 2-hop路径: {path_2hop}条")
-        logging.info(f"  - 3-hop路径: {path_3hop}条")
+        # 统计路径长度分布（通用统计）
+        from collections import Counter
+        path_lengths = [len(p) for p in paths]
+        length_counter = Counter(path_lengths)
+
+        logging.info(f"路径长度分布:")
+        for length in sorted(length_counter.keys()):
+            hop_num = (length - 1) // 2  # 计算hop数：(长度-1)/2
+            count = length_counter[length]
+            logging.info(f"  - {hop_num}-hop路径（长度{length}）: {count}条")
 
         return paths
 
     def _generate_negative_path(self, positive_path):
         """
-        生成负样本路径（替换中间节点）
+        生成负样本路径（替换中间节点）- 通用版本，支持任意长度路径
 
         参数:
             positive_path: 正样本路径
-                - 2-hop: (e0, r1, e1, r2, e2)
-                - 3-hop: (e0, r1, e1, r2, e2, r3, e3)
+                格式: (e0, r1, e1, r2, e2, ..., rN, eN)
+                奇数位置是实体，偶数位置是关系
 
         返回:
             negative_path: 负样本路径（替换中间节点）
         """
         path_len = len(positive_path)
 
-        if path_len == 5:  # 2-hop路径
-            e0, r1, e1, r2, e2 = positive_path
-            # 替换中间节点e1
-            e1_neg = self._sample_negative_entity(e1)
-            return (e0, r1, e1_neg, r2, e2)
+        # 找到所有实体的位置（偶数索引：0, 2, 4, ...）
+        entity_positions = [i for i in range(0, path_len, 2)]
 
-        elif path_len == 7:  # 3-hop路径
-            e0, r1, e1, r2, e2, r3, e3 = positive_path
-            # 随机选择替换e1或e2
-            if random.random() < 0.5:
-                e1_neg = self._sample_negative_entity(e1)
-                return (e0, r1, e1_neg, r2, e2, r3, e3)
-            else:
-                e2_neg = self._sample_negative_entity(e2)
-                return (e0, r1, e1, r2, e2_neg, r3, e3)
+        # 排除首尾实体，只保留中间实体
+        middle_entity_positions = entity_positions[1:-1]
 
-        else:
-            raise ValueError(f"不支持的路径长度: {path_len}")
+        if len(middle_entity_positions) == 0:
+            # 没有中间实体（只有1-hop路径：e0, r1, e1），无法构造负样本
+            # 这种情况下，随机替换尾实体
+            neg_path = list(positive_path)
+            neg_path[-1] = self._sample_negative_entity(positive_path[-1])
+            return tuple(neg_path)
+
+        # 随机选择一个中间实体位置
+        pos = random.choice(middle_entity_positions)
+
+        # 替换该位置的实体
+        neg_path = list(positive_path)
+        neg_path[pos] = self._sample_negative_entity(positive_path[pos])
+
+        return tuple(neg_path)
 
     def _sample_negative_entity(self, original_entity):
         """

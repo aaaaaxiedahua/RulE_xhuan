@@ -143,10 +143,11 @@ class TypeAwareEmbedding(nn.Module):
 def construct_path_sequence(path, entity_emb_layer, relation_emb_layer,
                             type_aware_emb, entity_to_type, device):
     """
-    构造路径的输入序列
+    构造路径的输入序列 - 通用版本，支持任意长度路径
 
     参数:
-        path: Tuple (e0, r1, e1, r2, e2) 路径元组
+        path: Tuple 路径元组，格式: (e0, r1, e1, r2, e2, ..., rN, eN)
+              奇数位置是实体，偶数位置是关系
         entity_emb_layer: 实体嵌入层
         relation_emb_layer: 关系嵌入层
         type_aware_emb: TypeAwareEmbedding实例
@@ -156,27 +157,26 @@ def construct_path_sequence(path, entity_emb_layer, relation_emb_layer,
     返回:
         sequence: [seq_len, embedding_dim] 交错序列
     """
-    e0, r1, e1, r2, e2 = path
+    sequences = []
 
-    # 转换为tensor
-    e0_tensor = torch.tensor([e0], dtype=torch.long, device=device)
-    e1_tensor = torch.tensor([e1], dtype=torch.long, device=device)
-    e2_tensor = torch.tensor([e2], dtype=torch.long, device=device)
-    r1_tensor = torch.tensor([r1], dtype=torch.long, device=device)
-    r2_tensor = torch.tensor([r2], dtype=torch.long, device=device)
+    # 遍历路径中的每个元素
+    for i in range(len(path)):
+        if i % 2 == 0:  # 偶数位置是实体
+            entity_id = path[i]
+            entity_tensor = torch.tensor([entity_id], dtype=torch.long, device=device)
+            # 融合实体嵌入（类型注入）
+            entity_emb = type_aware_emb(entity_tensor, entity_emb_layer, entity_to_type)
+            sequences.append(entity_emb)
+        else:  # 奇数位置是关系
+            relation_id = path[i]
+            relation_tensor = torch.tensor([relation_id], dtype=torch.long, device=device)
+            # 获取关系嵌入
+            relation_emb = relation_emb_layer(relation_tensor)
+            sequences.append(relation_emb)
 
-    # 融合实体嵌入（类型注入）
-    x_e0 = type_aware_emb(e0_tensor, entity_emb_layer, entity_to_type)
-    x_e1 = type_aware_emb(e1_tensor, entity_emb_layer, entity_to_type)
-    x_e2 = type_aware_emb(e2_tensor, entity_emb_layer, entity_to_type)
-
-    # 获取关系嵌入
-    x_r1 = relation_emb_layer(r1_tensor)
-    x_r2 = relation_emb_layer(r2_tensor)
-
-    # 构造交错序列: [e0, r1, e1, r2, e2]
-    sequence = torch.cat([x_e0, x_r1, x_e1, x_r2, x_e2], dim=0)
-    # 形状: [5, embedding_dim]
+    # 拼接成完整序列
+    sequence = torch.cat(sequences, dim=0)
+    # 形状: [path_length, embedding_dim]
 
     return sequence
 
