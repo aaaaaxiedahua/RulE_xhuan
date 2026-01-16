@@ -159,6 +159,12 @@ def construct_path_sequence(path, entity_emb_layer, relation_emb_layer,
     """
     sequences = []
 
+    # 获取关系数量和padding索引
+    # relation_emb_layer.num_embeddings = num_relations + 1 (包含padding)
+    num_embeddings = relation_emb_layer.num_embeddings
+    padding_idx = relation_emb_layer.padding_idx
+    num_relations = num_embeddings - 1  # 减去padding
+
     # 遍历路径中的每个元素
     for i in range(len(path)):
         if i % 2 == 0:  # 偶数位置是实体
@@ -169,9 +175,25 @@ def construct_path_sequence(path, entity_emb_layer, relation_emb_layer,
             sequences.append(entity_emb)
         else:  # 奇数位置是关系
             relation_id = path[i]
-            relation_tensor = torch.tensor([relation_id], dtype=torch.long, device=device)
-            # 获取关系嵌入
-            relation_emb = relation_emb_layer(relation_tensor)
+
+            # 处理反向关系（参考model.py的处理方式）
+            # 反向关系ID = 正向关系ID + num_relations
+            if relation_id == num_relations * 2:
+                # padding关系
+                actual_relation_id = padding_idx
+                relation_flag = 1.0
+            elif relation_id >= num_relations:
+                # 反向关系：映射回正向关系，flag=-1
+                actual_relation_id = relation_id % num_relations
+                relation_flag = -1.0
+            else:
+                # 正向关系
+                actual_relation_id = relation_id
+                relation_flag = 1.0
+
+            relation_tensor = torch.tensor([actual_relation_id], dtype=torch.long, device=device)
+            # 获取关系嵌入并乘以flag
+            relation_emb = relation_emb_layer(relation_tensor) * relation_flag
             sequences.append(relation_emb)
 
     # 拼接成完整序列
