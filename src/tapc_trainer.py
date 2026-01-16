@@ -110,37 +110,77 @@ class CriticTrainer:
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
 
         for batch_idx, (paths, labels) in enumerate(pbar):
+            # 调试日志：记录batch信息
+            if batch_idx == 0:
+                logging.info(f"[DEBUG] Batch {batch_idx}: 收到 {len(paths)} 条路径, {len(labels)} 个标签")
+
             # 构造路径序列，记录长度
             batch_sequences = []
             lengths = []
 
-            for path in paths:
-                # path: (e0, r1, e1, r2, e2, ...) - 通用路径格式
-                sequence = construct_path_sequence(
-                    path,
-                    self.entity_emb_layer,
-                    self.relation_emb_layer,
-                    self.type_aware_emb,
-                    self.entity_to_type,
-                    self.device,
-                    entity_proj=self.critic.entity_proj,
-                    relation_proj=self.critic.relation_proj
-                )
-                batch_sequences.append(sequence)
-                lengths.append(len(path))  # 记录真实长度
+            for i, path in enumerate(paths):
+                try:
+                    # 调试日志：记录路径信息
+                    if batch_idx == 0 and i < 3:
+                        logging.info(f"[DEBUG] 路径 {i}: 长度={len(path)}, 内容={path[:min(5, len(path))]}...")
+
+                    # path: (e0, r1, e1, r2, e2, ...) - 通用路径格式
+                    sequence = construct_path_sequence(
+                        path,
+                        self.entity_emb_layer,
+                        self.relation_emb_layer,
+                        self.type_aware_emb,
+                        self.entity_to_type,
+                        self.device,
+                        entity_proj=self.critic.entity_proj,
+                        relation_proj=self.critic.relation_proj
+                    )
+
+                    # 调试日志：记录序列形状
+                    if batch_idx == 0 and i < 3:
+                        logging.info(f"[DEBUG] 路径 {i} 构造成功: sequence.shape={sequence.shape}")
+
+                    batch_sequences.append(sequence)
+                    lengths.append(len(path))  # 记录真实长度
+
+                except Exception as e:
+                    # 捕获异常并记录
+                    logging.error(f"[ERROR] Batch {batch_idx}, 路径 {i} 构造失败: {e}")
+                    logging.error(f"[ERROR] 失败路径内容: {path}")
+                    import traceback
+                    logging.error(f"[ERROR] 异常堆栈:\n{traceback.format_exc()}")
+                    continue
+
+            # 调试日志：记录成功构造的数量
+            if batch_idx == 0:
+                logging.info(f"[DEBUG] 成功构造 {len(batch_sequences)} 个序列")
+                logging.info(f"[DEBUG] lengths={lengths}")
 
             # 使用pad_sequence进行padding（自动padding到最长序列）
             from torch.nn.utils.rnn import pad_sequence
             batch_sequences = pad_sequence(batch_sequences, batch_first=True, padding_value=0.0)
 
+            # 调试日志：记录padding后的形状
+            if batch_idx == 0:
+                logging.info(f"[DEBUG] Padding后: batch_sequences.shape={batch_sequences.shape}")
+
             # 标签转为tensor
             labels = torch.tensor(labels, dtype=torch.float32, device=self.device).unsqueeze(1)
+
+            # 调试日志：记录标签形状
+            if batch_idx == 0:
+                logging.info(f"[DEBUG] labels.shape={labels.shape}")
 
             # 长度转为tensor（必须在CPU上）
             lengths = torch.tensor(lengths, dtype=torch.long, device='cpu')
 
             # 前向传播（传入lengths以使用pack_padded_sequence）
             predictions = self.critic(batch_sequences, lengths=lengths)
+
+            # 调试日志：记录预测形状
+            if batch_idx == 0:
+                logging.info(f"[DEBUG] predictions.shape={predictions.shape}")
+                logging.info(f"[DEBUG] 准备计算loss: predictions.shape={predictions.shape}, labels.shape={labels.shape}")
 
             # 计算损失
             loss = self.criterion(predictions, labels)
