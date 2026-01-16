@@ -110,8 +110,9 @@ class CriticTrainer:
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
 
         for batch_idx, (paths, labels) in enumerate(pbar):
-            # 构造路径序列
+            # 构造路径序列，记录长度
             batch_sequences = []
+            lengths = []
 
             for path in paths:
                 # path: (e0, r1, e1, r2, e2, ...) - 通用路径格式
@@ -126,15 +127,20 @@ class CriticTrainer:
                     relation_proj=self.critic.relation_proj
                 )
                 batch_sequences.append(sequence)
+                lengths.append(len(path))  # 记录真实长度
 
-            # 堆叠成batch: [batch_size, seq_len, embedding_dim]
-            batch_sequences = torch.stack(batch_sequences, dim=0)
+            # 使用pad_sequence进行padding（自动padding到最长序列）
+            from torch.nn.utils.rnn import pad_sequence
+            batch_sequences = pad_sequence(batch_sequences, batch_first=True, padding_value=0.0)
 
             # 标签转为tensor
             labels = torch.tensor(labels, dtype=torch.float32, device=self.device).unsqueeze(1)
 
-            # 前向传播
-            predictions = self.critic(batch_sequences)
+            # 长度转为tensor（必须在CPU上）
+            lengths = torch.tensor(lengths, dtype=torch.long, device='cpu')
+
+            # 前向传播（传入lengths以使用pack_padded_sequence）
+            predictions = self.critic(batch_sequences, lengths=lengths)
 
             # 计算损失
             loss = self.criterion(predictions, labels)
@@ -181,8 +187,9 @@ class CriticTrainer:
 
         with torch.no_grad():
             for paths, labels in dataloader:
-                # 构造路径序列
+                # 构造路径序列，记录长度
                 batch_sequences = []
+                lengths = []
 
                 for path in paths:
                     sequence = construct_path_sequence(
@@ -196,13 +203,18 @@ class CriticTrainer:
                         relation_proj=self.critic.relation_proj
                     )
                     batch_sequences.append(sequence)
+                    lengths.append(len(path))  # 记录真实长度
 
-                # 堆叠成batch
-                batch_sequences = torch.stack(batch_sequences, dim=0)
+                # 使用pad_sequence进行padding
+                from torch.nn.utils.rnn import pad_sequence
+                batch_sequences = pad_sequence(batch_sequences, batch_first=True, padding_value=0.0)
                 labels = torch.tensor(labels, dtype=torch.float32, device=self.device).unsqueeze(1)
 
-                # 前向传播
-                predictions = self.critic(batch_sequences)
+                # 长度转为tensor（必须在CPU上）
+                lengths = torch.tensor(lengths, dtype=torch.long, device='cpu')
+
+                # 前向传播（传入lengths）
+                predictions = self.critic(batch_sequences, lengths=lengths)
 
                 # 计算损失
                 loss = self.criterion(predictions, labels)

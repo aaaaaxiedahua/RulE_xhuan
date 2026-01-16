@@ -69,23 +69,43 @@ class PathCritic(nn.Module):
         logging.info(f"PathCritic初始化: entity_dim={entity_dim}, relation_dim={relation_dim}, "
                     f"proj_dim={proj_dim}, hidden_dim={hidden_dim}, num_layers={num_layers}")
 
-    def forward(self, path_sequences):
+    def forward(self, path_sequences, lengths=None):
         """
-        前向传播
+        前向传播（支持变长序列）
 
         参数:
-            path_sequences: [batch_size, seq_len, input_dim]
-                          交错的实体和关系嵌入序列
+            path_sequences: [batch_size, seq_len, proj_dim]
+                          交错的实体和关系嵌入序列（已padding）
+            lengths: List[int] 或 Tensor
+                    每个序列的真实长度（不包括padding）
+                    如果为None，则假设所有序列长度相同
 
         返回:
             scores: [batch_size, 1] 路径置信度分数 (0-1之间)
         """
-        # Bi-GRU编码
-        # output: [batch_size, seq_len, hidden_dim*2]
-        # h_n: [num_layers*2, batch_size, hidden_dim]
-        output, h_n = self.bi_gru(path_sequences)
+        if lengths is not None:
+            # 使用pack_padded_sequence处理变长序列
+            from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
-        # Max-Pooling: 捕捉最显著的特征（可能是异常信号）
+            # Pack序列（GRU会自动跳过padding）
+            packed = pack_padded_sequence(
+                path_sequences,
+                lengths,
+                batch_first=True,
+                enforce_sorted=False
+            )
+
+            # Bi-GRU编码
+            packed_output, h_n = self.bi_gru(packed)
+
+            # Unpack
+            # output: [batch_size, seq_len, hidden_dim*2]
+            output, _ = pad_packed_sequence(packed_output, batch_first=True)
+        else:
+            # 不使用packing（所有序列长度相同）
+            output, h_n = self.bi_gru(path_sequences)
+
+        # Max-Pooling: 捕捉最显著的特征
         # [batch_size, seq_len, hidden_dim*2] -> [batch_size, hidden_dim*2]
         pooled, _ = torch.max(output, dim=1)
 
