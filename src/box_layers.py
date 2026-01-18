@@ -105,8 +105,11 @@ class IntersectionVolume(nn.Module):
         min_inter = torch.max(min_a, min_b)
         max_inter = torch.min(max_a, max_b)
 
-        # 计算交集宽度（负数变0）
-        width_inter = torch.clamp(max_inter - min_inter, min=0.0)
+        # 计算交集宽度（使用softplus代替clamp，保留梯度）
+        # 原代码: width_inter = torch.clamp(max_inter - min_inter, min=0.0)
+        # 问题: clamp会导致梯度为0
+        # 解决: 使用softplus保证非负且处处可微
+        width_inter = F.softplus(max_inter - min_inter)
 
         # 在Log域计算体积
         log_width_inter = torch.log(width_inter + self.epsilon)
