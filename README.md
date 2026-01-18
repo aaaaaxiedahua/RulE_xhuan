@@ -31,6 +31,9 @@ The folder ``config/`` contain the configuration file of each dataset and the fo
 ```
 
 python main.py --init ../config/umls_config.json
+
+
+python box_main.py --config ../config/box_kinship_config.json
 ```
 
 ## Results

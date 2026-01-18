@@ -1,0 +1,38 @@
+{
+    "comment": "Box-RulE configuration for Kinship dataset",
+
+    "data_path": "../data/kinship",
+    "rule_path": "../data/kinship/mined_rules.txt",
+    "save_path": "../checkpoints/box_kinship",
+
+    "cuda": true,
+    "cpu_num": 4,
+    "seed": 800,
+
+    "_comment_model": "=== Model Parameters ===",
+    "hidden_dim": 200,
+    "init_width": 0.3,
+    "epsilon": 1e-8,
+
+    "_comment_training": "=== Training Parameters ===",
+    "batch_size": 128,
+    "rule_batch_size": 128,
+    "learning_rate": 0.0001,
+    "negative_sample_size": 256,
+
+    "_comment_stages": "=== Stage Parameters ===",
+    "warmup_steps": 5000,
+    "joint_steps": 15000,
+
+    "_comment_loss": "=== Loss Weights ===",
+    "gamma_fact": 6.0,
+    "gamma_rule": 5.0,
+    "lambda_vol": 0.001,
+    "weight_rule": 2.0,
+    "adversarial_temperature": 0.5,
+
+    "_comment_logging": "=== Logging and Validation ===",
+    "log_steps": 100,
+    "warmup_valid_steps": 500,
+    "joint_valid_steps": 500
+}
