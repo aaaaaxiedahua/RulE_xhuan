@@ -12,7 +12,7 @@
     "_comment_model": "=== Model Parameters ===",
     "hidden_dim": 200,
     "init_width": 0.3,
-    "epsilon": 1e-8,
+    "epsilon": 0.00000001,
 
     "_comment_training": "=== Training Parameters ===",
     "batch_size": 128,
