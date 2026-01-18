@@ -51,8 +51,8 @@ class BoxRulE(nn.Module):
             init_width
         )
 
-        # 关系平移
-        self.relation_trans_emb = nn.Embedding(self.num_relations + 1, self.hidden_dim,
+        # 关系平移（支持双向关系）
+        self.relation_trans_emb = nn.Embedding(self.num_relations * 2 + 1, self.hidden_dim,
                                                 padding_idx=self.padding_index)
         nn.init.uniform_(
             self.relation_trans_emb.weight,
@@ -60,8 +60,8 @@ class BoxRulE(nn.Module):
             b=0.5
         )
 
-        # 关系缩放
-        self.relation_scale_emb = nn.Embedding(self.num_relations + 1, self.hidden_dim,
+        # 关系缩放（支持双向关系）
+        self.relation_scale_emb = nn.Embedding(self.num_relations * 2 + 1, self.hidden_dim,
                                                 padding_idx=self.padding_index)
         nn.init.constant_(
             self.relation_scale_emb.weight,
