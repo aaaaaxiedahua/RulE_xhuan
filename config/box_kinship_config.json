@@ -28,6 +28,7 @@
     "gamma_fact": 6.0,
     "gamma_rule": 5.0,
     "lambda_vol": 0.001,
+    "target_log_vol": -2.0,
     "weight_rule": 2.0,
     "adversarial_temperature": 0.5,
 

@@ -85,7 +85,7 @@ class BoxRulE(nn.Module):
         self.box_volume = BoxVolume(epsilon=self.epsilon)
         self.volume_regularization = VolumeRegularization(
             lambda_vol=args.lambda_vol if hasattr(args, 'lambda_vol') else 0.001,
-            target_log_vol=0.0,
+            target_log_vol=args.target_log_vol if hasattr(args, 'target_log_vol') else -2.0,
             epsilon=self.epsilon
         )
 
