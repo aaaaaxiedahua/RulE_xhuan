@@ -8,6 +8,28 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import logging
 from tqdm import tqdm
+import os
+
+
+def kge_collate_fn(batch):
+    """
+    自定义collate函数，保持mode为字符串
+    """
+    positive_samples = []
+    negative_samples = []
+    subsampling_weights = []
+    mode = batch[0][3]  # 所有样本的mode相同，取第一个
+
+    for item in batch:
+        positive_samples.append(item[0])
+        negative_samples.append(item[1])
+        subsampling_weights.append(item[2])
+
+    positive_samples = torch.stack(positive_samples, dim=0)
+    negative_samples = torch.stack(negative_samples, dim=0)
+    subsampling_weights = torch.stack(subsampling_weights, dim=0)
+
+    return positive_samples, negative_samples, subsampling_weights, mode
 
 
 class WarmupTrainer:
@@ -31,7 +53,8 @@ class WarmupTrainer:
             train_dataset,
             batch_size=args.batch_size,
             shuffle=True,
-            num_workers=args.cpu_num if hasattr(args, 'cpu_num') else 0
+            num_workers=args.cpu_num if hasattr(args, 'cpu_num') else 0,
+            collate_fn=kge_collate_fn
         )
 
         # 优化器
@@ -273,7 +296,8 @@ class JointTrainer:
             train_dataset,
             batch_size=args.batch_size,
             shuffle=True,
-            num_workers=args.cpu_num if hasattr(args, 'cpu_num') else 0
+            num_workers=args.cpu_num if hasattr(args, 'cpu_num') else 0,
+            collate_fn=kge_collate_fn
         )
 
         self.rule_dataloader = DataLoader(

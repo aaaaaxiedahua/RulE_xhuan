@@ -147,6 +147,10 @@ class BoxRulE(nn.Module):
         Returns:
             score: KGE分数
         """
+        # Debug: 打印mode类型和值
+        if not isinstance(mode, str):
+            raise TypeError(f'mode must be str, got {type(mode)}: {mode}')
+
         if mode == 'single':
             head = sample[:, 0]
             relation = sample[:, 1]
@@ -178,6 +182,9 @@ class BoxRulE(nn.Module):
 
             center_t = self.entity_center_emb(tail_part[:, 2]).unsqueeze(1)
             width_t = self.entity_width_emb(tail_part[:, 2]).unsqueeze(1)
+
+        else:
+            raise ValueError(f'Mode {mode} not supported in compute_KGE')
 
         # 通过关系变换头实体盒子
         trans = self.relation_trans_emb(relation).unsqueeze(1)
