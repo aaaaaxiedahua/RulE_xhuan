@@ -6,7 +6,7 @@
     "save_path": "../checkpoints/box_kinship",
 
     "cuda": true,
-    "cpu_num": 4,
+    "cpu_num": 10,
     "seed": 800,
 
     "_comment_model": "=== Model Parameters ===",

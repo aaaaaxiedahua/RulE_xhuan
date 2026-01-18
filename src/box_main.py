@@ -9,10 +9,10 @@ import torch
 import os
 import sys
 
-from graph import Graph
-from data import KGETrainDataset, RuleDataset, TestDataset
+from data import KnowledgeGraph, KGETrainDataset, RuleDataset, TestDataset
 from box_model import BoxRulE
 from box_trainer import WarmupTrainer, JointTrainer
+from utils import load_config, set_logger, set_seed
 
 
 def parse_args():
@@ -21,61 +21,54 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(description='Box-RulE Training')
 
-    # ===== 数据参数 =====
-    parser.add_argument('--data_path', type=str, default='../data/FB15k-237',
-                        help='数据集路径')
-    parser.add_argument('--rule_path', type=str, default='../data/FB15k-237/rules',
-                        help='规则文件路径')
+    # Config file
+    parser.add_argument('--config', type=str, default=None, help='配置文件路径')
 
-    # ===== 模型参数 =====
-    parser.add_argument('--hidden_dim', type=int, default=128,
-                        help='嵌入维度')
-    parser.add_argument('--init_width', type=float, default=0.5,
-                        help='盒子初始宽度')
-    parser.add_argument('--epsilon', type=float, default=1e-8,
-                        help='数值稳定性参数')
+    # Data paths
+    parser.add_argument('--data_path', type=str, default='../data/kinship', help='数据集路径')
+    parser.add_argument('--rule_path', type=str, default='../data/kinship/mined_rules.txt', help='规则文件路径')
+    parser.add_argument('--save_path', type=str, default='../checkpoints/box_kinship', help='模型保存路径')
 
-    # ===== 训练参数 =====
-    parser.add_argument('--batch_size', type=int, default=512,
-                        help='KGE批次大小')
-    parser.add_argument('--rule_batch_size', type=int, default=128,
-                        help='规则批次大小')
-    parser.add_argument('--learning_rate', type=float, default=0.0001,
-                        help='学习率')
-    parser.add_argument('--negative_sample_size', type=int, default=128,
-                        help='负样本数量')
+    # Device settings
+    parser.add_argument('--cuda', action='store_true', default=True, help='是否使用CUDA')
+    parser.add_argument('--cpu_num', type=int, default=10, help='CPU线程数')
+    parser.add_argument('--seed', type=int, default=800, help='随机种子')
 
-    # ===== 阶段参数 =====
-    parser.add_argument('--warmup_steps', type=int, default=10000,
-                        help='预热阶段步数')
-    parser.add_argument('--joint_steps', type=int, default=20000,
-                        help='联合训练步数')
+    # Model parameters
+    parser.add_argument('--hidden_dim', type=int, default=200, help='隐藏层维度')
+    parser.add_argument('--init_width', type=float, default=0.3, help='盒子初始宽度')
+    parser.add_argument('--epsilon', type=float, default=1e-8, help='数值稳定性参数')
 
-    # ===== 损失权重 =====
-    parser.add_argument('--gamma_fact', type=float, default=12.0,
-                        help='KGE margin')
-    parser.add_argument('--gamma_rule', type=float, default=12.0,
-                        help='Rule margin')
-    parser.add_argument('--lambda_vol', type=float, default=0.001,
-                        help='体积正则化权重')
-    parser.add_argument('--weight_rule', type=float, default=1.0,
-                        help='规则损失权重')
-    parser.add_argument('--adversarial_temperature', type=float, default=1.0,
-                        help='对抗温度参数')
+    # Training parameters
+    parser.add_argument('--batch_size', type=int, default=128, help='KGE批次大小')
+    parser.add_argument('--rule_batch_size', type=int, default=128, help='规则批次大小')
+    parser.add_argument('--learning_rate', type=float, default=0.0001, help='学习率')
+    parser.add_argument('--negative_sample_size', type=int, default=256, help='负采样数量')
 
-    # ===== 其他参数 =====
-    parser.add_argument('--cpu_num', type=int, default=4,
-                        help='CPU工作线程数')
-    parser.add_argument('--save_path', type=str, default='../checkpoints',
-                        help='模型保存路径')
-    parser.add_argument('--log_steps', type=int, default=100,
-                        help='日志输出间隔')
-    parser.add_argument('--valid_steps', type=int, default=1000,
-                        help='验证间隔')
-    parser.add_argument('--cuda', action='store_true',
-                        help='使用GPU')
+    # Stage parameters
+    parser.add_argument('--warmup_steps', type=int, default=5000, help='Warmup训练步数')
+    parser.add_argument('--joint_steps', type=int, default=15000, help='Joint训练步数')
+
+    # Loss weights
+    parser.add_argument('--gamma_fact', type=float, default=6.0, help='KGE margin')
+    parser.add_argument('--gamma_rule', type=float, default=5.0, help='Rule margin')
+    parser.add_argument('--lambda_vol', type=float, default=0.001, help='体积正则化权重')
+    parser.add_argument('--weight_rule', type=float, default=2.0, help='规则损失权重')
+    parser.add_argument('--adversarial_temperature', type=float, default=0.5, help='对抗温度')
+
+    # Logging and validation
+    parser.add_argument('--log_steps', type=int, default=100, help='日志输出步数')
+    parser.add_argument('--warmup_valid_steps', type=int, default=500, help='Warmup验证步数')
+    parser.add_argument('--joint_valid_steps', type=int, default=500, help='Joint验证步数')
 
     args = parser.parse_args()
+
+    # 如果提供了配置文件，从配置文件加载参数（会覆盖命令行参数）
+    if args.config is not None:
+        config = load_config(args.config)
+        for key, value in config.items():
+            if not key.startswith('_'):  # 跳过注释字段
+                setattr(args, key, value)
 
     # 设置设备
     if args.cuda and torch.cuda.is_available():
@@ -104,7 +97,7 @@ def load_data(args):
     logging.info('Loading data...')
 
     # 加载知识图谱
-    graph = Graph(args.data_path)
+    graph = KnowledgeGraph(args.data_path)
 
     # 加载训练集
     train_dataset = KGETrainDataset(
@@ -117,8 +110,8 @@ def load_data(args):
 
     # 加载规则集
     rule_dataset = RuleDataset(
-        rule_path=args.rule_path,
-        nrelation=graph.relation_size,
+        num_relations=graph.relation_size,
+        input=args.rule_path,
         negative_sample_size=args.negative_sample_size
     )
 
@@ -140,14 +133,18 @@ def main():
     """
     # 解析参数
     args = parse_args()
-    setup_logging()
+
+    # 创建保存目录
+    if not os.path.exists(args.save_path):
+        os.makedirs(args.save_path)
+
+    # 设置日志和随机种子
+    set_logger(args.save_path)
+    set_seed(args.seed)
 
     logging.info('='*50)
     logging.info('Box-RulE Training')
     logging.info('='*50)
-
-    # 创建保存目录
-    os.makedirs(args.save_path, exist_ok=True)
 
     # 加载数据
     graph, train_dataset, rule_dataset, valid_dataset, test_dataset = load_data(args)
@@ -158,7 +155,9 @@ def main():
 
     # 加载规则
     logging.info('Loading rules into model...')
-    rules = rule_dataset.get_all_rules()
+    # RuleDataset.rules格式: [[rule, padding_idx], ...]
+    # 提取规则部分: rule格式为 [rule_id, rule_head, body_1, body_2, ...]
+    rules = [rule[0] for rule in rule_dataset.rules]
     model.set_rules(rules)
 
     # ===== 阶段1: Warmup训练 (几何预热) =====
