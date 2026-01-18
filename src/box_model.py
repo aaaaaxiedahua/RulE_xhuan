@@ -194,8 +194,8 @@ class BoxRulE(nn.Module):
         # 计算交集体积
         vol_inter = self.intersection_volume(box_pred, (center_t, width_t))
 
-        # 计算分数
-        score = self.gamma_fact.item() - (self.gamma_fact.item() - vol_inter)
+        # 计算分数 (keep as tensor to preserve gradients)
+        score = self.gamma_fact - (self.gamma_fact - vol_inter)
 
         return score
 
@@ -243,7 +243,7 @@ class BoxRulE(nn.Module):
 
         # 计算距离
         distance = torch.norm(body_sum - head_emb, p=2, dim=-1)
-        score = self.gamma_rule.item() - distance
+        score = self.gamma_rule - distance
 
         return score
 
