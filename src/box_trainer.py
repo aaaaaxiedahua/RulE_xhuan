@@ -20,7 +20,7 @@ class WarmupTrainer:
     3. 只训练KGE，不加载规则
     """
 
-    def __init__(self, model, graph, train_dataset, valid_dataset, args):
+    def __init__(self, model, graph, train_dataset, args):
         self.model = model
         self.graph = graph
         self.args = args
@@ -33,8 +33,6 @@ class WarmupTrainer:
             shuffle=True,
             num_workers=args.cpu_num if hasattr(args, 'cpu_num') else 0
         )
-
-        self.valid_dataset = valid_dataset
 
         # 优化器
         self.optimizer = torch.optim.Adam(
@@ -160,9 +158,9 @@ class WarmupTrainer:
         """
         logging.info(f'Evaluating on {split} set...')
 
-        from data import TestDataset
-        test_dataset = TestDataset(self.graph, split)
-        dataloader = DataLoader(test_dataset, batch_size=1, num_workers=0)
+        from data import EvalDataset
+        eval_dataset = EvalDataset(self.graph, split=split, batch_size=1)
+        dataloader = DataLoader(eval_dataset, batch_size=1, num_workers=0)
 
         self.model.eval()
 
@@ -264,7 +262,7 @@ class JointTrainer:
     3. 规则负采样与原RulE相同
     """
 
-    def __init__(self, model, graph, train_dataset, rule_dataset, valid_dataset, args):
+    def __init__(self, model, graph, train_dataset, rule_dataset, args):
         self.model = model
         self.graph = graph
         self.args = args
@@ -284,8 +282,6 @@ class JointTrainer:
             shuffle=True,
             num_workers=args.cpu_num if hasattr(args, 'cpu_num') else 0
         )
-
-        self.valid_dataset = valid_dataset
 
         # 优化器
         self.optimizer = torch.optim.Adam(
@@ -447,9 +443,9 @@ class JointTrainer:
         """
         logging.info(f'Evaluating on {split} set...')
 
-        from data import TestDataset
-        test_dataset = TestDataset(self.graph, split)
-        dataloader = DataLoader(test_dataset, batch_size=1, num_workers=0)
+        from data import EvalDataset
+        eval_dataset = EvalDataset(self.graph, split=split, batch_size=1)
+        dataloader = DataLoader(eval_dataset, batch_size=1, num_workers=0)
 
         self.model.eval()
 

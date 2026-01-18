@@ -566,6 +566,53 @@ class TestDataset(Dataset):
 
         return all_h, all_r, all_t, mask
 
+class EvalDataset(Dataset):
+    """
+    评估数据集 - 支持选择valid或test数据
+    """
+    def __init__(self, graph, split='valid', batch_size=1):
+        self.graph = graph
+        self.batch_size = batch_size
+        self.split = split
+
+        # 根据split选择数据
+        if split == 'valid':
+            facts = self.graph.valid_facts
+        elif split == 'test':
+            facts = self.graph.test_facts
+        else:
+            raise ValueError(f"Invalid split: {split}. Must be 'valid' or 'test'")
+
+        r2instances = [[] for r in range(self.graph.relation_size * 2)]
+        for h, r, t in facts:
+            r2instances[r].append((h, r, t))
+
+        self.batches = list()
+        for r, instances in enumerate(r2instances):
+            random.shuffle(instances)
+            for k in range(0, len(instances), self.batch_size):
+                start = k
+                end = min(k + self.batch_size, len(instances))
+                self.batches.append(instances[start:end])
+
+    def __len__(self):
+        return len(self.batches)
+
+    def __getitem__(self, idx):
+        data = self.batches[idx]
+
+        all_h = torch.LongTensor([_[0] for _ in data])
+        all_r = torch.LongTensor([_[1] for _ in data])
+        all_t = torch.LongTensor([_[2] for _ in data])
+
+        mask = torch.ones(len(data), self.graph.entity_size).bool()
+        for k, (h, r, t) in enumerate(data):
+            hr_index = self.graph.encode_hr(h, r)
+            t_index = torch.LongTensor(self.graph.hr2ooo[hr_index])
+            mask[k][t_index] = 0
+
+        return all_h, all_r, all_t, mask
+
 def Iterator(dataloader):
     while True:
         for data in dataloader:

@@ -116,16 +116,14 @@ def load_data(args):
         negative_sample_size=args.negative_sample_size
     )
 
-    # 加载验证集和测试集
-    valid_dataset = TestDataset(graph, 'valid')
-    test_dataset = TestDataset(graph, 'test')
-
     logging.info(f'Entities: {graph.entity_size}')
     logging.info(f'Relations: {graph.relation_size}')
     logging.info(f'Train triples: {len(graph.train_facts)}')
+    logging.info(f'Valid triples: {len(graph.valid_facts)}')
+    logging.info(f'Test triples: {len(graph.test_facts)}')
     logging.info(f'Rules: {len(rule_dataset)}')
 
-    return graph, train_dataset, rule_dataset, valid_dataset, test_dataset
+    return graph, train_dataset, rule_dataset
 
 
 def main():
@@ -148,7 +146,7 @@ def main():
     logging.info('='*50)
 
     # 加载数据
-    graph, train_dataset, rule_dataset, valid_dataset, test_dataset = load_data(args)
+    graph, train_dataset, rule_dataset = load_data(args)
 
     # 初始化模型
     logging.info('Initializing Box-RulE model...')
@@ -171,7 +169,6 @@ def main():
         model=model,
         graph=graph,
         train_dataset=train_dataset,
-        valid_dataset=valid_dataset,
         args=args
     )
 
@@ -221,7 +218,6 @@ def main():
         graph=graph,
         train_dataset=train_dataset,
         rule_dataset=rule_dataset,
-        valid_dataset=valid_dataset,
         args=args
     )
 
