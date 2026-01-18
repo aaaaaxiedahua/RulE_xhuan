@@ -103,13 +103,26 @@ class WarmupTrainer:
         # 总损失
         loss_total = loss_kge + loss_vol
 
+        # DEBUG: 记录反向传播前的参数
+        param_before = self.model.entity_center_emb.weight.data[0, 0].item()
+
         loss_total.backward()
+
+        # DEBUG: 检查梯度
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float('inf'))
+
         self.optimizer.step()
+
+        # DEBUG: 记录参数更新后的值
+        param_after = self.model.entity_center_emb.weight.data[0, 0].item()
+        param_change = abs(param_after - param_before)
 
         return {
             'loss_kge': loss_kge.item(),
             'loss_vol': loss_vol.item(),
-            'loss_total': loss_total.item()
+            'loss_total': loss_total.item(),
+            'grad_norm': grad_norm.item(),
+            'param_change': param_change
         }
 
     def train(self, max_steps):
@@ -137,11 +150,15 @@ class WarmupTrainer:
                     avg_loss_kge = sum([l['loss_kge'] for l in training_logs]) / len(training_logs)
                     avg_loss_vol = sum([l['loss_vol'] for l in training_logs]) / len(training_logs)
                     avg_loss_total = sum([l['loss_total'] for l in training_logs]) / len(training_logs)
+                    avg_grad_norm = sum([l['grad_norm'] for l in training_logs]) / len(training_logs)
+                    avg_param_change = sum([l['param_change'] for l in training_logs]) / len(training_logs)
 
                     logging.info(f'[Warmup] Step {step}/{max_steps}: '
                                f'loss_kge={avg_loss_kge:.4f}, '
                                f'loss_vol={avg_loss_vol:.6f}, '
-                               f'loss_total={avg_loss_total:.4f}')
+                               f'loss_total={avg_loss_total:.4f}, '
+                               f'grad_norm={avg_grad_norm:.4f}, '
+                               f'param_change={avg_param_change:.8f}')
                     training_logs = []
 
                 # 定期验证
