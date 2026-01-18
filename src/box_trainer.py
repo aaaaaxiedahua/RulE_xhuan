@@ -63,6 +63,20 @@ class WarmupTrainer:
             lr=args.learning_rate
         )
 
+        # DEBUG: 检查哪些参数会被优化
+        logging.info('=== Optimizer Parameters Check ===')
+        total_params = 0
+        trainable_params = 0
+        for name, param in model.named_parameters():
+            total_params += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+                logging.info(f'  ✓ {name}: shape={list(param.shape)}, requires_grad={param.requires_grad}')
+            else:
+                logging.info(f'  ✗ {name}: shape={list(param.shape)}, requires_grad={param.requires_grad}')
+        logging.info(f'Total params: {total_params}, Trainable: {trainable_params}')
+        logging.info('==================================')
+
         # 移动模型到设备
         if self.device.type == 'cuda':
             self.model = self.model.cuda(self.device)
@@ -87,6 +101,10 @@ class WarmupTrainer:
         negative_score = self.model.compute_KGE((positive_sample, negative_sample), mode)
         positive_score = self.model.compute_KGE(positive_sample, mode='single')
 
+        # DEBUG: 检查分数是否需要梯度
+        # logging.info(f'DEBUG: negative_score.requires_grad={negative_score.requires_grad}')
+        # logging.info(f'DEBUG: positive_score.requires_grad={positive_score.requires_grad}')
+
         # KGE损失
         negative_score = (F.softmax(negative_score * self.args.adversarial_temperature, dim=1).detach()
                          * F.logsigmoid(-negative_score)).sum(dim=1)
@@ -104,25 +122,42 @@ class WarmupTrainer:
         loss_total = loss_kge + loss_vol
 
         # DEBUG: 记录反向传播前的参数
-        param_before = self.model.entity_center_emb.weight.data[0, 0].item()
+        param_center_before = self.model.entity_center_emb.weight.data[0, 0].item()
+        param_width_before = self.model.entity_width_emb.weight.data[0, 0].item()
 
         loss_total.backward()
 
-        # DEBUG: 检查梯度
+        # DEBUG: 检查各个参数的梯度
+        grad_center = self.model.entity_center_emb.weight.grad
+        grad_width = self.model.entity_width_emb.weight.grad
+        grad_relation_trans = self.model.relation_trans_emb.weight.grad
+
+        grad_center_norm = grad_center.norm().item() if grad_center is not None else 0.0
+        grad_width_norm = grad_width.norm().item() if grad_width is not None else 0.0
+        grad_relation_norm = grad_relation_trans.norm().item() if grad_relation_trans is not None else 0.0
+
+        # DEBUG: 检查总梯度
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float('inf'))
 
         self.optimizer.step()
 
         # DEBUG: 记录参数更新后的值
-        param_after = self.model.entity_center_emb.weight.data[0, 0].item()
-        param_change = abs(param_after - param_before)
+        param_center_after = self.model.entity_center_emb.weight.data[0, 0].item()
+        param_width_after = self.model.entity_width_emb.weight.data[0, 0].item()
+
+        param_center_change = abs(param_center_after - param_center_before)
+        param_width_change = abs(param_width_after - param_width_before)
 
         return {
             'loss_kge': loss_kge.item(),
             'loss_vol': loss_vol.item(),
             'loss_total': loss_total.item(),
             'grad_norm': grad_norm.item(),
-            'param_change': param_change
+            'grad_center_norm': grad_center_norm,
+            'grad_width_norm': grad_width_norm,
+            'grad_relation_norm': grad_relation_norm,
+            'param_center_change': param_center_change,
+            'param_width_change': param_width_change
         }
 
     def train(self, max_steps):
@@ -151,14 +186,16 @@ class WarmupTrainer:
                     avg_loss_vol = sum([l['loss_vol'] for l in training_logs]) / len(training_logs)
                     avg_loss_total = sum([l['loss_total'] for l in training_logs]) / len(training_logs)
                     avg_grad_norm = sum([l['grad_norm'] for l in training_logs]) / len(training_logs)
-                    avg_param_change = sum([l['param_change'] for l in training_logs]) / len(training_logs)
+                    avg_grad_center = sum([l['grad_center_norm'] for l in training_logs]) / len(training_logs)
+                    avg_grad_width = sum([l['grad_width_norm'] for l in training_logs]) / len(training_logs)
+                    avg_grad_relation = sum([l['grad_relation_norm'] for l in training_logs]) / len(training_logs)
+                    avg_param_center_change = sum([l['param_center_change'] for l in training_logs]) / len(training_logs)
+                    avg_param_width_change = sum([l['param_width_change'] for l in training_logs]) / len(training_logs)
 
-                    logging.info(f'[Warmup] Step {step}/{max_steps}: '
-                               f'loss_kge={avg_loss_kge:.4f}, '
-                               f'loss_vol={avg_loss_vol:.6f}, '
-                               f'loss_total={avg_loss_total:.4f}, '
-                               f'grad_norm={avg_grad_norm:.4f}, '
-                               f'param_change={avg_param_change:.8f}')
+                    logging.info(f'[Warmup] Step {step}/{max_steps}:')
+                    logging.info(f'  Loss: kge={avg_loss_kge:.4f}, vol={avg_loss_vol:.6f}, total={avg_loss_total:.4f}')
+                    logging.info(f'  Grad: total={avg_grad_norm:.4f}, center={avg_grad_center:.4f}, width={avg_grad_width:.4f}, relation={avg_grad_relation:.4f}')
+                    logging.info(f'  Param Change: center={avg_param_center_change:.8f}, width={avg_param_width_change:.8f}')
                     training_logs = []
 
                 # 定期验证
