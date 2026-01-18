@@ -65,7 +65,8 @@ def parse_args():
 
     # 如果提供了配置文件，从配置文件加载参数（会覆盖命令行参数）
     if args.config is not None:
-        config = load_config(args.config)
+        configs = load_config(args.config)
+        config = configs[0]  # load_config返回列表，取第一个配置
         for key, value in config.items():
             if not key.startswith('_'):  # 跳过注释字段
                 setattr(args, key, value)
