@@ -11,7 +11,7 @@ import torch
 
 def load_config(cfg_file):
     # cfg_file = os.path.join(cfg_file, 'config.json')
-    with open(cfg_file, "r") as fin:
+    with open(cfg_file, "r", encoding='utf-8') as fin:
         raw_text = fin.read()
 
     if "---" in raw_text:
@@ -30,7 +30,7 @@ def load_config(cfg_file):
 def save_config(args):
 
     argparse_dict = vars(args)
-    with open(os.path.join(args.save_path, 'config.json'), 'w') as fjson:
+    with open(os.path.join(args.save_path, 'config.json'), 'w', encoding='utf-8') as fjson:
         json.dump(argparse_dict, fjson)
 
 def set_seed(seed):
@@ -43,7 +43,7 @@ def set_seed(seed):
 def save_model(model, optim, args):
 
     argparse_dict = vars(args)
-    with open(os.path.join(args.save_path, 'config.json'), 'w') as fjson:
+    with open(os.path.join(args.save_path, 'config.json'), 'w', encoding='utf-8') as fjson:
         json.dump(argparse_dict, fjson)
 
     params = {
