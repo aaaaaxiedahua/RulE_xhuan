@@ -34,6 +34,8 @@ python main.py --init ../config/umls_config.json
 
 
 python box_main.py --config ../config/box_kinship_config.json
+
+python gaussian_main.py --config ../config/gaussian_kinship_config.json
 ```
 
 ## Results
