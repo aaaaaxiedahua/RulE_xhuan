@@ -38,5 +38,7 @@
     "g_batch_size": 32,
     "g_lr": 0.005,
     "weight_decay": 0,
-    "num_iters": 20
+    "num_iters": 20,
+    "rule_compose_mode": "add",
+    "entity_aware_mode": "none"
 }

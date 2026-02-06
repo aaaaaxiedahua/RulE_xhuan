@@ -407,7 +407,47 @@ class KnowledgeGraph(object):
         value = value[mask]
         return [index, value]
 
+    def build_sparse_adjacency(self, device=None):
+        """
+        预构建每个关系的稀疏邻接矩阵，可选一次性搬到 GPU。
+        调用时机：在 main.py 中创建 graph 后、确定 device 后调用一次。
+        """
+        self.relation2sparse = [None] * (self.relation_size * 2)
+        self.use_sparse = True
+
+        for r in range(self.relation_size * 2):
+            # relation2adjacency[r][0] 是 [2, num_edges]: [targets, sources]
+            index = self.relation2adjacency[r][0]
+            value = self.relation2adjacency[r][1]
+
+            # 构建 sparse COO: A[target, source] = 1，表示边 source → target
+            adj = torch.sparse_coo_tensor(
+                index, value,
+                size=(self.entity_size, self.entity_size)
+            ).coalesce()
+
+            if device is not None and device.type == "cuda":
+                adj = adj.cuda(device)
+
+            self.relation2sparse[r] = adj
+
+        print("Sparse adjacency matrices built | DONE!")
+
     def grounding(self, h, r, rule, edges_to_remove):
+        """
+        规则 grounding：从头实体 h 出发，沿规则体传播，计算到达每个实体的次数。
+        如果已调用 build_sparse_adjacency()，则使用稀疏模式；否则使用原密集模式。
+        """
+        device = h.device
+
+        # 检查是否启用稀疏模式
+        if hasattr(self, 'use_sparse') and self.use_sparse:
+            return self._grounding_sparse(h, r, rule, edges_to_remove)
+        else:
+            return self._grounding_dense(h, r, rule, edges_to_remove)
+
+    def _grounding_dense(self, h, r, rule, edges_to_remove):
+        """原始密集模式 grounding（保持不变）"""
         device = h.device
         with torch.no_grad():
             x = torch.nn.functional.one_hot(h, self.entity_size).transpose(0, 1).unsqueeze(-1)
@@ -415,15 +455,34 @@ class KnowledgeGraph(object):
                 x = x.cuda(device)
             for r_body in rule:
                 if r_body == r:
-                    x = self.propagate(x, r_body, edges_to_remove)
+                    x = self._propagate_dense(x, r_body, edges_to_remove)
                 else:
-                    x = self.propagate(x, r_body, None)
+                    x = self._propagate_dense(x, r_body, None)
         return x.squeeze(-1).transpose(0, 1)
 
-    def propagate(self, x, relation, edges_to_remove=None):
+    def _grounding_sparse(self, h, r, rule, edges_to_remove):
+        """稀疏模式 grounding：使用稀疏矩阵乘法，减少显存占用"""
+        device = h.device
+        batch = h.size(0)
+
+        with torch.no_grad():
+            # 初始化：[entity_size, batch] 稀疏表示的起点
+            x = torch.zeros(self.entity_size, batch, device=device)
+            x[h, torch.arange(batch, device=device)] = 1.0
+
+            for r_body in rule:
+                if r_body == r:
+                    x = self._propagate_sparse(x, r_body, edges_to_remove)
+                else:
+                    x = self._propagate_sparse(x, r_body, None)
+
+        return x.transpose(0, 1)  # [batch, entity_size]
+
+    def _propagate_dense(self, x, relation, edges_to_remove=None):
+        """原始密集模式 propagate（保持不变）"""
         device = x.device
-        node_in = self.relation2adjacency[relation][0][1] # h
-        node_out = self.relation2adjacency[relation][0][0] # t
+        node_in = self.relation2adjacency[relation][0][1]  # h (source)
+        node_out = self.relation2adjacency[relation][0][0]  # t (target)
         if device.type == "cuda":
             node_in = node_in.cuda(device)
             node_out = node_out.cuda(device)
@@ -445,6 +504,58 @@ class KnowledgeGraph(object):
             x = scatter(message, node_out, dim=0, dim_size=x.size(0))
 
         return x
+
+    def _propagate_sparse(self, x, relation, edges_to_remove=None):
+        """
+        稀疏模式 propagate：使用 torch.sparse.mm 替代 gather + scatter。
+
+        Args:
+            x: [entity_size, batch] 密集张量，当前实体状态
+            relation: 关系 ID
+            edges_to_remove: [batch] 每个 batch 样本要删除的边索引（可选）
+
+        Returns:
+            x_new: [entity_size, batch] 传播后的实体状态
+        """
+        adj = self.relation2sparse[relation]  # 已在 GPU 上的稀疏矩阵
+
+        # 核心操作：稀疏矩阵 × 密集矩阵 → 密集矩阵
+        # adj: [entity_size, entity_size] sparse, x: [entity_size, batch] dense
+        x_new = torch.sparse.mm(adj, x)  # [entity_size, batch]
+
+        if edges_to_remove is not None:
+            # 修正被删除边的贡献
+            # edges_to_remove[i] 是第 i 个 batch 样本要删除的边在邻接列表中的索引
+            indices = adj.indices()  # [2, num_edges]: [targets, sources]
+            node_out = indices[0]    # target 节点
+            node_in = indices[1]     # source 节点
+
+            batch = x.size(1)
+            batch_range = torch.arange(batch, device=x.device)
+
+            # 获取被删边的源节点和目标节点
+            src = node_in[edges_to_remove]   # [batch] 被删边的源节点
+            dst = node_out[edges_to_remove]  # [batch] 被删边的目标节点
+
+            # 减去被删边的贡献：x_new[dst[i], i] -= x[src[i], i]
+            removed_val = x[src, batch_range]  # [batch]
+            x_new[dst, batch_range] = x_new[dst, batch_range] - removed_val
+
+        return x_new
+
+    # 保留旧的 propagate 作为兼容接口
+    def propagate(self, x, relation, edges_to_remove=None):
+        """兼容接口：根据是否启用稀疏模式选择实现"""
+        if hasattr(self, 'use_sparse') and self.use_sparse:
+            # 稀疏模式需要 2D 输入，处理 3D 输入的情况
+            if x.dim() == 3:
+                x_2d = x.squeeze(-1)
+                result = self._propagate_sparse(x_2d, relation, edges_to_remove)
+                return result.unsqueeze(-1)
+            else:
+                return self._propagate_sparse(x, relation, edges_to_remove)
+        else:
+            return self._propagate_dense(x, relation, edges_to_remove)
 
 class TrainDataset(Dataset):
     def __init__(self, graph, batch_size):

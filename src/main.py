@@ -67,6 +67,12 @@ def parse_args(args=None):
     parser.add_argument('-reg', '--regularization', default=0, type=float)
     parser.add_argument('--max_steps', default=15000, type=int)
     parser.add_argument('--p_norm', default=2, type=int)
+    parser.add_argument('--rule_compose_mode', default='add', choices=['add', 'rotate'], type=str,
+                        help='rule body composition mode: add (sum) or rotate (complex rotation)')
+    parser.add_argument('--use_sparse_grounding', default=True, type=lambda x: x.lower() != 'false',
+                        help='use sparse matrix for grounding (default: True, saves memory on large datasets)')
+    parser.add_argument('--entity_aware_mode', default='none', choices=['none', 'add', 'concat', 'gate'], type=str,
+                        help='entity-aware grounding mode: none (original), add (additive fusion), concat (concatenation), gate (gated fusion)')
 
     # save path
     parser.add_argument('-init', '--init_checkpoint_config', default="../config/umls_config.json", type=str)
@@ -126,7 +132,14 @@ def main():
     else:
         device = torch.device('cpu')
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
+    # 构建稀疏邻接矩阵并预加载到 GPU（优化 grounding 显存和速度）
+    use_sparse = getattr(args, 'use_sparse_grounding', True)  # 默认启用
+    if use_sparse:
+        graph.build_sparse_adjacency(device)
+
+    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path,
+                      rule_compose_mode=getattr(args, 'rule_compose_mode', 'add'),
+                      entity_aware_mode=getattr(args, 'entity_aware_mode', 'none'))
     RulE_model.set_rules(rules)
 
     

@@ -7,16 +7,18 @@ from layers import MLP, FuncToNodeSum
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, rule_compose_mode='add', entity_aware_mode='none'):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
+        self.rule_compose_mode = rule_compose_mode
+        self.entity_aware_mode = entity_aware_mode  # 'none', 'add', 'concat', 'gate'
         self.num_entities = graph.entity_size
-        self.num_relations = graph.relation_size 
-        self.padding_index = graph.relation_size 
+        self.num_relations = graph.relation_size
+        self.padding_index = graph.relation_size
 
         self.hidden_dim = hidden_dim
-        # self.entity_dim = hidden_dim * 2 
+        # self.entity_dim = hidden_dim * 2
         # self.relation_dim = hidden_dim
 
         # self.rule_dim = rule_dim
@@ -26,13 +28,31 @@ class RulE(torch.nn.Module):
 
         self.mlp_rule_dim = mlp_rule_dim
 
-        
+
         self.rule_to_entity = FuncToNodeSum(self.mlp_rule_dim)
 
-        if "FB15k-237" in dataset or "wn18rr" in dataset or "YAGO3-10" in dataset:
-            self.score_model = MLP(self.mlp_rule_dim, [128, 1]) 
+        # 根据实体感知模式确定 score_model 输入维度
+        if self.entity_aware_mode == 'concat':
+            score_input_dim = self.mlp_rule_dim * 3  # rule_output + h_proj + t_proj
         else:
-            self.score_model = MLP(self.mlp_rule_dim, [1]) 
+            score_input_dim = self.mlp_rule_dim
+
+        if "FB15k-237" in dataset or "wn18rr" in dataset or "YAGO3-10" in dataset:
+            self.score_model = MLP(score_input_dim, [128, 1])
+        else:
+            self.score_model = MLP(score_input_dim, [1])
+
+        # 实体感知模块：投影层
+        if self.entity_aware_mode != 'none':
+            self.h_proj = nn.Linear(hidden_dim * 2, mlp_rule_dim)  # 查询实体投影
+            self.t_proj = nn.Linear(hidden_dim * 2, mlp_rule_dim)  # 候选实体投影
+
+            if self.entity_aware_mode == 'gate':
+                # 门控融合需要额外的门控网络
+                self.gate_net = nn.Sequential(
+                    nn.Linear(mlp_rule_dim * 2, mlp_rule_dim),
+                    nn.Sigmoid()
+                ) 
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
         
@@ -267,6 +287,42 @@ class RulE(torch.nn.Module):
     
 
 
+    def _rotate_compose_body(self, embedding, cal_mask, rule_embedding, embedding_r):
+        """
+        RotatE-style complex rotation composition for rule bodies.
+
+        Args:
+            embedding: relation embeddings with flag applied, [batch, neg, body_len, hidden_dim]
+            cal_mask: body mask, [batch, 1/neg, body_len, 1]
+            rule_embedding: rule embeddings, [batch, neg, hidden_dim]
+            embedding_r: rule head relation embedding, [batch, neg, hidden_dim]
+
+        Returns:
+            (re_combined, im_combined, re_head, im_head) each [batch, neg, hidden_dim]
+        """
+        phase_factor = self.embedding_range_fact.item() / self.pi
+
+        # Convert body relation embeddings to phases, mask padding positions
+        phase_body = (embedding / phase_factor) * cal_mask  # [batch, neg, body_len, hidden_dim]
+
+        # Sum phases across body (equivalent to complex number multiplication)
+        phase_sum = phase_body.sum(-2)  # [batch, neg, hidden_dim]
+
+        # Add rule embedding as phase correction
+        phase_rule = rule_embedding / phase_factor
+        phase_combined = phase_sum + phase_rule  # [batch, neg, hidden_dim]
+
+        # Convert to complex representation
+        re_combined = torch.cos(phase_combined)
+        im_combined = torch.sin(phase_combined)
+
+        # Convert rule head to complex representation
+        phase_head = embedding_r / phase_factor
+        re_head = torch.cos(phase_head)
+        im_head = torch.sin(phase_head)
+
+        return re_combined, im_combined, re_head, im_head
+
     def add_ruleE(self, rules, mask):
         inputs = rules[:,:,2:]
         # cal_mask = (~mask).unsqueeze(1).unsqueeze(-1)
@@ -276,28 +332,33 @@ class RulE(torch.nn.Module):
         inputs_com = inputs % self.num_relations
 
         inputs_com = torch.where(inputs==self.num_relations * 2, self.padding_index, inputs_com)
-        
+
         embedding = self.relation_embedding(inputs_com) * relations_flag
-        
+
         rule_embedding = self.rule_emb(rules[:,:,0])
-        
-        
+
+
         # rule_head
         embedding_r = self.relation_embedding(rules[:,:,1]%self.num_relations)
         relations_flag = torch.pow(-1,rules[:,:,1] // (self.num_relations)).unsqueeze(-1)
         embedding_r *= relations_flag
 
         rule_body = embedding * cal_mask
-        
-        
-        
-        outputs = rule_body.sum(-2) + rule_embedding
+
+        if self.rule_compose_mode == 'rotate':
+            re_combined, im_combined, re_head, im_head = self._rotate_compose_body(
+                embedding, cal_mask, rule_embedding, embedding_r
+            )
+            re_diff = re_combined - re_head
+            im_diff = im_combined - im_head
+            # Per-dimension distance, then norm across hidden_dim
+            dist_per_dim = torch.sqrt(re_diff ** 2 + im_diff ** 2 + 1e-12)  # [batch, neg, hidden_dim]
+            dist = self.gamma_rule.item() - torch.norm(dist_per_dim, p=self.p, dim=-1)
+        else:
+            outputs = rule_body.sum(-2) + rule_embedding
+            dist = self.gamma_rule.item() - torch.norm((outputs - embedding_r), p=self.p, dim=-1)
 
 
-        # dist = self.gamma_rule.item() - torch.norm((outputs - embedding_r), dim=-1)
-        dist = self.gamma_rule.item() - torch.norm((outputs - embedding_r), p=self.p, dim=-1)
-
-        
         return dist, rule_embedding
     
 
@@ -311,25 +372,32 @@ class RulE(torch.nn.Module):
         inputs_com = inputs % self.num_relations
 
         inputs_com = torch.where(inputs==self.num_relations * 2, self.padding_index, inputs_com)
-        
+
         embedding = self.relation_embedding(inputs_com) * relations_flag
-        
+
         rule_embedding = self.rule_emb(rules[:,:,0])
-        
-        
+
+
         # rule_head
         embedding_r = self.relation_embedding(rules[:,:,1]%self.num_relations)
         relations_flag = torch.pow(-1,rules[:,:,1] // (self.num_relations)).unsqueeze(-1)
         embedding_r *= relations_flag
 
         rule_body = embedding * cal_mask
-        
-        
-        # outputs = rule_body.sum(-2) + rule_embedding
-        outputs = rule_body.sum(-2) + rule_embedding
 
-        dist = self.gamma_rule.item()/self.hidden_dim - torch.pow((outputs - embedding_r), self.p)
-        # dist = self.gamma_rule.item() - torch.norm((outputs - embedding_r), p = self.p, dim=-1)
+        if self.rule_compose_mode == 'rotate':
+            re_combined, im_combined, re_head, im_head = self._rotate_compose_body(
+                embedding, cal_mask, rule_embedding, embedding_r
+            )
+            re_diff = re_combined - re_head
+            im_diff = im_combined - im_head
+            # Per-dimension distance, consistent with add_ruleE_g output shape [batch, 1, hidden_dim]
+            dist = self.gamma_rule.item() / self.hidden_dim - torch.pow(
+                torch.sqrt(re_diff ** 2 + im_diff ** 2 + 1e-12), self.p
+            )
+        else:
+            outputs = rule_body.sum(-2) + rule_embedding
+            dist = self.gamma_rule.item()/self.hidden_dim - torch.pow((outputs - embedding_r), self.p)
 
         return dist
     
@@ -377,15 +445,39 @@ class RulE(torch.nn.Module):
         mlp_feature = self.mlp_feature[rule_index]
 
         # output = self.rule_to_entity(rule_count, mlp_feature)
-        output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
+        rule_output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
 
+        # === 实体感知模块 ===
+        if self.entity_aware_mode != 'none':
+            # 获取候选实体的 embedding 并投影
+            candidate_entities = candidate_set % self.num_entities
+            t_emb = self.entity_embedding(candidate_entities)  # [num_candidates, entity_dim]
+            t_proj = self.t_proj(t_emb)  # [num_candidates, mlp_rule_dim]
 
-        # rel = self.relation_embedding(all_r[0]%self.num_relations)
-        # relations_flag = torch.pow(-1,all_r[0] // (self.num_relations)).unsqueeze(-1)
-        # rel = (rel * relations_flag).unsqueeze(0).expand(output.size(0), -1)
+            # 获取查询实体的 embedding 并投影
+            h_emb = self.entity_embedding(all_h)  # [batch, entity_dim]
+            h_proj = self.h_proj(h_emb)  # [batch, mlp_rule_dim]
 
-        # feature = torch.cat([output, rel], dim=-1)
-        feature = output
+            # 广播：每个候选对应其所属 batch 的查询实体
+            batch_indices = candidate_set // self.num_entities
+            h_proj_expanded = h_proj[batch_indices]  # [num_candidates, mlp_rule_dim]
+
+            # 根据模式融合
+            if self.entity_aware_mode == 'add':
+                # 加法融合
+                feature = rule_output + h_proj_expanded + t_proj
+            elif self.entity_aware_mode == 'concat':
+                # 拼接融合
+                feature = torch.cat([rule_output, h_proj_expanded, t_proj], dim=-1)
+            elif self.entity_aware_mode == 'gate':
+                # 门控融合：学习如何平衡规则信息和实体信息
+                entity_feature = h_proj_expanded + t_proj
+                gate = self.gate_net(torch.cat([rule_output, entity_feature], dim=-1))
+                feature = gate * rule_output + (1 - gate) * entity_feature
+            else:
+                feature = rule_output
+        else:
+            feature = rule_output
 
         output = self.score_model(feature).squeeze(-1)
 

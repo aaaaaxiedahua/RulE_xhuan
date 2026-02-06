@@ -38,5 +38,7 @@
     "num_iters": 20,
     "regularization": 0,
     "disable_adv": false,
-    "p_norm": 2
+    "p_norm": 2,
+    "rule_compose_mode": "add",
+    "entity_aware_mode": "none"
 }
