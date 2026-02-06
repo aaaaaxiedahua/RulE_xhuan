@@ -82,6 +82,7 @@ class PreTrainer(object):
         self.rules_iterator = Iterator(rules_dataloader)
 
         logging.info('>>>>> ruleE: Pre-training')
+        logging.info('  rule_compose_mode: %s', getattr(self.model, 'rule_compose_mode', 'add'))
         training_logs = []
         best_mrr = 0.0
 
@@ -408,9 +409,12 @@ class GroundTrainer(object):
 
         
         logging.info('>>>>> RulE: Grounding-Training')
-        
+        logging.info('  entity_aware_mode: %s', getattr(self.model, 'entity_aware_mode', 'none'))
+        if getattr(self.model, 'entity_aware_mode', 'none') != 'none':
+            logging.info('  -> Entity embedding will be fused into grounding scoring')
+            logging.info('  -> h_proj and t_proj are trainable, entity_embedding is frozen')
 
-        best_valid_mrr = 0.0 
+        best_valid_mrr = 0.0
         test_mrr = 0.0
 
         warm_up_steps = args.num_iters // 2
@@ -510,13 +514,14 @@ class GroundTrainer(object):
                 total_size += mask.sum().item()
             
             if (batch_id + 1) % print_every == 0:
-                
-                
+
+
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
-                
+
                 total_loss = 0.0
                 total_size = 0.0
-                self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+                # 注意：不在这里保存，只在 epoch 结束且 valid MRR 提升时保存
+                # self.save(args, os.path.join(args.save_path, 'grounding.pt'))
         
 
     @torch.no_grad()

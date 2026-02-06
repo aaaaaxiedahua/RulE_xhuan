@@ -112,6 +112,18 @@ class RulE(torch.nn.Module):
         
         self.pi = 3.14159262358979323846
 
+        # 日志：记录创新模块配置
+        logging.info('=' * 50)
+        logging.info('RulE Model Configuration:')
+        logging.info('  rule_compose_mode: %s', self.rule_compose_mode)
+        logging.info('  entity_aware_mode: %s', self.entity_aware_mode)
+        if self.entity_aware_mode != 'none':
+            logging.info('  -> h_proj: Linear(%d -> %d)', hidden_dim * 2, mlp_rule_dim)
+            logging.info('  -> t_proj: Linear(%d -> %d)', hidden_dim * 2, mlp_rule_dim)
+            if self.entity_aware_mode == 'gate':
+                logging.info('  -> gate_net: Linear(%d -> %d) + Sigmoid', mlp_rule_dim * 2, mlp_rule_dim)
+        logging.info('=' * 50)
+
     # def add_param(self):
 
     #     # self.mlp_rule_dim = 16
@@ -474,6 +486,14 @@ class RulE(torch.nn.Module):
                 entity_feature = h_proj_expanded + t_proj
                 gate = self.gate_net(torch.cat([rule_output, entity_feature], dim=-1))
                 feature = gate * rule_output + (1 - gate) * entity_feature
+
+                # 日志：记录门控值统计（每1000次调用记录一次）
+                if not hasattr(self, '_gate_log_counter'):
+                    self._gate_log_counter = 0
+                self._gate_log_counter += 1
+                if self._gate_log_counter % 1000 == 1:
+                    logging.info('[EntityAware-Gate] gate mean=%.4f, std=%.4f, min=%.4f, max=%.4f',
+                                 gate.mean().item(), gate.std().item(), gate.min().item(), gate.max().item())
             else:
                 feature = rule_output
         else:
