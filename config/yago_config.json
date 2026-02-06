@@ -40,5 +40,6 @@
     "disable_adv": false,
     "p_norm": 2,
     "rule_compose_mode": "add",
-    "entity_aware_mode": "none"
+    "entity_aware_mode": "none",
+    "use_sparse_grounding": true
 }
