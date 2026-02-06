@@ -364,12 +364,37 @@ class RulE(torch.nn.Module):
             re_diff = re_combined - re_head
             im_diff = im_combined - im_head
             # Per-dimension distance, then norm across hidden_dim
-            dist_per_dim = torch.sqrt(re_diff ** 2 + im_diff ** 2 + 1e-12)  # [batch, neg, hidden_dim]
-            dist = self.gamma_rule.item() - torch.norm(dist_per_dim, p=self.p, dim=-1)
+            # 原始距离（归一化前）
+            dist_raw = torch.sqrt(re_diff ** 2 + im_diff ** 2 + 1e-12)
+            # 归一化：乘以 embedding_range_fact 使尺度与 add 模式一致
+            dist_per_dim = dist_raw * self.embedding_range_fact.item()
+            dist_norm = torch.norm(dist_per_dim, p=self.p, dim=-1)
+            dist = self.gamma_rule.item() - dist_norm
+
+            # 日志：记录 rotate 模块统计信息
+            if not hasattr(self, '_rotate_log_counter'):
+                self._rotate_log_counter = 0
+            self._rotate_log_counter += 1
+            if self._rotate_log_counter % 1000 == 1:
+                logging.info('[Rotate] dist_raw: mean=%.4f, max=%.4f | dist_scaled: mean=%.4f, max=%.4f | score: mean=%.4f, min=%.4f, max=%.4f',
+                             dist_raw.mean().item(), dist_raw.max().item(),
+                             dist_norm.mean().item(), dist_norm.max().item(),
+                             dist.mean().item(), dist.min().item(), dist.max().item())
         else:
             outputs = rule_body.sum(-2) + rule_embedding
-            dist = self.gamma_rule.item() - torch.norm((outputs - embedding_r), p=self.p, dim=-1)
+            diff = outputs - embedding_r
+            dist_norm = torch.norm(diff, p=self.p, dim=-1)
+            dist = self.gamma_rule.item() - dist_norm
 
+            # 日志：记录 add 模块统计信息
+            if not hasattr(self, '_add_log_counter'):
+                self._add_log_counter = 0
+            self._add_log_counter += 1
+            if self._add_log_counter % 1000 == 1:
+                logging.info('[Add] diff: mean=%.4f, max=%.4f | dist_norm: mean=%.4f, max=%.4f | score: mean=%.4f, min=%.4f, max=%.4f',
+                             diff.abs().mean().item(), diff.abs().max().item(),
+                             dist_norm.mean().item(), dist_norm.max().item(),
+                             dist.mean().item(), dist.min().item(), dist.max().item())
 
         return dist, rule_embedding
     
@@ -404,8 +429,9 @@ class RulE(torch.nn.Module):
             re_diff = re_combined - re_head
             im_diff = im_combined - im_head
             # Per-dimension distance, consistent with add_ruleE_g output shape [batch, 1, hidden_dim]
+            # 归一化：乘以 embedding_range_fact 使尺度与 add 模式一致
             dist = self.gamma_rule.item() / self.hidden_dim - torch.pow(
-                torch.sqrt(re_diff ** 2 + im_diff ** 2 + 1e-12), self.p
+                torch.sqrt(re_diff ** 2 + im_diff ** 2 + 1e-12) * self.embedding_range_fact.item(), self.p
             )
         else:
             outputs = rule_body.sum(-2) + rule_embedding
