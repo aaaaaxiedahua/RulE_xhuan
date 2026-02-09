@@ -36,6 +36,6 @@
     "weight_decay": 0,
     "num_iters": 20,
     "rule_compose_mode": "add",
-    "entity_aware_mode": "none",
-    "use_sparse_grounding": true
+    "use_sparse_grounding": true,
+    "use_rule_structure": true
 }

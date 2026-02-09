@@ -71,8 +71,8 @@ def parse_args(args=None):
                         help='rule body composition mode: add (sum) or rotate (complex rotation)')
     parser.add_argument('--use_sparse_grounding', default=True, type=lambda x: x.lower() != 'false',
                         help='use sparse matrix for grounding (default: True, saves memory on large datasets)')
-    parser.add_argument('--entity_aware_mode', default='none', choices=['none', 'add', 'concat', 'gate'], type=str,
-                        help='entity-aware grounding mode: none (original), add (additive fusion), concat (concatenation), gate (gated fusion)')
+    parser.add_argument('--use_rule_structure', default=True, type=lambda x: x.lower() != 'false',
+                        help='use rule structure aware feature (default: True, uses relation embeddings to generate rule features)')
 
     # save path
     parser.add_argument('-init', '--init_checkpoint_config', default="../config/umls_config.json", type=str)
@@ -138,8 +138,7 @@ def main():
         graph.build_sparse_adjacency(device)
 
     RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path,
-                      rule_compose_mode=getattr(args, 'rule_compose_mode', 'add'),
-                      entity_aware_mode=getattr(args, 'entity_aware_mode', 'none'))
+                      rule_compose_mode=getattr(args, 'rule_compose_mode', 'add'))
     RulE_model.set_rules(rules)
 
     
@@ -183,9 +182,9 @@ def main():
     valid_mrr = pre_trainer.evaluate('valid', expectation=True)
     test_mrr = pre_trainer.evaluate('test', expectation=True)
 
-    # 在 Grounding 阶段初始化实体感知层（可以复用 Pre-training 的 checkpoint）
-    entity_aware_mode = getattr(args, 'entity_aware_mode', 'none')
-    RulE_model.init_entity_aware_layers(entity_aware_mode)
+    # 在 Grounding 阶段初始化规则结构感知模块（可以复用 Pre-training 的 checkpoint）
+    use_rule_structure = getattr(args, 'use_rule_structure', True)
+    RulE_model.init_rule_structure_feature(use_rule_structure)
 
     # RulE_model.add_param()
 

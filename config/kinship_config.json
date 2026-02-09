@@ -35,7 +35,7 @@
     "g_lr": 0.0005,
     "weight_decay": 0,
     "num_iters": 10,
-    "rule_compose_mode": "rotate",
-    "entity_aware_mode": "none",
-    "use_sparse_grounding": true
+    "rule_compose_mode": "none",
+    "use_sparse_grounding": false,
+    "use_rule_structure": true
 }

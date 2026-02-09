@@ -36,6 +36,6 @@
     "num_iters": 20,
     "topk": 40943,
     "rule_compose_mode": "add",
-    "entity_aware_mode": "none",
-    "use_sparse_grounding": true
+    "use_sparse_grounding": true,
+    "use_rule_structure": true
 }

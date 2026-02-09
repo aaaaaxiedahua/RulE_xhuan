@@ -7,38 +7,28 @@ from layers import MLP, FuncToNodeSum
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, rule_compose_mode='add', entity_aware_mode='none'):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, rule_compose_mode='add'):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
         self.rule_compose_mode = rule_compose_mode
-        self.entity_aware_mode = entity_aware_mode  # 'none', 'add', 'concat', 'gate'
         self.num_entities = graph.entity_size
         self.num_relations = graph.relation_size
         self.padding_index = graph.relation_size
 
         self.hidden_dim = hidden_dim
-        # self.entity_dim = hidden_dim * 2
-        # self.relation_dim = hidden_dim
-
-        # self.rule_dim = rule_dim
-        # self.rule_dim = self.relation_dim
-
         self.p = p_norm
 
         self.mlp_rule_dim = mlp_rule_dim
-        self.dataset = dataset  # 保存用于后续重建 score_model
+        self.dataset = dataset
 
         self.rule_to_entity = FuncToNodeSum(self.mlp_rule_dim)
 
-        # Pre-training 阶段：score_model 输入维度固定为 mlp_rule_dim
-        # entity_aware_mode 相关层在 Grounding 阶段动态创建
+        # score_model 输入维度固定为 mlp_rule_dim
         if "FB15k-237" in dataset or "wn18rr" in dataset or "YAGO3-10" in dataset:
             self.score_model = MLP(self.mlp_rule_dim, [128, 1])
-            self._score_model_type = 'large'
         else:
             self.score_model = MLP(self.mlp_rule_dim, [1])
-            self._score_model_type = 'small'
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
         
@@ -102,49 +92,68 @@ class RulE(torch.nn.Module):
         logging.info('=' * 50)
         logging.info('RulE Model Configuration:')
         logging.info('  rule_compose_mode: %s', self.rule_compose_mode)
-        logging.info('  entity_aware_mode: %s (will be initialized in Grounding phase)', self.entity_aware_mode)
         logging.info('=' * 50)
 
-    def init_entity_aware_layers(self, entity_aware_mode):
+    def init_rule_structure_feature(self, use_rule_structure=True):
         """
-        在 Grounding 阶段动态初始化实体感知相关的层。
-        这样可以复用 Pre-training 的 checkpoint。
+        在 Grounding 阶段初始化规则结构感知模块。
+        用规则体的关系 embedding 生成规则特征，替代独立学习的 mlp_feature。
 
         Args:
-            entity_aware_mode: 'none', 'add', 'concat', 'gate'
+            use_rule_structure: 是否使用规则结构感知
         """
-        self.entity_aware_mode = entity_aware_mode
+        self.use_rule_structure = use_rule_structure
         device = next(self.parameters()).device
 
         logging.info('=' * 50)
-        logging.info('Initializing Entity-Aware layers for Grounding:')
-        logging.info('  entity_aware_mode: %s', entity_aware_mode)
+        logging.info('Initializing Rule Structure Feature for Grounding:')
+        logging.info('  use_rule_structure: %s', use_rule_structure)
 
-        if entity_aware_mode != 'none':
-            # 创建投影层
-            self.h_proj = nn.Linear(self.hidden_dim * 2, self.mlp_rule_dim).to(device)
-            self.t_proj = nn.Linear(self.hidden_dim * 2, self.mlp_rule_dim).to(device)
-            logging.info('  -> h_proj: Linear(%d -> %d)', self.hidden_dim * 2, self.mlp_rule_dim)
-            logging.info('  -> t_proj: Linear(%d -> %d)', self.hidden_dim * 2, self.mlp_rule_dim)
+        if use_rule_structure:
+            # 规则结构投影层：将 relation_embedding (hidden_dim) 投影到 mlp_rule_dim
+            self.structure_proj = nn.Linear(self.hidden_dim, self.mlp_rule_dim).to(device)
+            logging.info('  -> structure_proj: Linear(%d -> %d)', self.hidden_dim, self.mlp_rule_dim)
 
-            if entity_aware_mode == 'gate':
-                # 门控融合需要额外的门控网络
-                self.gate_net = nn.Sequential(
-                    nn.Linear(self.mlp_rule_dim * 2, self.mlp_rule_dim),
-                    nn.Sigmoid()
-                ).to(device)
-                logging.info('  -> gate_net: Linear(%d -> %d) + Sigmoid', self.mlp_rule_dim * 2, self.mlp_rule_dim)
-
-            if entity_aware_mode == 'concat':
-                # concat 模式需要重建 score_model，输入维度变为 3 倍
-                score_input_dim = self.mlp_rule_dim * 3
-                if self._score_model_type == 'large':
-                    self.score_model = MLP(score_input_dim, [128, 1]).to(device)
-                else:
-                    self.score_model = MLP(score_input_dim, [1]).to(device)
-                logging.info('  -> score_model rebuilt with input_dim=%d', score_input_dim)
+            # 预计算规则结构特征
+            self._compute_rule_structure_feature(device)
+            logging.info('  -> rule_structure_feature computed: [%d, %d]',
+                        self.rule_structure_feature.shape[0], self.rule_structure_feature.shape[1])
 
         logging.info('=' * 50)
+
+    def _compute_rule_structure_feature(self, device):
+        """
+        根据规则体的关系 embedding 计算规则结构特征。
+        规则体: [r1, r2, ...] -> 取关系 embedding 的平均 -> 投影到 mlp_rule_dim
+        """
+        # rule_features: [num_rules, max_len+2]，包含 [rule_id, rule_head, body...]
+        rule_body = self.rule_features[:, 2:].to(device)  # [num_rules, max_body_len]
+
+        # 处理逆关系：rule_body 中的值可能 >= num_relations (表示逆关系)
+        relations_flag = torch.pow(-1, rule_body // self.num_relations).unsqueeze(-1).float()  # [num_rules, max_body_len, 1]
+        rule_body_rel = rule_body % self.num_relations
+        rule_body_rel = torch.where(rule_body == self.num_relations * 2, self.padding_index, rule_body_rel)
+
+        # 获取关系 embedding
+        body_emb = self.relation_embedding(rule_body_rel)  # [num_rules, max_body_len, hidden_dim]
+        body_emb = body_emb * relations_flag  # 应用逆关系标志
+
+        # mask 掉 padding
+        body_mask = (rule_body != self.num_relations * 2).unsqueeze(-1).float()  # [num_rules, max_body_len, 1]
+
+        # 聚合：对规则体的关系 embedding 求平均
+        body_emb_masked = body_emb * body_mask
+        body_emb_sum = body_emb_masked.sum(dim=1)  # [num_rules, hidden_dim]
+        body_len = body_mask.sum(dim=1).clamp(min=1)  # [num_rules, 1]
+        body_emb_avg = body_emb_sum / body_len  # [num_rules, hidden_dim]
+
+        # 投影到 mlp_rule_dim
+        with torch.no_grad():
+            self.structure_proj.eval()
+        rule_structure_feature = self.structure_proj(body_emb_avg)  # [num_rules, mlp_rule_dim]
+
+        # 存储为 buffer（不参与梯度计算，但会保存到 checkpoint）
+        self.register_buffer('rule_structure_feature', rule_structure_feature)
 
     # def add_param(self):
 
@@ -501,53 +510,18 @@ class RulE(torch.nn.Module):
         
         rule_emb = self.rules_weight_emb[rule_index]
 
-        # mlp_feature = self.mlp_feature[rule_index] * rule_emb.unsqueeze(-1)
-        mlp_feature = self.mlp_feature[rule_index]
+        # === 规则结构感知模块 ===
+        # 如果启用了规则结构感知，使用预计算的规则结构特征替代独立学习的 mlp_feature
+        if getattr(self, 'use_rule_structure', False) and hasattr(self, 'rule_structure_feature'):
+            # 使用规则结构特征
+            mlp_feature = self.rule_structure_feature[rule_index]
+        else:
+            # 使用原始的独立学习的 mlp_feature
+            mlp_feature = self.mlp_feature[rule_index]
 
-        # output = self.rule_to_entity(rule_count, mlp_feature)
         rule_output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
 
-        # === 实体感知模块 ===
-        if self.entity_aware_mode != 'none':
-            # 获取候选实体的 embedding 并投影
-            candidate_entities = candidate_set % self.num_entities
-            t_emb = self.entity_embedding(candidate_entities)  # [num_candidates, entity_dim]
-            t_proj = self.t_proj(t_emb)  # [num_candidates, mlp_rule_dim]
-
-            # 获取查询实体的 embedding 并投影
-            h_emb = self.entity_embedding(all_h)  # [batch, entity_dim]
-            h_proj = self.h_proj(h_emb)  # [batch, mlp_rule_dim]
-
-            # 广播：每个候选对应其所属 batch 的查询实体
-            batch_indices = candidate_set // self.num_entities
-            h_proj_expanded = h_proj[batch_indices]  # [num_candidates, mlp_rule_dim]
-
-            # 根据模式融合
-            if self.entity_aware_mode == 'add':
-                # 加法融合
-                feature = rule_output + h_proj_expanded + t_proj
-            elif self.entity_aware_mode == 'concat':
-                # 拼接融合
-                feature = torch.cat([rule_output, h_proj_expanded, t_proj], dim=-1)
-            elif self.entity_aware_mode == 'gate':
-                # 门控融合：学习如何平衡规则信息和实体信息
-                entity_feature = h_proj_expanded + t_proj
-                gate = self.gate_net(torch.cat([rule_output, entity_feature], dim=-1))
-                feature = gate * rule_output + (1 - gate) * entity_feature
-
-                # 日志：记录门控值统计（每1000次调用记录一次）
-                if not hasattr(self, '_gate_log_counter'):
-                    self._gate_log_counter = 0
-                self._gate_log_counter += 1
-                if self._gate_log_counter % 1000 == 1:
-                    logging.info('[EntityAware-Gate] gate mean=%.4f, std=%.4f, min=%.4f, max=%.4f',
-                                 gate.mean().item(), gate.std().item(), gate.min().item(), gate.max().item())
-            else:
-                feature = rule_output
-        else:
-            feature = rule_output
-
-        output = self.score_model(feature).squeeze(-1)
+        output = self.score_model(rule_output).squeeze(-1)
 
         score = torch.zeros(all_h.size(0) * self.graph.entity_size, device=device)
         score.scatter_(0, candidate_set, output)
