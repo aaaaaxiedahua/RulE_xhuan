@@ -113,47 +113,47 @@ class RulE(torch.nn.Module):
             # 规则结构投影层：将 relation_embedding (hidden_dim) 投影到 mlp_rule_dim
             self.structure_proj = nn.Linear(self.hidden_dim, self.mlp_rule_dim).to(device)
             logging.info('  -> structure_proj: Linear(%d -> %d)', self.hidden_dim, self.mlp_rule_dim)
-
-            # 预计算规则结构特征
-            self._compute_rule_structure_feature(device)
-            logging.info('  -> rule_structure_feature computed: [%d, %d]',
-                        self.rule_structure_feature.shape[0], self.rule_structure_feature.shape[1])
+            logging.info('  -> rule_structure_feature will be computed dynamically in forward')
 
         logging.info('=' * 50)
 
-    def _compute_rule_structure_feature(self, device):
+    def _compute_rule_structure_feature(self, rule_indices, device):
         """
-        根据规则体的关系 embedding 计算规则结构特征。
-        规则体: [r1, r2, ...] -> 取关系 embedding 的平均 -> 投影到 mlp_rule_dim
+        根据规则体的关系 embedding 动态计算规则结构特征。
+        每次 forward 时调用，确保计算图正确。
+
+        Args:
+            rule_indices: 需要计算的规则索引 tensor [num_selected_rules]
+            device: 计算设备
+
+        Returns:
+            rule_structure_feature: [num_selected_rules, mlp_rule_dim]
         """
         # rule_features: [num_rules, max_len+2]，包含 [rule_id, rule_head, body...]
-        rule_body = self.rule_features[:, 2:].to(device)  # [num_rules, max_body_len]
+        rule_body = self.rule_features[rule_indices, 2:].to(device)  # [num_selected, max_body_len]
 
         # 处理逆关系：rule_body 中的值可能 >= num_relations (表示逆关系)
-        relations_flag = torch.pow(-1, rule_body // self.num_relations).unsqueeze(-1).float()  # [num_rules, max_body_len, 1]
+        relations_flag = torch.pow(-1, rule_body // self.num_relations).unsqueeze(-1).float()  # [num_selected, max_body_len, 1]
         rule_body_rel = rule_body % self.num_relations
         rule_body_rel = torch.where(rule_body == self.num_relations * 2, self.padding_index, rule_body_rel)
 
         # 获取关系 embedding
-        body_emb = self.relation_embedding(rule_body_rel)  # [num_rules, max_body_len, hidden_dim]
+        body_emb = self.relation_embedding(rule_body_rel)  # [num_selected, max_body_len, hidden_dim]
         body_emb = body_emb * relations_flag  # 应用逆关系标志
 
         # mask 掉 padding
-        body_mask = (rule_body != self.num_relations * 2).unsqueeze(-1).float()  # [num_rules, max_body_len, 1]
+        body_mask = (rule_body != self.num_relations * 2).unsqueeze(-1).float()  # [num_selected, max_body_len, 1]
 
         # 聚合：对规则体的关系 embedding 求平均
         body_emb_masked = body_emb * body_mask
-        body_emb_sum = body_emb_masked.sum(dim=1)  # [num_rules, hidden_dim]
-        body_len = body_mask.sum(dim=1).clamp(min=1)  # [num_rules, 1]
-        body_emb_avg = body_emb_sum / body_len  # [num_rules, hidden_dim]
+        body_emb_sum = body_emb_masked.sum(dim=1)  # [num_selected, hidden_dim]
+        body_len = body_mask.sum(dim=1).clamp(min=1)  # [num_selected, 1]
+        body_emb_avg = body_emb_sum / body_len  # [num_selected, hidden_dim]
 
         # 投影到 mlp_rule_dim
-        with torch.no_grad():
-            self.structure_proj.eval()
-        rule_structure_feature = self.structure_proj(body_emb_avg)  # [num_rules, mlp_rule_dim]
+        rule_structure_feature = self.structure_proj(body_emb_avg)  # [num_selected, mlp_rule_dim]
 
-        # 存储为 buffer（不参与梯度计算，但会保存到 checkpoint）
-        self.register_buffer('rule_structure_feature', rule_structure_feature)
+        return rule_structure_feature
 
     # def add_param(self):
 
@@ -511,10 +511,10 @@ class RulE(torch.nn.Module):
         rule_emb = self.rules_weight_emb[rule_index]
 
         # === 规则结构感知模块 ===
-        # 如果启用了规则结构感知，使用预计算的规则结构特征替代独立学习的 mlp_feature
-        if getattr(self, 'use_rule_structure', False) and hasattr(self, 'rule_structure_feature'):
-            # 使用规则结构特征
-            mlp_feature = self.rule_structure_feature[rule_index]
+        # 如果启用了规则结构感知，动态计算规则结构特征替代独立学习的 mlp_feature
+        if getattr(self, 'use_rule_structure', False) and hasattr(self, 'structure_proj'):
+            # 动态计算规则结构特征（每次 forward 都重新计算，确保计算图正确）
+            mlp_feature = self._compute_rule_structure_feature(rule_index, device)
         else:
             # 使用原始的独立学习的 mlp_feature
             mlp_feature = self.mlp_feature[rule_index]
