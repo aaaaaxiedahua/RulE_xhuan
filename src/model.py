@@ -27,32 +27,18 @@ class RulE(torch.nn.Module):
         self.p = p_norm
 
         self.mlp_rule_dim = mlp_rule_dim
-
+        self.dataset = dataset  # 保存用于后续重建 score_model
 
         self.rule_to_entity = FuncToNodeSum(self.mlp_rule_dim)
 
-        # 根据实体感知模式确定 score_model 输入维度
-        if self.entity_aware_mode == 'concat':
-            score_input_dim = self.mlp_rule_dim * 3  # rule_output + h_proj + t_proj
-        else:
-            score_input_dim = self.mlp_rule_dim
-
+        # Pre-training 阶段：score_model 输入维度固定为 mlp_rule_dim
+        # entity_aware_mode 相关层在 Grounding 阶段动态创建
         if "FB15k-237" in dataset or "wn18rr" in dataset or "YAGO3-10" in dataset:
-            self.score_model = MLP(score_input_dim, [128, 1])
+            self.score_model = MLP(self.mlp_rule_dim, [128, 1])
+            self._score_model_type = 'large'
         else:
-            self.score_model = MLP(score_input_dim, [1])
-
-        # 实体感知模块：投影层
-        if self.entity_aware_mode != 'none':
-            self.h_proj = nn.Linear(hidden_dim * 2, mlp_rule_dim)  # 查询实体投影
-            self.t_proj = nn.Linear(hidden_dim * 2, mlp_rule_dim)  # 候选实体投影
-
-            if self.entity_aware_mode == 'gate':
-                # 门控融合需要额外的门控网络
-                self.gate_net = nn.Sequential(
-                    nn.Linear(mlp_rule_dim * 2, mlp_rule_dim),
-                    nn.Sigmoid()
-                ) 
+            self.score_model = MLP(self.mlp_rule_dim, [1])
+            self._score_model_type = 'small'
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
         
@@ -116,12 +102,48 @@ class RulE(torch.nn.Module):
         logging.info('=' * 50)
         logging.info('RulE Model Configuration:')
         logging.info('  rule_compose_mode: %s', self.rule_compose_mode)
-        logging.info('  entity_aware_mode: %s', self.entity_aware_mode)
-        if self.entity_aware_mode != 'none':
-            logging.info('  -> h_proj: Linear(%d -> %d)', hidden_dim * 2, mlp_rule_dim)
-            logging.info('  -> t_proj: Linear(%d -> %d)', hidden_dim * 2, mlp_rule_dim)
-            if self.entity_aware_mode == 'gate':
-                logging.info('  -> gate_net: Linear(%d -> %d) + Sigmoid', mlp_rule_dim * 2, mlp_rule_dim)
+        logging.info('  entity_aware_mode: %s (will be initialized in Grounding phase)', self.entity_aware_mode)
+        logging.info('=' * 50)
+
+    def init_entity_aware_layers(self, entity_aware_mode):
+        """
+        在 Grounding 阶段动态初始化实体感知相关的层。
+        这样可以复用 Pre-training 的 checkpoint。
+
+        Args:
+            entity_aware_mode: 'none', 'add', 'concat', 'gate'
+        """
+        self.entity_aware_mode = entity_aware_mode
+        device = next(self.parameters()).device
+
+        logging.info('=' * 50)
+        logging.info('Initializing Entity-Aware layers for Grounding:')
+        logging.info('  entity_aware_mode: %s', entity_aware_mode)
+
+        if entity_aware_mode != 'none':
+            # 创建投影层
+            self.h_proj = nn.Linear(self.hidden_dim * 2, self.mlp_rule_dim).to(device)
+            self.t_proj = nn.Linear(self.hidden_dim * 2, self.mlp_rule_dim).to(device)
+            logging.info('  -> h_proj: Linear(%d -> %d)', self.hidden_dim * 2, self.mlp_rule_dim)
+            logging.info('  -> t_proj: Linear(%d -> %d)', self.hidden_dim * 2, self.mlp_rule_dim)
+
+            if entity_aware_mode == 'gate':
+                # 门控融合需要额外的门控网络
+                self.gate_net = nn.Sequential(
+                    nn.Linear(self.mlp_rule_dim * 2, self.mlp_rule_dim),
+                    nn.Sigmoid()
+                ).to(device)
+                logging.info('  -> gate_net: Linear(%d -> %d) + Sigmoid', self.mlp_rule_dim * 2, self.mlp_rule_dim)
+
+            if entity_aware_mode == 'concat':
+                # concat 模式需要重建 score_model，输入维度变为 3 倍
+                score_input_dim = self.mlp_rule_dim * 3
+                if self._score_model_type == 'large':
+                    self.score_model = MLP(score_input_dim, [128, 1]).to(device)
+                else:
+                    self.score_model = MLP(score_input_dim, [1]).to(device)
+                logging.info('  -> score_model rebuilt with input_dim=%d', score_input_dim)
+
         logging.info('=' * 50)
 
     # def add_param(self):

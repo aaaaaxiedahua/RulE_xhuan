@@ -175,13 +175,17 @@ def main():
     # load rule embedding and KGE embedding
 
     checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
-    RulE_model.load_state_dict(checkpoint['model'])
-    
-    
+    RulE_model.load_state_dict(checkpoint['model'],strict=False)
+
+
     logging.info('Test the results of pre-training')
-    
+
     valid_mrr = pre_trainer.evaluate('valid', expectation=True)
     test_mrr = pre_trainer.evaluate('test', expectation=True)
+
+    # 在 Grounding 阶段初始化实体感知层（可以复用 Pre-training 的 checkpoint）
+    entity_aware_mode = getattr(args, 'entity_aware_mode', 'none')
+    RulE_model.init_entity_aware_layers(entity_aware_mode)
 
     # RulE_model.add_param()
 
