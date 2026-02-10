@@ -82,7 +82,6 @@ class PreTrainer(object):
         self.rules_iterator = Iterator(rules_dataloader)
 
         logging.info('>>>>> ruleE: Pre-training')
-        logging.info('  rule_compose_mode: %s', getattr(self.model, 'rule_compose_mode', 'add'))
         training_logs = []
         best_mrr = 0.0
 
@@ -93,7 +92,7 @@ class PreTrainer(object):
 
         for step in range(0, args.max_steps + 1):
 
-            log = self.train_step( optimizer, self.triplets_iterator, self.rules_iterator, args)
+            log = self.train_step( optimizer, self.triplets_iterator, self.rules_iterator, args, step=step)
             
             training_logs.append(log)
 
@@ -124,7 +123,7 @@ class PreTrainer(object):
                 # save_model(self.model,optimizer, args)
 
 
-    def train_step(self, optimizer, triplets_iterator, rules_iterator, args):
+    def train_step(self, optimizer, triplets_iterator, rules_iterator, args, step=0):
         '''
         A single train step. Apply back-propation and return the loss
         '''
@@ -182,8 +181,28 @@ class PreTrainer(object):
             negative_fact_loss = - (subsampling_weight * negative_fact_score).sum()/subsampling_weight.sum() 
 
         
-        positive_rule_loss = - positive_rule_score_weight.mean() * args.weight_rule
-        negative_rule_loss = - negative_rule_score_weight.mean() * args.weight_rule
+        if getattr(args, 'use_noise_aware', False):
+            with torch.no_grad():
+                quality = model.compute_rule_quality(
+                    positive_rule, rule_mask, tau=getattr(args, 'noise_tau', 1.0)
+                )
+            # quality: [batch]
+
+            if getattr(args, 'use_curriculum', False):
+                noise_warmup = getattr(args, 'noise_warmup', None)
+                if noise_warmup is None:
+                    noise_warmup = args.warm_up_steps if args.warm_up_steps else args.max_steps // 2
+                lambda_t = min(1.0, step / max(noise_warmup, 1))
+                effective_quality = (1 - lambda_t) + lambda_t * quality
+            else:
+                effective_quality = quality
+
+            # positive_rule_score_weight: [batch, 1], negative_rule_score_weight: [batch]
+            positive_rule_loss = -(effective_quality.unsqueeze(-1) * positive_rule_score_weight).mean() * args.weight_rule
+            negative_rule_loss = -(effective_quality * negative_rule_score_weight).mean() * args.weight_rule
+        else:
+            positive_rule_loss = - positive_rule_score_weight.mean() * args.weight_rule
+            negative_rule_loss = - negative_rule_score_weight.mean() * args.weight_rule
 
 
         loss_fact = (positive_fact_loss + negative_fact_loss)/2
@@ -409,10 +428,6 @@ class GroundTrainer(object):
 
         
         logging.info('>>>>> RulE: Grounding-Training')
-        logging.info('  entity_aware_mode: %s', getattr(self.model, 'entity_aware_mode', 'none'))
-        if getattr(self.model, 'entity_aware_mode', 'none') != 'none':
-            logging.info('  -> Entity embedding will be fused into grounding scoring')
-            logging.info('  -> h_proj and t_proj are trainable, entity_embedding is frozen')
 
         best_valid_mrr = 0.0
         test_mrr = 0.0

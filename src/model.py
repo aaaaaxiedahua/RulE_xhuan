@@ -2,16 +2,15 @@
 import torch
 import torch.nn as nn
 import logging, math
-from layers import MLP, FuncToNodeSum
+from layers import MLP, FuncToNodeSum, GatedRelationComposition, InterRuleAttention
 
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, rule_compose_mode='add'):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
-        self.rule_compose_mode = rule_compose_mode
         self.num_entities = graph.entity_size
         self.num_relations = graph.relation_size
         self.padding_index = graph.relation_size
@@ -87,73 +86,6 @@ class RulE(torch.nn.Module):
         # self.linear = torch.nn.Linear(self.rnn_hidden_dim, self.relation_dim)
         
         self.pi = 3.14159262358979323846
-
-        # 日志：记录创新模块配置
-        logging.info('=' * 50)
-        logging.info('RulE Model Configuration:')
-        logging.info('  rule_compose_mode: %s', self.rule_compose_mode)
-        logging.info('=' * 50)
-
-    def init_rule_structure_feature(self, use_rule_structure=True):
-        """
-        在 Grounding 阶段初始化规则结构感知模块。
-        用规则体的关系 embedding 生成规则特征，替代独立学习的 mlp_feature。
-
-        Args:
-            use_rule_structure: 是否使用规则结构感知
-        """
-        self.use_rule_structure = use_rule_structure
-        device = next(self.parameters()).device
-
-        logging.info('=' * 50)
-        logging.info('Initializing Rule Structure Feature for Grounding:')
-        logging.info('  use_rule_structure: %s', use_rule_structure)
-
-        if use_rule_structure:
-            # 规则结构投影层：将 relation_embedding (hidden_dim) 投影到 mlp_rule_dim
-            self.structure_proj = nn.Linear(self.hidden_dim, self.mlp_rule_dim).to(device)
-            logging.info('  -> structure_proj: Linear(%d -> %d)', self.hidden_dim, self.mlp_rule_dim)
-            logging.info('  -> rule_structure_feature will be computed dynamically in forward')
-
-        logging.info('=' * 50)
-
-    def _compute_rule_structure_feature(self, rule_indices, device):
-        """
-        根据规则体的关系 embedding 动态计算规则结构特征。
-        每次 forward 时调用，确保计算图正确。
-
-        Args:
-            rule_indices: 需要计算的规则索引 tensor [num_selected_rules]
-            device: 计算设备
-
-        Returns:
-            rule_structure_feature: [num_selected_rules, mlp_rule_dim]
-        """
-        # rule_features: [num_rules, max_len+2]，包含 [rule_id, rule_head, body...]
-        rule_body = self.rule_features[rule_indices, 2:].to(device)  # [num_selected, max_body_len]
-
-        # 处理逆关系：rule_body 中的值可能 >= num_relations (表示逆关系)
-        relations_flag = torch.pow(-1, rule_body // self.num_relations).unsqueeze(-1).float()  # [num_selected, max_body_len, 1]
-        rule_body_rel = rule_body % self.num_relations
-        rule_body_rel = torch.where(rule_body == self.num_relations * 2, self.padding_index, rule_body_rel)
-
-        # 获取关系 embedding
-        body_emb = self.relation_embedding(rule_body_rel)  # [num_selected, max_body_len, hidden_dim]
-        body_emb = body_emb * relations_flag  # 应用逆关系标志
-
-        # mask 掉 padding
-        body_mask = (rule_body != self.num_relations * 2).unsqueeze(-1).float()  # [num_selected, max_body_len, 1]
-
-        # 聚合：对规则体的关系 embedding 求平均
-        body_emb_masked = body_emb * body_mask
-        body_emb_sum = body_emb_masked.sum(dim=1)  # [num_selected, hidden_dim]
-        body_len = body_mask.sum(dim=1).clamp(min=1)  # [num_selected, 1]
-        body_emb_avg = body_emb_sum / body_len  # [num_selected, hidden_dim]
-
-        # 投影到 mlp_rule_dim
-        rule_structure_feature = self.structure_proj(body_emb_avg)  # [num_selected, mlp_rule_dim]
-
-        return rule_structure_feature
 
     # def add_param(self):
 
@@ -330,42 +262,6 @@ class RulE(torch.nn.Module):
     
 
 
-    def _rotate_compose_body(self, embedding, cal_mask, rule_embedding, embedding_r):
-        """
-        RotatE-style complex rotation composition for rule bodies.
-
-        Args:
-            embedding: relation embeddings with flag applied, [batch, neg, body_len, hidden_dim]
-            cal_mask: body mask, [batch, 1/neg, body_len, 1]
-            rule_embedding: rule embeddings, [batch, neg, hidden_dim]
-            embedding_r: rule head relation embedding, [batch, neg, hidden_dim]
-
-        Returns:
-            (re_combined, im_combined, re_head, im_head) each [batch, neg, hidden_dim]
-        """
-        phase_factor = self.embedding_range_fact.item() / self.pi
-
-        # Convert body relation embeddings to phases, mask padding positions
-        phase_body = (embedding / phase_factor) * cal_mask  # [batch, neg, body_len, hidden_dim]
-
-        # Sum phases across body (equivalent to complex number multiplication)
-        phase_sum = phase_body.sum(-2)  # [batch, neg, hidden_dim]
-
-        # Add rule embedding as phase correction
-        phase_rule = rule_embedding / phase_factor
-        phase_combined = phase_sum + phase_rule  # [batch, neg, hidden_dim]
-
-        # Convert to complex representation
-        re_combined = torch.cos(phase_combined)
-        im_combined = torch.sin(phase_combined)
-
-        # Convert rule head to complex representation
-        phase_head = embedding_r / phase_factor
-        re_head = torch.cos(phase_head)
-        im_head = torch.sin(phase_head)
-
-        return re_combined, im_combined, re_head, im_head
-
     def add_ruleE(self, rules, mask):
         inputs = rules[:,:,2:]
         # cal_mask = (~mask).unsqueeze(1).unsqueeze(-1)
@@ -388,48 +284,45 @@ class RulE(torch.nn.Module):
 
         rule_body = embedding * cal_mask
 
-        if self.rule_compose_mode == 'rotate':
-            re_combined, im_combined, re_head, im_head = self._rotate_compose_body(
-                embedding, cal_mask, rule_embedding, embedding_r
-            )
-            re_diff = re_combined - re_head
-            im_diff = im_combined - im_head
-            # Per-dimension distance, then norm across hidden_dim
-            # 原始距离（归一化前）
-            dist_raw = torch.sqrt(re_diff ** 2 + im_diff ** 2 + 1e-12)
-            # 归一化：乘以 embedding_range_fact 使尺度与 add 模式一致
-            dist_per_dim = dist_raw * self.embedding_range_fact.item()
-            dist_norm = torch.norm(dist_per_dim, p=self.p, dim=-1)
-            dist = self.gamma_rule.item() - dist_norm
-
-            # 日志：记录 rotate 模块统计信息
-            if not hasattr(self, '_rotate_log_counter'):
-                self._rotate_log_counter = 0
-            self._rotate_log_counter += 1
-            if self._rotate_log_counter % 1000 == 1:
-                logging.info('[Rotate] dist_raw: mean=%.4f, max=%.4f | dist_scaled: mean=%.4f, max=%.4f | score: mean=%.4f, min=%.4f, max=%.4f',
-                             dist_raw.mean().item(), dist_raw.max().item(),
-                             dist_norm.mean().item(), dist_norm.max().item(),
-                             dist.mean().item(), dist.min().item(), dist.max().item())
-        else:
-            outputs = rule_body.sum(-2) + rule_embedding
-            diff = outputs - embedding_r
-            dist_norm = torch.norm(diff, p=self.p, dim=-1)
-            dist = self.gamma_rule.item() - dist_norm
-
-            # 日志：记录 add 模块统计信息
-            if not hasattr(self, '_add_log_counter'):
-                self._add_log_counter = 0
-            self._add_log_counter += 1
-            if self._add_log_counter % 1000 == 1:
-                logging.info('[Add] diff: mean=%.4f, max=%.4f | dist_norm: mean=%.4f, max=%.4f | score: mean=%.4f, min=%.4f, max=%.4f',
-                             diff.abs().mean().item(), diff.abs().max().item(),
-                             dist_norm.mean().item(), dist_norm.max().item(),
-                             dist.mean().item(), dist.min().item(), dist.max().item())
+        outputs = rule_body.sum(-2) + rule_embedding
+        diff = outputs - embedding_r
+        dist_norm = torch.norm(diff, p=self.p, dim=-1)
+        dist = self.gamma_rule.item() - dist_norm
 
         return dist, rule_embedding
-    
 
+    def compute_rule_quality(self, rules, mask, tau=1.0):
+        """
+        方案一：计算规则质量分数。
+        衡量规则体组合与规则头在嵌入空间中的匹配程度，偏差越小质量越高。
+
+        Args:
+            rules: [batch, rule_len] 正样本规则，格式 [rule_id, rule_head, body...]
+            mask: [batch, max_body_len] bool mask
+            tau: 温度参数
+        Returns:
+            quality: [batch] 质量分数，范围 (0, 1)
+        """
+        inputs = rules[:, 2:]
+        cal_mask = mask.unsqueeze(-1).float()
+        relations_flag = torch.pow(-1, inputs // self.num_relations).unsqueeze(-1)
+        inputs_com = inputs % self.num_relations
+        inputs_com = torch.where(inputs == self.num_relations * 2, self.padding_index, inputs_com)
+
+        embedding = self.relation_embedding(inputs_com) * relations_flag
+        rule_embedding = self.rule_emb(rules[:, 0])
+
+        embedding_r = self.relation_embedding(rules[:, 1] % self.num_relations)
+        relations_flag_head = torch.pow(-1, rules[:, 1] // self.num_relations).unsqueeze(-1)
+        embedding_r = embedding_r * relations_flag_head
+
+        rule_body = embedding * cal_mask
+        outputs = rule_body.sum(1) + rule_embedding
+        diff = outputs - embedding_r
+        deviation = torch.norm(diff, p=self.p, dim=-1)
+
+        quality = torch.sigmoid(-deviation / tau)
+        return quality
 
     def add_ruleE_g(self, rules, mask):
         inputs = rules[:,:,2:]
@@ -453,23 +346,77 @@ class RulE(torch.nn.Module):
 
         rule_body = embedding * cal_mask
 
-        if self.rule_compose_mode == 'rotate':
-            re_combined, im_combined, re_head, im_head = self._rotate_compose_body(
-                embedding, cal_mask, rule_embedding, embedding_r
-            )
-            re_diff = re_combined - re_head
-            im_diff = im_combined - im_head
-            # Per-dimension distance, consistent with add_ruleE_g output shape [batch, 1, hidden_dim]
-            # 归一化：乘以 embedding_range_fact 使尺度与 add 模式一致
-            dist = self.gamma_rule.item() / self.hidden_dim - torch.pow(
-                torch.sqrt(re_diff ** 2 + im_diff ** 2 + 1e-12) * self.embedding_range_fact.item(), self.p
-            )
-        else:
-            outputs = rule_body.sum(-2) + rule_embedding
-            dist = self.gamma_rule.item()/self.hidden_dim - torch.pow((outputs - embedding_r), self.p)
+        outputs = rule_body.sum(-2) + rule_embedding
+        dist = self.gamma_rule.item()/self.hidden_dim - torch.pow((outputs - embedding_r), self.p)
 
         return dist
     
+
+    def init_rule_transformer(self, use_rule_transformer, gate_dim=128, attn_heads=4, use_structure_bias=True):
+        """
+        方案三：在 Grounding 阶段初始化门控关系组合 + 规则间注意力模块。
+        调用时机：加载 pre-training checkpoint 后、创建 GroundTrainer 前。
+        """
+        self.use_rule_transformer = use_rule_transformer
+        device = next(self.parameters()).device
+
+        logging.info('=' * 50)
+        logging.info('Rule Transformer Configuration:')
+        logging.info('  use_rule_transformer: %s', use_rule_transformer)
+
+        if use_rule_transformer:
+            self.gated_composition = GatedRelationComposition(
+                self.hidden_dim, gate_dim, self.mlp_rule_dim
+            ).to(device)
+            self.inter_rule_attention = InterRuleAttention(
+                self.mlp_rule_dim, attn_heads, use_structure_bias
+            ).to(device)
+            logging.info('  gate_dim: %d', gate_dim)
+            logging.info('  attn_heads: %d', attn_heads)
+            logging.info('  use_structure_bias: %s', use_structure_bias)
+
+        logging.info('=' * 50)
+
+    def _compute_transformer_features(self, rule_index, query_r, device):
+        """
+        方案三：用门控关系组合 + 规则间注意力生成 mlp_feature。
+
+        Args:
+            rule_index: [N_rules] tensor，匹配到的规则索引
+            query_r: int，查询关系索引
+            device: torch device
+        Returns:
+            mlp_feature: [N_rules, mlp_rule_dim]
+        """
+        # 取规则体关系索引和 mask
+        rule_bodies = self.rule_features[rule_index, 2:]         # [N, max_body_len]
+        body_mask = self.rule_masks[rule_index]                  # [N, max_body_len] bool
+
+        # 处理逆关系
+        relations_flag = torch.pow(-1, rule_bodies // self.num_relations).unsqueeze(-1)
+        body_rel = rule_bodies % self.num_relations
+        body_emb = self.relation_embedding(body_rel) * relations_flag   # [N, max_len, hidden_dim]
+
+        # 查询关系 embedding（含逆关系 flag）
+        query_rel_idx = query_r % self.num_relations
+        query_flag = pow(-1, query_r // self.num_relations)
+        query_emb = self.relation_embedding(
+            torch.tensor([query_rel_idx], device=device)
+        ).squeeze(0) * query_flag                                # [hidden_dim]
+
+        # 门控关系组合
+        gated_features = self.gated_composition(body_emb, body_mask, query_emb)  # [N, mlp_rule_dim]
+
+        # 计算结构偏置（可选）
+        structure_bias = None
+        if self.inter_rule_attention.use_structure_bias and gated_features.size(0) > 1:
+            diff = gated_features.unsqueeze(0) - gated_features.unsqueeze(1)  # [N, N, dim]
+            structure_bias = -torch.norm(diff, dim=-1)           # [N, N]
+
+        # 规则间注意力
+        mlp_feature = self.inter_rule_attention(gated_features, structure_bias)  # [N, mlp_rule_dim]
+
+        return mlp_feature
 
     def forward(self, all_h, all_r, edges_to_remove):
         query_r = all_r[0].item()
@@ -510,13 +457,9 @@ class RulE(torch.nn.Module):
         
         rule_emb = self.rules_weight_emb[rule_index]
 
-        # === 规则结构感知模块 ===
-        # 如果启用了规则结构感知，动态计算规则结构特征替代独立学习的 mlp_feature
-        if getattr(self, 'use_rule_structure', False) and hasattr(self, 'structure_proj'):
-            # 动态计算规则结构特征（每次 forward 都重新计算，确保计算图正确）
-            mlp_feature = self._compute_rule_structure_feature(rule_index, device)
+        if getattr(self, 'use_rule_transformer', False):
+            mlp_feature = self._compute_transformer_features(rule_index, query_r, device)
         else:
-            # 使用原始的独立学习的 mlp_feature
             mlp_feature = self.mlp_feature[rule_index]
 
         rule_output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)

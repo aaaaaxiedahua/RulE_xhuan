@@ -67,12 +67,28 @@ def parse_args(args=None):
     parser.add_argument('-reg', '--regularization', default=0, type=float)
     parser.add_argument('--max_steps', default=15000, type=int)
     parser.add_argument('--p_norm', default=2, type=int)
-    parser.add_argument('--rule_compose_mode', default='add', choices=['add', 'rotate'], type=str,
-                        help='rule body composition mode: add (sum) or rotate (complex rotation)')
     parser.add_argument('--use_sparse_grounding', default=True, type=lambda x: x.lower() != 'false',
                         help='use sparse matrix for grounding (default: True, saves memory on large datasets)')
-    parser.add_argument('--use_rule_structure', default=True, type=lambda x: x.lower() != 'false',
-                        help='use rule structure aware feature (default: True, uses relation embeddings to generate rule features)')
+
+    # 方案一：噪声感知规则加权
+    parser.add_argument('--use_noise_aware', default=False, type=lambda x: x.lower() != 'false',
+                        help='enable noise-aware rule quality weighting in pre-training')
+    parser.add_argument('--noise_tau', default=1.0, type=float,
+                        help='temperature for rule quality scoring')
+    parser.add_argument('--use_curriculum', default=False, type=lambda x: x.lower() != 'false',
+                        help='enable curriculum learning schedule for noise-aware')
+    parser.add_argument('--noise_warmup', default=None, type=int,
+                        help='curriculum warmup steps (default: same as warm_up_steps)')
+
+    # 方案三：结构感知规则 Transformer
+    parser.add_argument('--use_rule_transformer', default=False, type=lambda x: x.lower() != 'false',
+                        help='enable gated relation composition + inter-rule attention in grounding')
+    parser.add_argument('--gate_dim', default=128, type=int,
+                        help='working dimension for gated relation composition')
+    parser.add_argument('--attn_heads', default=4, type=int,
+                        help='number of attention heads for inter-rule attention')
+    parser.add_argument('--use_structure_bias', default=True, type=lambda x: x.lower() != 'false',
+                        help='use structure similarity bias in inter-rule attention')
 
     # save path
     parser.add_argument('-init', '--init_checkpoint_config', default="../config/umls_config.json", type=str)
@@ -137,8 +153,7 @@ def main():
     if use_sparse:
         graph.build_sparse_adjacency(device)
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path,
-                      rule_compose_mode=getattr(args, 'rule_compose_mode', 'add'))
+    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
     RulE_model.set_rules(rules)
 
     
@@ -182,9 +197,14 @@ def main():
     valid_mrr = pre_trainer.evaluate('valid', expectation=True)
     test_mrr = pre_trainer.evaluate('test', expectation=True)
 
-    # 在 Grounding 阶段初始化规则结构感知模块（可以复用 Pre-training 的 checkpoint）
-    use_rule_structure = getattr(args, 'use_rule_structure', True)
-    RulE_model.init_rule_structure_feature(use_rule_structure)
+    # 方案三：初始化规则 Transformer 模块
+    if getattr(args, 'use_rule_transformer', False):
+        RulE_model.init_rule_transformer(
+            use_rule_transformer=True,
+            gate_dim=getattr(args, 'gate_dim', 128),
+            attn_heads=getattr(args, 'attn_heads', 4),
+            use_structure_bias=getattr(args, 'use_structure_bias', True)
+        )
 
     # RulE_model.add_param()
 

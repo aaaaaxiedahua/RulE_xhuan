@@ -35,7 +35,13 @@
     "g_lr": 0.0005,
     "weight_decay": 0,
     "num_iters": 10,
-    "rule_compose_mode": "none",
     "use_sparse_grounding": false,
-    "use_rule_structure": true
+    "use_noise_aware": false,
+    "noise_tau": 1.0,
+    "use_curriculum": false,
+    "noise_warmup": null,
+    "use_rule_transformer": true,
+    "gate_dim": 128,
+    "attn_heads": 4,
+    "use_structure_bias": true
 }
