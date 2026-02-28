@@ -149,7 +149,7 @@ def main():
         device = torch.device('cpu')
 
     # 构建稀疏邻接矩阵并预加载到 GPU（优化 grounding 显存和速度）
-    use_sparse = getattr(args, 'use_sparse_grounding', True)  # 默认启用
+    use_sparse = getattr(args, 'use_sparse_grounding', False)  # 默认禁用，需在配置中显式开启
     if use_sparse:
         graph.build_sparse_adjacency(device)
 

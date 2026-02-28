@@ -407,6 +407,13 @@ class KnowledgeGraph(object):
         value = value[mask]
         return [index, value]
 
+    def __getstate__(self):
+        """pickle 时排除稀疏张量，解决 Windows 多进程 DataLoader 序列化问题"""
+        state = self.__dict__.copy()
+        state.pop('relation2sparse', None)
+        state.pop('use_sparse', None)
+        return state
+
     def build_sparse_adjacency(self, device=None):
         """
         预构建每个关系的稀疏邻接矩阵，可选一次性搬到 GPU。
