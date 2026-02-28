@@ -82,6 +82,12 @@ class PreTrainer(object):
         self.rules_iterator = Iterator(rules_dataloader)
 
         logging.info('>>>>> ruleE: Pre-training')
+        if getattr(args, 'use_noise_aware', False):
+            logging.info('  [Noise-Aware] enabled | tau=%.2f, curriculum=%s',
+                         getattr(args, 'noise_tau', 1.0),
+                         getattr(args, 'use_curriculum', False))
+        else:
+            logging.info('  [Noise-Aware] disabled')
         training_logs = []
         best_mrr = 0.0
 
@@ -196,13 +202,24 @@ class PreTrainer(object):
                 effective_quality = (1 - lambda_t) + lambda_t * quality
             else:
                 effective_quality = quality
+                lambda_t = None
 
             # positive_rule_score_weight: [batch, 1], negative_rule_score_weight: [batch]
             positive_rule_loss = -(effective_quality.unsqueeze(-1) * positive_rule_score_weight).mean() * args.weight_rule
             negative_rule_loss = -(effective_quality * negative_rule_score_weight).mean() * args.weight_rule
+
+            noise_log = {
+                'quality_mean': quality.mean().item(),
+                'quality_std': quality.std().item(),
+                'quality_min': quality.min().item(),
+                'quality_max': quality.max().item(),
+            }
+            if lambda_t is not None:
+                noise_log['lambda_t'] = lambda_t
         else:
             positive_rule_loss = - positive_rule_score_weight.mean() * args.weight_rule
             negative_rule_loss = - negative_rule_score_weight.mean() * args.weight_rule
+            noise_log = {}
 
 
         loss_fact = (positive_fact_loss + negative_fact_loss)/2
@@ -232,7 +249,6 @@ class PreTrainer(object):
         optimizer.step()
 
         log = {
-            
             'positive_fact_loss': positive_fact_loss.item(),
             'negative_fact_loss': negative_fact_loss.item(),
             'positive_rule_loss': positive_rule_loss.item(),
@@ -240,6 +256,7 @@ class PreTrainer(object):
             'regularization': regularization.item(),
             'loss': loss.item()
         }
+        log.update(noise_log)
 
         return log
 
