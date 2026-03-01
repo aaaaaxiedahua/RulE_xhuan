@@ -83,6 +83,8 @@ def parse_args(args=None):
     # 方案二：轨迹一致性 Grounding
     parser.add_argument('--use_trajectory', default=False, type=lambda x: x.lower() != 'false',
                         help='enable trajectory consistency weighting in grounding')
+    parser.add_argument('--trajectory_dim', default=64, type=int,
+                        help='bottleneck dimension for trajectory projection')
 
     # save path
     parser.add_argument('-init', '--init_checkpoint_config', default="../config/umls_config.json", type=str)
@@ -148,7 +150,8 @@ def main():
         graph.build_sparse_adjacency(device)
 
     RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path,
-                       use_trajectory=getattr(args, 'use_trajectory', False))
+                       use_trajectory=getattr(args, 'use_trajectory', False),
+                       trajectory_dim=getattr(args, 'trajectory_dim', 64))
     RulE_model.set_rules(rules)
 
     

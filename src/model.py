@@ -8,7 +8,7 @@ from layers import MLP, FuncToNodeSum
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, use_trajectory=False):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, use_trajectory=False, trajectory_dim=64):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -89,12 +89,15 @@ class RulE(torch.nn.Module):
         
         self.pi = 3.14159262358979323846
 
-        # 方案二：轨迹一致性 MLP
+        # 方案二：轨迹一致性（投影到低维空间计算余弦相似度）
         if self.use_trajectory:
-            self.trajectory_mlp = nn.Sequential(
-                nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            self.trajectory_dim = trajectory_dim
+            self.traj_proj_path = nn.Linear(self.hidden_dim, self.trajectory_dim)
+            self.traj_proj_ideal = nn.Sequential(
+                nn.Linear(self.hidden_dim * 2, self.trajectory_dim),
                 nn.ReLU(),
-                nn.Linear(self.hidden_dim, self.hidden_dim)
+                nn.Dropout(0.3),
+                nn.Linear(self.trajectory_dim, self.trajectory_dim)
             )
 
     # def add_param(self):
@@ -381,15 +384,18 @@ class RulE(torch.nn.Module):
         cal_mask = mask.unsqueeze(-1).float()
         d_path = (body_emb * cal_mask).sum(1)      # [K, hidden_dim]
 
-        # d_ideal: MLP(rule_emb || head_relation_emb)
+        # 投影 d_path 到低维空间
+        d_path_proj = self.traj_proj_path(d_path)       # [K, trajectory_dim]
+
+        # d_ideal: 投影 (rule_emb || head_relation_emb) 到低维空间
         rule_emb = self.rule_emb(rules[:, 0])
         head_r = rules[:, 1]
         head_flag = torch.pow(-1, head_r // self.num_relations).unsqueeze(-1)
         head_emb = self.relation_embedding(head_r % self.num_relations) * head_flag
-        d_ideal = self.trajectory_mlp(torch.cat([rule_emb, head_emb], dim=-1))
+        d_ideal_proj = self.traj_proj_ideal(torch.cat([rule_emb, head_emb], dim=-1))  # [K, trajectory_dim]
 
-        # 余弦相似度 → 权重
-        cos_sim = F.cosine_similarity(d_ideal, d_path, dim=-1)
+        # 在低维空间计算余弦相似度
+        cos_sim = F.cosine_similarity(d_ideal_proj, d_path_proj, dim=-1)
         weight = (1 + cos_sim) / 2
         return weight
 
