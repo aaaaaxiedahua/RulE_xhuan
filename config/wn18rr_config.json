@@ -40,6 +40,5 @@
     "noise_tau": 1.0,
     "use_curriculum": false,
     "noise_warmup": null,
-    "use_trajectory": false,
-    "trajectory_dim": 64
+    "use_trajectory": false
 }

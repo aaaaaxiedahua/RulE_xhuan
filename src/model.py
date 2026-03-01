@@ -8,7 +8,7 @@ from layers import MLP, FuncToNodeSum
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, use_trajectory=False, trajectory_dim=64):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, use_trajectory=False):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -89,16 +89,7 @@ class RulE(torch.nn.Module):
         
         self.pi = 3.14159262358979323846
 
-        # 方案二：轨迹一致性（投影到低维空间计算余弦相似度）
-        if self.use_trajectory:
-            self.trajectory_dim = trajectory_dim
-            self.traj_proj_path = nn.Linear(self.hidden_dim, self.trajectory_dim)
-            self.traj_proj_ideal = nn.Sequential(
-                nn.Linear(self.hidden_dim * 2, self.trajectory_dim),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(self.trajectory_dim, self.trajectory_dim)
-            )
+        # 方案二：轨迹一致性（非学习式，直接用冻结embedding计算余弦相似度）
 
     # def add_param(self):
 
@@ -366,10 +357,12 @@ class RulE(torch.nn.Module):
 
     def compute_trajectory_weight(self, rule_indices):
         """
-        方案二：计算轨迹一致性权重。
-        d_path  = Σ(relation_embedding(body_i) * flag_i)  实际语义方向
-        d_ideal = MLP(rule_emb || head_relation_emb)       理想语义方向
-        weight  = (1 + cosine(d_ideal, d_path)) / 2        范围 [0, 1]
+        方案二：非学习式轨迹一致性权重。
+        d_path  = Σ(relation_embedding(body_i) * flag_i)           实际规则体组合方向
+        d_ideal = relation_embedding(head_r) * flag_head - rule_emb  理想方向（从 body_sum + rule_emb ≈ head_emb 推导）
+        weight  = (1 + cosine(d_path, d_ideal)) / 2                 范围 [0, 1]
+
+        所有 embedding 在 grounding 阶段已冻结，权重固定不变，无过拟合风险。
         """
         rules = self.rule_features[rule_indices]   # [K, 2+max_body_len]
         mask = self.rule_masks[rule_indices]        # [K, max_body_len]
@@ -384,18 +377,15 @@ class RulE(torch.nn.Module):
         cal_mask = mask.unsqueeze(-1).float()
         d_path = (body_emb * cal_mask).sum(1)      # [K, hidden_dim]
 
-        # 投影 d_path 到低维空间
-        d_path_proj = self.traj_proj_path(d_path)       # [K, trajectory_dim]
-
-        # d_ideal: 投影 (rule_emb || head_relation_emb) 到低维空间
+        # d_ideal: head_relation_emb - rule_emb（从 body_sum + rule_emb ≈ head_emb 推导）
         rule_emb = self.rule_emb(rules[:, 0])
         head_r = rules[:, 1]
         head_flag = torch.pow(-1, head_r // self.num_relations).unsqueeze(-1)
         head_emb = self.relation_embedding(head_r % self.num_relations) * head_flag
-        d_ideal_proj = self.traj_proj_ideal(torch.cat([rule_emb, head_emb], dim=-1))  # [K, trajectory_dim]
+        d_ideal = head_emb - rule_emb              # [K, hidden_dim]
 
-        # 在低维空间计算余弦相似度
-        cos_sim = F.cosine_similarity(d_ideal_proj, d_path_proj, dim=-1)
+        # 余弦相似度（detach 确保不影响梯度）
+        cos_sim = F.cosine_similarity(d_path.detach(), d_ideal.detach(), dim=-1)
         weight = (1 + cos_sim) / 2
         return weight
 
@@ -439,16 +429,11 @@ class RulE(torch.nn.Module):
 
         rule_count = rule_count.reshape(rule_index.size(0), -1)[:, candidate_set]
 
-        # 方案二：轨迹一致性加权
-        if self.use_trajectory:
-            traj_weight = self.compute_trajectory_weight(rule_index)
-            rule_count = rule_count * traj_weight.unsqueeze(1)
-            self._traj_stats = {
-                'traj_mean': traj_weight.mean().item(),
-                'traj_std': traj_weight.std().item(),
-                'traj_min': traj_weight.min().item(),
-                'traj_max': traj_weight.max().item(),
-            }
+        # 方案二：轨迹一致性加权（使用预计算的固定权重）
+        if self.use_trajectory and hasattr(self, '_traj_weight_cache'):
+            traj_weight = self._traj_weight_cache.get(query_r)
+            if traj_weight is not None:
+                rule_count = rule_count * traj_weight.unsqueeze(1)
 
         rule_emb = self.rules_weight_emb[rule_index]
 
@@ -498,3 +483,19 @@ class RulE(torch.nn.Module):
             rules_weight_emb.append(rule_weight_emb)
 
         self.rules_weight_emb = torch.cat(rules_weight_emb)
+
+        # 方案二：预计算所有规则的轨迹一致性权重（固定不变，不参与梯度更新）
+        if self.use_trajectory:
+            self._traj_weight_cache = {}
+            for r in range(self.num_relations * 2):
+                indices = [idx for idx, _ in self.relation2rules[r]]
+                if indices:
+                    idx_tensor = torch.tensor(indices, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        w = self.compute_trajectory_weight(idx_tensor)
+                    self._traj_weight_cache[r] = w
+            # 汇总统计日志
+            all_w = torch.cat(list(self._traj_weight_cache.values()))
+            logging.info('  [Trajectory] precomputed: mean=%.4f std=%.4f min=%.4f max=%.4f',
+                         all_w.mean().item(), all_w.std().item(),
+                         all_w.min().item(), all_w.max().item())

@@ -554,11 +554,6 @@ class GroundTrainer(object):
 
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
 
-                if getattr(model, 'use_trajectory', False) and hasattr(model, '_traj_stats'):
-                    ts = model._traj_stats
-                    logging.info('  [Trajectory] mean=%.4f std=%.4f min=%.4f max=%.4f',
-                                 ts['traj_mean'], ts['traj_std'], ts['traj_min'], ts['traj_max'])
-
                 total_loss = 0.0
                 total_size = 0.0
         
