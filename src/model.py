@@ -355,7 +355,8 @@ class RulE(torch.nn.Module):
         """
         grounding 前一次性计算规则质量并剪枝，保留每个关系下 top-ratio 的高质量规则。
         """
-        device = self.rule_features.device
+        device = self.relation_embedding.weight.device
+        self.rule_features = self.rule_features.to(device)
         self.rule_masks = self.rule_masks.to(device)
 
         with torch.no_grad():
