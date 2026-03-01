@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import logging, math
-from layers import MLP, FuncToNodeSum, GatedRelationComposition, InterRuleAttention
+from layers import MLP, FuncToNodeSum
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -350,73 +350,37 @@ class RulE(torch.nn.Module):
         dist = self.gamma_rule.item()/self.hidden_dim - torch.pow((outputs - embedding_r), self.p)
 
         return dist
-    
 
-    def init_rule_transformer(self, use_rule_transformer, gate_dim=128, attn_heads=4, use_structure_bias=True):
+    def precompute_rule_pruning(self, tau=1.0, ratio=0.5):
         """
-        方案三：在 Grounding 阶段初始化门控关系组合 + 规则间注意力模块。
-        调用时机：加载 pre-training checkpoint 后、创建 GroundTrainer 前。
+        grounding 前一次性计算规则质量并剪枝，保留每个关系下 top-ratio 的高质量规则。
         """
-        self.use_rule_transformer = use_rule_transformer
-        device = next(self.parameters()).device
+        device = self.rule_features.device
+        self.rule_masks = self.rule_masks.to(device)
 
-        logging.info('=' * 50)
-        logging.info('Rule Transformer Configuration:')
-        logging.info('  use_rule_transformer: %s', use_rule_transformer)
+        with torch.no_grad():
+            quality = self.compute_rule_quality(
+                self.rule_features, self.rule_masks, tau
+            )
 
-        if use_rule_transformer:
-            self.gated_composition = GatedRelationComposition(
-                self.hidden_dim, gate_dim, self.mlp_rule_dim
-            ).to(device)
-            self.inter_rule_attention = InterRuleAttention(
-                self.mlp_rule_dim, attn_heads, use_structure_bias
-            ).to(device)
-            logging.info('  gate_dim: %d', gate_dim)
-            logging.info('  attn_heads: %d', attn_heads)
-            logging.info('  use_structure_bias: %s', use_structure_bias)
+        self.pruned_relation2rules = [[] for _ in range(self.num_relations * 2)]
+        total_before, total_after = 0, 0
 
-        logging.info('=' * 50)
+        for r in range(self.num_relations * 2):
+            rules = self.relation2rules[r]
+            if len(rules) == 0:
+                continue
+            indices = [idx for idx, _ in rules]
+            q = quality[indices]
+            k = max(1, int(len(rules) * ratio))
+            _, top_k = q.topk(k)
+            self.pruned_relation2rules[r] = [rules[i] for i in top_k.tolist()]
+            total_before += len(rules)
+            total_after += k
 
-    def _compute_transformer_features(self, rule_index, query_r, device):
-        """
-        方案三：用门控关系组合 + 规则间注意力生成 mlp_feature。
-
-        Args:
-            rule_index: [N_rules] tensor，匹配到的规则索引
-            query_r: int，查询关系索引
-            device: torch device
-        Returns:
-            mlp_feature: [N_rules, mlp_rule_dim]
-        """
-        # 取规则体关系索引和 mask
-        rule_bodies = self.rule_features[rule_index, 2:]         # [N, max_body_len]
-        body_mask = self.rule_masks[rule_index]                  # [N, max_body_len] bool
-
-        # 处理逆关系
-        relations_flag = torch.pow(-1, rule_bodies // self.num_relations).unsqueeze(-1)
-        body_rel = rule_bodies % self.num_relations
-        body_emb = self.relation_embedding(body_rel) * relations_flag   # [N, max_len, hidden_dim]
-
-        # 查询关系 embedding（含逆关系 flag）
-        query_rel_idx = query_r % self.num_relations
-        query_flag = pow(-1, query_r // self.num_relations)
-        query_emb = self.relation_embedding(
-            torch.tensor([query_rel_idx], device=device)
-        ).squeeze(0) * query_flag                                # [hidden_dim]
-
-        # 门控关系组合
-        gated_features = self.gated_composition(body_emb, body_mask, query_emb)  # [N, mlp_rule_dim]
-
-        # 计算结构偏置（可选）
-        structure_bias = None
-        if self.inter_rule_attention.use_structure_bias and gated_features.size(0) > 1:
-            diff = gated_features.unsqueeze(0) - gated_features.unsqueeze(1)  # [N, N, dim]
-            structure_bias = -torch.norm(diff, dim=-1)           # [N, N]
-
-        # 规则间注意力
-        mlp_feature = self.inter_rule_attention(gated_features, structure_bias)  # [N, mlp_rule_dim]
-
-        return mlp_feature
+        logging.info('Rule Pruning: %d -> %d rules (%.1f%% kept, ratio=%.2f, tau=%.2f)',
+                     total_before, total_after,
+                     100 * total_after / max(total_before, 1), ratio, tau)
 
     def forward(self, all_h, all_r, edges_to_remove):
         query_r = all_r[0].item()
@@ -428,10 +392,16 @@ class RulE(torch.nn.Module):
 
         rule_index = list()
         rule_count = list()
-        
-        
+
+
         mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
-        for index, (r_head, r_body) in self.relation2rules[query_r]:
+
+        if getattr(self, 'pruned_relation2rules', None) is not None:
+            active_rules = self.pruned_relation2rules[query_r]
+        else:
+            active_rules = self.relation2rules[query_r]
+
+        for index, (r_head, r_body) in active_rules:
 
             assert r_head == query_r
 
@@ -457,10 +427,7 @@ class RulE(torch.nn.Module):
         
         rule_emb = self.rules_weight_emb[rule_index]
 
-        if getattr(self, 'use_rule_transformer', False):
-            mlp_feature = self._compute_transformer_features(rule_index, query_r, device)
-        else:
-            mlp_feature = self.mlp_feature[rule_index]
+        mlp_feature = self.mlp_feature[rule_index]
 
         rule_output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
 

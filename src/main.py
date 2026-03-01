@@ -80,15 +80,11 @@ def parse_args(args=None):
     parser.add_argument('--noise_warmup', default=None, type=int,
                         help='curriculum warmup steps (default: same as warm_up_steps)')
 
-    # 方案三：结构感知规则 Transformer
-    parser.add_argument('--use_rule_transformer', default=False, type=lambda x: x.lower() != 'false',
-                        help='enable gated relation composition + inter-rule attention in grounding')
-    parser.add_argument('--gate_dim', default=128, type=int,
-                        help='working dimension for gated relation composition')
-    parser.add_argument('--attn_heads', default=4, type=int,
-                        help='number of attention heads for inter-rule attention')
-    parser.add_argument('--use_structure_bias', default=True, type=lambda x: x.lower() != 'false',
-                        help='use structure similarity bias in inter-rule attention')
+    # 方案二：规则质量剪枝（grounding 阶段）
+    parser.add_argument('--use_rule_pruning', default=False, type=lambda x: x.lower() != 'false',
+                        help='enable rule quality pruning before grounding')
+    parser.add_argument('--pruning_ratio', default=0.5, type=float,
+                        help='fraction of rules to keep per relation (0-1)')
 
     # save path
     parser.add_argument('-init', '--init_checkpoint_config', default="../config/umls_config.json", type=str)
@@ -197,19 +193,17 @@ def main():
     valid_mrr = pre_trainer.evaluate('valid', expectation=True)
     test_mrr = pre_trainer.evaluate('test', expectation=True)
 
-    # 方案三：初始化规则 Transformer 模块
-    if getattr(args, 'use_rule_transformer', False):
-        RulE_model.init_rule_transformer(
-            use_rule_transformer=True,
-            gate_dim=getattr(args, 'gate_dim', 128),
-            attn_heads=getattr(args, 'attn_heads', 4),
-            use_structure_bias=getattr(args, 'use_structure_bias', True)
-        )
-
     # RulE_model.add_param()
 
     # checkpoint = torch.load(os.path.join(args.save_path, 'grounding.pt'))
     # RulE_model.load_state_dict(checkpoint['model'])
+
+    # 规则质量剪枝：利用预训练学到的 embedding 评估规则质量，剪去低质量规则
+    if getattr(args, 'use_rule_pruning', False):
+        RulE_model.precompute_rule_pruning(
+            tau=getattr(args, 'noise_tau', 1.0),
+            ratio=getattr(args, 'pruning_ratio', 0.5)
+        )
 
     ground_trainer = GroundTrainer(
         model=RulE_model,
