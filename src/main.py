@@ -80,11 +80,9 @@ def parse_args(args=None):
     parser.add_argument('--noise_warmup', default=None, type=int,
                         help='curriculum warmup steps (default: same as warm_up_steps)')
 
-    # 方案二：规则质量剪枝（grounding 阶段）
-    parser.add_argument('--use_rule_pruning', default=False, type=lambda x: x.lower() != 'false',
-                        help='enable rule quality pruning before grounding')
-    parser.add_argument('--pruning_ratio', default=0.5, type=float,
-                        help='fraction of rules to keep per relation (0-1)')
+    # 方案二：轨迹一致性 Grounding
+    parser.add_argument('--use_trajectory', default=False, type=lambda x: x.lower() != 'false',
+                        help='enable trajectory consistency weighting in grounding')
 
     # save path
     parser.add_argument('-init', '--init_checkpoint_config', default="../config/umls_config.json", type=str)
@@ -149,7 +147,8 @@ def main():
     if use_sparse:
         graph.build_sparse_adjacency(device)
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
+    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path,
+                       use_trajectory=getattr(args, 'use_trajectory', False))
     RulE_model.set_rules(rules)
 
     
@@ -197,13 +196,6 @@ def main():
 
     # checkpoint = torch.load(os.path.join(args.save_path, 'grounding.pt'))
     # RulE_model.load_state_dict(checkpoint['model'])
-
-    # 规则质量剪枝：利用预训练学到的 embedding 评估规则质量，剪去低质量规则
-    if getattr(args, 'use_rule_pruning', False):
-        RulE_model.precompute_rule_pruning(
-            tau=getattr(args, 'noise_tau', 1.0),
-            ratio=getattr(args, 'pruning_ratio', 0.5)
-        )
 
     ground_trainer = GroundTrainer(
         model=RulE_model,

@@ -1,13 +1,14 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import logging, math
 from layers import MLP, FuncToNodeSum
 
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, use_trajectory=False):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -20,6 +21,7 @@ class RulE(torch.nn.Module):
 
         self.mlp_rule_dim = mlp_rule_dim
         self.dataset = dataset
+        self.use_trajectory = use_trajectory
 
         self.rule_to_entity = FuncToNodeSum(self.mlp_rule_dim)
 
@@ -86,6 +88,14 @@ class RulE(torch.nn.Module):
         # self.linear = torch.nn.Linear(self.rnn_hidden_dim, self.relation_dim)
         
         self.pi = 3.14159262358979323846
+
+        # 方案二：轨迹一致性 MLP
+        if self.use_trajectory:
+            self.trajectory_mlp = nn.Sequential(
+                nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(self.hidden_dim, self.hidden_dim)
+            )
 
     # def add_param(self):
 
@@ -351,37 +361,37 @@ class RulE(torch.nn.Module):
 
         return dist
 
-    def precompute_rule_pruning(self, tau=1.0, ratio=0.5):
+    def compute_trajectory_weight(self, rule_indices):
         """
-        grounding 前一次性计算规则质量并剪枝，保留每个关系下 top-ratio 的高质量规则。
+        方案二：计算轨迹一致性权重。
+        d_path  = Σ(relation_embedding(body_i) * flag_i)  实际语义方向
+        d_ideal = MLP(rule_emb || head_relation_emb)       理想语义方向
+        weight  = (1 + cosine(d_ideal, d_path)) / 2        范围 [0, 1]
         """
-        device = self.relation_embedding.weight.device
-        self.rule_features = self.rule_features.to(device)
-        self.rule_masks = self.rule_masks.to(device)
+        rules = self.rule_features[rule_indices]   # [K, 2+max_body_len]
+        mask = self.rule_masks[rule_indices]        # [K, max_body_len]
 
-        with torch.no_grad():
-            quality = self.compute_rule_quality(
-                self.rule_features, self.rule_masks, tau
-            )
+        # d_path: 规则体关系向量之和
+        inputs = rules[:, 2:]
+        relations_flag = torch.pow(-1, inputs // self.num_relations).unsqueeze(-1)
+        inputs_com = inputs % self.num_relations
+        inputs_com = torch.where(inputs == self.num_relations * 2,
+                                 self.padding_index, inputs_com)
+        body_emb = self.relation_embedding(inputs_com) * relations_flag
+        cal_mask = mask.unsqueeze(-1).float()
+        d_path = (body_emb * cal_mask).sum(1)      # [K, hidden_dim]
 
-        self.pruned_relation2rules = [[] for _ in range(self.num_relations * 2)]
-        total_before, total_after = 0, 0
+        # d_ideal: MLP(rule_emb || head_relation_emb)
+        rule_emb = self.rule_emb(rules[:, 0])
+        head_r = rules[:, 1]
+        head_flag = torch.pow(-1, head_r // self.num_relations).unsqueeze(-1)
+        head_emb = self.relation_embedding(head_r % self.num_relations) * head_flag
+        d_ideal = self.trajectory_mlp(torch.cat([rule_emb, head_emb], dim=-1))
 
-        for r in range(self.num_relations * 2):
-            rules = self.relation2rules[r]
-            if len(rules) == 0:
-                continue
-            indices = [idx for idx, _ in rules]
-            q = quality[indices]
-            k = max(1, int(len(rules) * ratio))
-            _, top_k = q.topk(k)
-            self.pruned_relation2rules[r] = [rules[i] for i in top_k.tolist()]
-            total_before += len(rules)
-            total_after += k
-
-        logging.info('Rule Pruning: %d -> %d rules (%.1f%% kept, ratio=%.2f, tau=%.2f)',
-                     total_before, total_after,
-                     100 * total_after / max(total_before, 1), ratio, tau)
+        # 余弦相似度 → 权重
+        cos_sim = F.cosine_similarity(d_ideal, d_path, dim=-1)
+        weight = (1 + cos_sim) / 2
+        return weight
 
     def forward(self, all_h, all_r, edges_to_remove):
         query_r = all_r[0].item()
@@ -390,6 +400,8 @@ class RulE(torch.nn.Module):
 
         if device.type == "cuda":
             self.rule_features = self.rule_features.cuda(device)
+            if self.use_trajectory:
+                self.rule_masks = self.rule_masks.cuda(device)
 
         rule_index = list()
         rule_count = list()
@@ -397,12 +409,7 @@ class RulE(torch.nn.Module):
 
         mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
 
-        if getattr(self, 'pruned_relation2rules', None) is not None:
-            active_rules = self.pruned_relation2rules[query_r]
-        else:
-            active_rules = self.relation2rules[query_r]
-
-        for index, (r_head, r_body) in active_rules:
+        for index, (r_head, r_body) in self.relation2rules[query_r]:
 
             assert r_head == query_r
 
@@ -425,7 +432,18 @@ class RulE(torch.nn.Module):
         rule_count = torch.stack(rule_count, dim=0)
 
         rule_count = rule_count.reshape(rule_index.size(0), -1)[:, candidate_set]
-        
+
+        # 方案二：轨迹一致性加权
+        if self.use_trajectory:
+            traj_weight = self.compute_trajectory_weight(rule_index)
+            rule_count = rule_count * traj_weight.unsqueeze(1)
+            self._traj_stats = {
+                'traj_mean': traj_weight.mean().item(),
+                'traj_std': traj_weight.std().item(),
+                'traj_min': traj_weight.min().item(),
+                'traj_max': traj_weight.max().item(),
+            }
+
         rule_emb = self.rules_weight_emb[rule_index]
 
         mlp_feature = self.mlp_feature[rule_index]

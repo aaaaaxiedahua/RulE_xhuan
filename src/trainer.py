@@ -445,6 +445,10 @@ class GroundTrainer(object):
 
         
         logging.info('>>>>> RulE: Grounding-Training')
+        if getattr(self.model, 'use_trajectory', False):
+            logging.info('  [Trajectory Consistency] enabled')
+        else:
+            logging.info('  [Trajectory Consistency] disabled')
 
         best_valid_mrr = 0.0
         test_mrr = 0.0
@@ -550,10 +554,13 @@ class GroundTrainer(object):
 
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
 
+                if getattr(model, 'use_trajectory', False) and hasattr(model, '_traj_stats'):
+                    ts = model._traj_stats
+                    logging.info('  [Trajectory] mean=%.4f std=%.4f min=%.4f max=%.4f',
+                                 ts['traj_mean'], ts['traj_std'], ts['traj_min'], ts['traj_max'])
+
                 total_loss = 0.0
                 total_size = 0.0
-                # 注意：不在这里保存，只在 epoch 结束且 valid MRR 提升时保存
-                # self.save(args, os.path.join(args.save_path, 'grounding.pt'))
         
 
     @torch.no_grad()
