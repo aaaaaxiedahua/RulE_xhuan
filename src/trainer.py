@@ -398,16 +398,25 @@ class GroundTrainer(object):
             lr=float(args.g_lr), 
             weight_decay=float(args.weight_decay))
 
+        scheduler = None
+        if getattr(args, 'scheduler', 'none') == 'plateau':
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode='max',
+                factor=float(args.scheduler_factor),
+                patience=int(args.scheduler_patience)
+            )
+
 
         self.train_set.make_batches()
         
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
         
-        self.model.eval_compute_rule_weight(self.device)
+        self.model.prepare_reasoner(self.device)
 
 
         
-        logging.info('>>>>> RulE: Grounding-Training')
+        logging.info('>>>>> RulE: {}-Training'.format(self.model.reasoner_type))
         
 
         best_valid_mrr = 0.0 
@@ -435,6 +444,8 @@ class GroundTrainer(object):
 
             self.train_step( optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args)
             valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
+            if scheduler is not None:
+                scheduler.step(valid_mrr_iter)
             # test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
             # test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
             

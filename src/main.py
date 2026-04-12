@@ -84,6 +84,16 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+    parser.add_argument('--reasoner_type', default='dual_pathway', type=str, choices=['grounding', 'dual_pathway'])
+    parser.add_argument('--g_num_layers', default=2, type=int)
+    parser.add_argument('--g_dropout_rule', default=0.1, type=float)
+    parser.add_argument('--g_dropout_sem', default=0.1, type=float)
+    parser.add_argument('--g_dropout_fusion', default=0.1, type=float)
+    parser.add_argument('--g_activation', default='relu', type=str)
+    parser.add_argument('--g_scorer_hidden_dim', default=64, type=int)
+    parser.add_argument('--scheduler', default='plateau', type=str, choices=['none', 'plateau'])
+    parser.add_argument('--scheduler_patience', default=2, type=int)
+    parser.add_argument('--scheduler_factor', default=0.5, type=float)
     return parser.parse_args(args)
 
 def main():
@@ -91,8 +101,9 @@ def main():
 
     # read the given config
     if args.init_checkpoint_config:
-        args = load_config(args.init_checkpoint_config)
-        args = args[0]
+        loaded_args = load_config(args.init_checkpoint_config)[0]
+        for key, value in loaded_args.items():
+            setattr(args, key, value)
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -126,7 +137,23 @@ def main():
     else:
         device = torch.device('cpu')
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
+    RulE_model = RulE(
+        graph,
+        args.p_norm,
+        args.mlp_rule_dim,
+        args.gamma_fact,
+        args.gamma_rule,
+        args.hidden_dim,
+        device,
+        args.data_path,
+        reasoner_type=args.reasoner_type,
+        g_num_layers=args.g_num_layers,
+        g_dropout_rule=args.g_dropout_rule,
+        g_dropout_sem=args.g_dropout_sem,
+        g_dropout_fusion=args.g_dropout_fusion,
+        g_activation=args.g_activation,
+        g_scorer_hidden_dim=args.g_scorer_hidden_dim,
+    )
     RulE_model.set_rules(rules)
 
     
