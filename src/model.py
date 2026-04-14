@@ -1,4 +1,7 @@
+import json
+import os
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -121,6 +124,9 @@ class RulE(torch.nn.Module):
         self.reasoner_fusion_dropout = nn.Dropout(g_dropout_fusion) if g_dropout_fusion > 0 else None
         self.reasoner_kge_scale = nn.Parameter(torch.tensor(1.0))
         self.reasoner_support_scale = nn.Parameter(torch.tensor(1.0))
+        self.kge_cache_scores = None
+        self.kge_cache_row_index = None
+        self.kge_cache_meta = None
 
         # # Initialize to 1
         # nn.init.zeros_(
@@ -394,11 +400,133 @@ class RulE(torch.nn.Module):
             score, _ = self.add_ruleE(self.rule_features.unsqueeze(1), self.rule_masks)
             self.rule_confidence = torch.sigmoid(score.squeeze(1)).detach()
 
-    def prepare_reasoner(self, device):
+    def get_kge_cache_paths(self, cache_dir):
+        return {
+            "score": os.path.join(cache_dir, "query_kge_scores.fp16"),
+            "row_index": os.path.join(cache_dir, "query_row_index.npy"),
+            "meta": os.path.join(cache_dir, "query_kge_meta.json"),
+        }
+
+    def collect_kge_cache_queries(self):
+        query_keys = set()
+        for facts in (self.graph.ground_train_facts, self.graph.valid_facts, self.graph.test_facts):
+            for h, r, _ in facts:
+                query_keys.add(self.graph.encode_hr(h, r))
+        return np.asarray(sorted(query_keys), dtype=np.int64)
+
+    def has_valid_kge_cache(self, paths, checkpoint_path):
+        if not all(os.path.exists(path) for path in paths.values()):
+            return False
+
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            checkpoint_mtime = os.path.getmtime(checkpoint_path)
+            cache_mtime = min(os.path.getmtime(path) for path in paths.values())
+            if checkpoint_mtime > cache_mtime:
+                return False
+
+        with open(paths["meta"], "r") as fi:
+            meta = json.load(fi)
+
+        if not meta.get("complete", False):
+            return False
+        if meta.get("num_entities") != self.num_entities:
+            return False
+        if meta.get("total_relations") != self.total_relations:
+            return False
+
+        return True
+
+    @torch.no_grad()
+    def build_kge_cache(self, cache_dir, device, batch_size):
+        os.makedirs(cache_dir, exist_ok=True)
+        paths = self.get_kge_cache_paths(cache_dir)
+        query_keys = self.collect_kge_cache_queries()
+        num_queries = len(query_keys)
+        batch_size = max(1, int(batch_size))
+
+        logging.info('Building query KGE cache: %d queries x %d entities', num_queries, self.num_entities)
+
+        row_index = np.full(self.total_relations * self.num_entities, -1, dtype=np.int32)
+        row_index[query_keys] = np.arange(num_queries, dtype=np.int32)
+        np.save(paths["row_index"], row_index)
+
+        score_memmap = np.memmap(
+            paths["score"],
+            dtype=np.float16,
+            mode="w+",
+            shape=(num_queries, self.num_entities),
+        )
+
+        for start in range(0, num_queries, batch_size):
+            end = min(start + batch_size, num_queries)
+            hr_batch = torch.from_numpy(query_keys[start:end])
+            all_h = torch.remainder(hr_batch, self.num_entities).long().to(device)
+            all_r = torch.div(hr_batch, self.num_entities, rounding_mode='floor').long().to(device)
+
+            batch_scores = self.compute_g_KGE(all_h, all_r).detach().cpu().numpy().astype(np.float16)
+            score_memmap[start:end] = batch_scores
+
+            if end % max(batch_size * 100, 1) == 0 or end == num_queries:
+                logging.info('KGE cache progress: %d / %d queries', end, num_queries)
+
+        score_memmap.flush()
+
+        with open(paths["meta"], "w") as fo:
+            json.dump(
+                {
+                    "num_queries": int(num_queries),
+                    "num_entities": int(self.num_entities),
+                    "total_relations": int(self.total_relations),
+                    "dtype": "float16",
+                    "complete": True,
+                },
+                fo,
+            )
+
+    def load_kge_cache(self, cache_dir):
+        paths = self.get_kge_cache_paths(cache_dir)
+        with open(paths["meta"], "r") as fi:
+            meta = json.load(fi)
+
+        self.kge_cache_row_index = np.load(paths["row_index"], mmap_mode='r')
+        self.kge_cache_scores = np.memmap(
+            paths["score"],
+            dtype=np.float16,
+            mode='r',
+            shape=(meta["num_queries"], meta["num_entities"]),
+        )
+        self.kge_cache_meta = meta
+        logging.info('Loaded query KGE cache from %s', cache_dir)
+
+    def prepare_kge_cache(self, cache_dir, checkpoint_path, device, batch_size):
+        paths = self.get_kge_cache_paths(cache_dir)
+        if self.has_valid_kge_cache(paths, checkpoint_path):
+            self.load_kge_cache(cache_dir)
+            return
+
+        self.build_kge_cache(cache_dir, device, batch_size)
+        self.load_kge_cache(cache_dir)
+
+    def get_query_kge_score(self, all_h, all_r):
+        if self.kge_cache_scores is None or self.kge_cache_row_index is None:
+            return self.compute_g_KGE(all_h, all_r)
+
+        query_ids = (all_r.long() * self.num_entities + all_h.long()).detach().cpu().numpy()
+        row_ids = self.kge_cache_row_index[query_ids]
+        if (row_ids < 0).any():
+            return self.compute_g_KGE(all_h, all_r)
+
+        score = np.asarray(self.kge_cache_scores[row_ids], dtype=np.float32)
+        return torch.from_numpy(score).to(all_h.device)
+
+    def prepare_reasoner(self, device, cache_dir=None, checkpoint_path=None, kge_batch_size=1):
+        self.graph.cache_adjacency(device)
         if self.reasoner_type == 'grounding':
             self.eval_compute_rule_weight(device)
         else:
             self.precompute_rule_confidence(device)
+            if cache_dir is not None:
+                self.prepare_kge_cache(cache_dir, checkpoint_path, device, kge_batch_size)
 
     def build_query_rule_memory(self, query_r, device):
         relation_ids = torch.arange(self.total_relations, device=device)
@@ -494,7 +622,7 @@ class RulE(torch.nn.Module):
             dim=-1,
         )
         support_score = self.reasoner_support_scorer(support_feature).squeeze(-1)
-        kge_score = self.compute_g_KGE(all_h, all_r)
+        kge_score = self.get_query_kge_score(all_h, all_r)
         score = self.reasoner_kge_scale * kge_score + self.reasoner_support_scale * support_score + self.bias.unsqueeze(0)
         mask = torch.ones(batch_size, self.graph.entity_size, device=device).bool()
 

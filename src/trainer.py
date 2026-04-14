@@ -412,7 +412,12 @@ class GroundTrainer(object):
         
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
         
-        self.model.prepare_reasoner(self.device)
+        self.model.prepare_reasoner(
+            self.device,
+            cache_dir=os.path.join(args.save_path, 'kge_cache'),
+            checkpoint_path=os.path.join(args.save_path, 'checkpoint'),
+            kge_batch_size=args.g_batch_size,
+        )
 
 
         
@@ -465,7 +470,11 @@ class GroundTrainer(object):
         
         test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
         test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
-        test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+        if self.model.reasoner_type == 'grounding':
+            test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+        else:
+            logging.info('Skip test_kge evaluation for %s reasoner because KGE is already fused in the model score.',
+                         self.model.reasoner_type)
 
 
        
@@ -675,7 +684,7 @@ class GroundTrainer(object):
             # logits, mask = model.forward_weight(all_h, all_r, None)
             logits, mask = model(all_h, all_r, None)
 
-            kge_score = model.compute_g_KGE(all_h,all_r)
+            kge_score = model.get_query_kge_score(all_h, all_r)
             
             logits = logits + alpha * kge_score
 
