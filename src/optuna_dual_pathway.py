@@ -98,6 +98,8 @@ def sample_stage2_params(trial, base_args):
     trial_args.g_dropout = trial.suggest_float("g_dropout", 0.0, 0.5, step=0.05)
     trial_args.g_activation = trial.suggest_categorical("g_activation", ["relu", "gelu", "tanh"])
     trial_args.g_layer_norm = trial.suggest_categorical("g_layer_norm", [False, True])
+    trial_args.g_readout = trial.suggest_categorical("g_readout", ["multiply", "linear"])
+    trial_args.alpha = trial.suggest_categorical("alpha", [0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0])
     trial_args.g_lr = trial.suggest_categorical("g_lr", [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1])
     trial_args.weight_decay = trial.suggest_categorical("weight_decay", [0.0, 1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3])
     trial_args.smoothing = trial.suggest_float("smoothing", 0.0, 0.5, step=0.05)
@@ -130,6 +132,8 @@ def build_stage2_components(args, device):
         g_dropout=args.g_dropout,
         g_activation=args.g_activation,
         g_layer_norm=args.g_layer_norm,
+        g_readout=args.g_readout,
+        reasoner_alpha=args.alpha,
     )
     model.set_rules(rules)
 
@@ -187,6 +191,8 @@ def save_trial_summary(trial_args, trial_save_path, best_valid_mrr, best_iter, s
             "g_dropout": trial_args.g_dropout,
             "g_activation": trial_args.g_activation,
             "g_layer_norm": trial_args.g_layer_norm,
+            "g_readout": trial_args.g_readout,
+            "alpha": trial_args.alpha,
             "g_lr": trial_args.g_lr,
             "weight_decay": trial_args.weight_decay,
             "smoothing": trial_args.smoothing,

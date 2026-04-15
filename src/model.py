@@ -30,6 +30,8 @@ class RulE(torch.nn.Module):
         g_dropout=0.1,
         g_activation='relu',
         g_layer_norm=False,
+        g_readout='multiply',
+        reasoner_alpha=5.0,
     ):
         super(RulE, self).__init__()
         self.graph = graph
@@ -110,10 +112,26 @@ class RulE(torch.nn.Module):
         self.g_attn_dim = g_attn_dim
         self.g_activation = getattr(F, g_activation)
         self.g_layer_norm = g_layer_norm
+        self.g_readout = g_readout
+        self.reasoner_alpha = float(reasoner_alpha)
         self.rule_confidence = None
 
         self.rule_memory_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
         self.query_seed_proj = nn.Linear(self.hidden_dim, self.g_hidden_dim, bias=False)
+        self.head_context_proj = nn.Linear(self.hidden_dim * 2, self.hidden_dim, bias=False)
+        self.rule_score_rule_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.g_attn_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.rule_score_query_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.g_attn_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.rule_score_head_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.g_attn_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.rule_score_layers = nn.ModuleList(
+            [nn.Linear(self.g_attn_dim, 1) for _ in range(self.g_num_layers)]
+        )
+        self.rule_confidence_scale = nn.Parameter(torch.tensor(1.0))
         self.message_node_projs = nn.ModuleList(
             [nn.Linear(self.g_hidden_dim, self.g_message_hidden_dim, bias=False) for _ in range(self.g_num_layers)]
         )
@@ -141,8 +159,6 @@ class RulE(torch.nn.Module):
         self.reasoner_layer_norms = None
         if self.g_layer_norm:
             self.reasoner_layer_norms = nn.ModuleList([nn.LayerNorm(self.g_hidden_dim) for _ in range(self.g_num_layers)])
-        self.reasoner_kge_scale = nn.Parameter(torch.tensor(1.0))
-        self.reasoner_support_scale = nn.Parameter(torch.tensor(1.0))
         self.kge_cache_scores = None
         self.kge_cache_row_index = None
         self.kge_cache_meta = None
@@ -415,6 +431,19 @@ class RulE(torch.nn.Module):
     def apply_support_layer_norm(self, support, layer_norm):
         return layer_norm(support)
 
+    def sparsemax(self, input, dim=-1):
+        input = input - input.max(dim=dim, keepdim=True)[0]
+        zs = torch.sort(input, dim=dim, descending=True)[0]
+        steps = torch.arange(1, zs.size(dim) + 1, device=input.device, dtype=input.dtype)
+        view = [1] * zs.dim()
+        view[dim] = -1
+        steps = steps.view(view)
+        cumsum_zs = zs.cumsum(dim)
+        support = (1 + steps * zs) > cumsum_zs
+        k = support.sum(dim=dim, keepdim=True).clamp(min=1)
+        taus = (cumsum_zs.gather(dim, k.long() - 1) - 1) / k
+        return torch.clamp(input - taus, min=0.0)
+
     def precompute_rule_confidence(self, device):
         self.rule_masks = self.rule_masks.to(device)
         self.rule_features = self.rule_features.to(device)
@@ -550,10 +579,11 @@ class RulE(torch.nn.Module):
             if cache_dir is not None:
                 self.prepare_kge_cache(cache_dir, checkpoint_path, device, kge_batch_size)
 
-    def build_query_rule_states(self, query_r, device):
+    def build_query_rule_states(self, query_r, query_emb, head_context, layer_id, device):
         relation_ids = torch.arange(self.total_relations, device=device)
         base_relation_repr = self.get_signed_relation_embedding(relation_ids)
-        rule_states = base_relation_repr.unsqueeze(0).repeat(self.g_num_layers, 1, 1)
+        batch_size = query_emb.size(0)
+        rule_states = base_relation_repr.unsqueeze(1).repeat(1, batch_size, 1)
         query_rules = self.relation2rules[query_r]
 
         if len(query_rules) == 0:
@@ -563,14 +593,25 @@ class RulE(torch.nn.Module):
         if self.rule_confidence is None or self.rule_confidence.device != device:
             self.precompute_rule_confidence(device)
 
-        confidence = self.rule_confidence[rule_ids]
-        confidence = confidence / confidence.sum().clamp(min=1e-8)
+        confidence = self.rule_confidence[rule_ids].unsqueeze(0).expand(batch_size, -1)
+        rule_emb = self.rule_emb(rule_ids)
         projected_rule_emb = self.rule_memory_proj(self.rule_emb(rule_ids))
 
-        for weight, rule_feature, (_, (rule_head, rule_body)) in zip(confidence, projected_rule_emb, query_rules):
+        compat = self.rule_score_layers[layer_id](
+            self.g_activation(
+                self.rule_score_rule_projs[layer_id](rule_emb).unsqueeze(0)
+                + self.rule_score_query_projs[layer_id](query_emb).unsqueeze(1)
+                + self.rule_score_head_projs[layer_id](head_context).unsqueeze(1)
+            )
+        ).squeeze(-1)
+        rule_weight = self.sparsemax(compat + self.rule_confidence_scale * confidence, dim=-1)
+
+        for rule_offset, (rule_feature, (_, (rule_head, rule_body))) in enumerate(zip(projected_rule_emb, query_rules)):
             del rule_head
-            for hop_id, relation_id in enumerate(rule_body[:self.g_num_layers]):
-                rule_states[hop_id, relation_id] = rule_states[hop_id, relation_id] + weight * rule_feature
+            if layer_id >= len(rule_body):
+                continue
+            relation_id = rule_body[layer_id]
+            rule_states[relation_id] = rule_states[relation_id] + rule_weight[:, rule_offset].unsqueeze(-1) * rule_feature.unsqueeze(0)
 
         return rule_states
 
@@ -579,10 +620,11 @@ class RulE(torch.nn.Module):
         batch_size = all_h.size(0)
         query_emb = self.get_signed_relation_embedding(all_r)
         seed_hidden = self.query_seed_proj(query_emb)
+        head_context = self.head_context_proj(self.entity_embedding(all_h))
         hidden = torch.zeros(self.num_entities, batch_size, self.g_hidden_dim, device=device)
         batch_index = torch.arange(batch_size, device=device)
         hidden[all_h, batch_index] = seed_hidden
-        return hidden, query_emb
+        return hidden, query_emb, head_context
 
     def get_relation_edges(self, relation_id, device):
         if self.graph.cached_adjacency is not None and self.graph.cached_adjacency_device == device:
@@ -631,11 +673,11 @@ class RulE(torch.nn.Module):
             relation_state = relation_states[relation_id]
 
             edge_message = message_node_proj(source_hidden)
-            edge_message = edge_message * message_relation_proj(relation_state).view(1, 1, -1)
+            edge_message = edge_message * message_relation_proj(relation_state).unsqueeze(0)
 
             attn_input = (
                 attn_source_proj(source_hidden)
-                + attn_relation_proj(relation_state).view(1, 1, -1)
+                + attn_relation_proj(relation_state).unsqueeze(0)
                 + attn_query
             )
             edge_alpha = torch.sigmoid(attn_score_layer(self.g_activation(attn_input)))
@@ -670,22 +712,28 @@ class RulE(torch.nn.Module):
         device = all_r.device
         batch_size = all_h.size(0)
 
-        hidden, query_emb = self.init_query_hidden(all_h, all_r)
-        query_rule_states = self.build_query_rule_states(query_r, device)
+        hidden, query_emb, head_context = self.init_query_hidden(all_h, all_r)
 
         for layer_id in range(self.g_num_layers):
+            query_rule_states = self.build_query_rule_states(query_r, query_emb, head_context, layer_id, device)
             hidden = self.propagate_single_path_layer(
                 hidden,
                 query_emb,
-                query_rule_states[layer_id],
+                query_rule_states,
                 layer_id,
                 query_r,
                 edges_to_remove,
             )
 
-        support_score = self.reasoner_support_scorer(hidden.permute(1, 0, 2)).squeeze(-1)
+        hidden_batch = hidden.permute(1, 0, 2)
+        if self.g_readout == 'multiply':
+            batch_index = torch.arange(batch_size, device=device)
+            anchor_hidden = hidden[all_h, batch_index]
+            support_score = (hidden_batch * anchor_hidden.unsqueeze(1)).sum(dim=-1)
+        else:
+            support_score = self.reasoner_support_scorer(hidden_batch).squeeze(-1)
         kge_score = self.get_query_kge_score(all_h, all_r)
-        score = self.reasoner_kge_scale * kge_score + self.reasoner_support_scale * support_score + self.bias.unsqueeze(0)
+        score = support_score + self.reasoner_alpha * kge_score + self.bias.unsqueeze(0)
         mask = torch.ones(batch_size, self.graph.entity_size, device=device).bool()
 
         return score, mask

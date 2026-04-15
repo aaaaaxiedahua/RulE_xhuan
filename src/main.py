@@ -1,6 +1,7 @@
 
 import logging, os, datetime
 import argparse
+import sys
 import torch
 from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDataset, KGETrainDataset
 from model import RulE
@@ -37,8 +38,7 @@ def str2bool(value):
         return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
 
-def parse_args(args=None):
-
+def build_parser():
     parser = argparse.ArgumentParser(
         description='RNNLogic',
         usage='train.py [<args>] [-h | --help]'
@@ -87,7 +87,7 @@ def parse_args(args=None):
     # grounding training process
   
     parser.add_argument('--mlp_rule_dim', default=100, type=int)
-    parser.add_argument('--alpha', default=5.0, type=int, help='weight the KGE score')
+    parser.add_argument('--alpha', default=5.0, type=float, help='weight the KGE score')
     parser.add_argument('--smoothing', default=0.5, type=float)
     parser.add_argument('--batch_per_epoch', default=1000000, type=int)
     parser.add_argument('--print_every', default=1000, type=int)
@@ -103,19 +103,47 @@ def parse_args(args=None):
     parser.add_argument('--g_dropout', default=0.1, type=float)
     parser.add_argument('--g_activation', default='relu', type=str)
     parser.add_argument('--g_layer_norm', default=False, type=str2bool)
+    parser.add_argument('--g_readout', default='multiply', type=str, choices=['linear', 'multiply'])
     parser.add_argument('--scheduler', default='plateau', type=str, choices=['none', 'plateau'])
     parser.add_argument('--scheduler_patience', default=2, type=int)
     parser.add_argument('--scheduler_factor', default=0.5, type=float)
+    return parser
+
+
+def parse_args(args=None):
+    parser = build_parser()
     return parser.parse_args(args)
 
+
+def get_explicit_cli_dests(parser, argv):
+    option_to_dest = {}
+    for action in parser._actions:
+        for option in action.option_strings:
+            option_to_dest[option] = action.dest
+
+    explicit = set()
+    for token in argv:
+        if token == '--':
+            break
+        if token.startswith('--'):
+            option = token.split('=', 1)[0]
+            if option in option_to_dest:
+                explicit.add(option_to_dest[option])
+        elif token.startswith('-') and token in option_to_dest:
+            explicit.add(option_to_dest[token])
+    return explicit
+
 def main():
-    args = parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    explicit_cli_dests = get_explicit_cli_dests(parser, sys.argv[1:])
 
     # read the given config
     if args.init_checkpoint_config:
         loaded_args = load_config(args.init_checkpoint_config)[0]
         for key, value in loaded_args.items():
-            setattr(args, key, value)
+            if key not in explicit_cli_dests:
+                setattr(args, key, value)
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -166,6 +194,8 @@ def main():
         g_dropout=args.g_dropout,
         g_activation=args.g_activation,
         g_layer_norm=args.g_layer_norm,
+        g_readout=args.g_readout,
+        reasoner_alpha=args.alpha,
     )
     RulE_model.set_rules(rules)
 
