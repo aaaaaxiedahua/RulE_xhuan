@@ -26,6 +26,17 @@ def formatted_rules(_rules):
         rules.append(rule)
     return rules
 
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in {"true", "1", "yes", "y"}:
+        return True
+    if value in {"false", "0", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
 def parse_args(args=None):
 
     parser = argparse.ArgumentParser(
@@ -84,13 +95,14 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
-    parser.add_argument('--reasoner_type', default='dual_pathway', type=str, choices=['grounding', 'dual_pathway'])
+    parser.add_argument('--reasoner_type', default='dual_pathway', type=str, choices=['grounding', 'dual_pathway', 'single_pathway'])
     parser.add_argument('--g_num_layers', default=2, type=int)
-    parser.add_argument('--g_dropout_rule', default=0.1, type=float)
-    parser.add_argument('--g_dropout_sem', default=0.1, type=float)
-    parser.add_argument('--g_dropout_fusion', default=0.1, type=float)
+    parser.add_argument('--g_hidden_dim', default=128, type=int)
+    parser.add_argument('--g_message_hidden_dim', default=128, type=int)
+    parser.add_argument('--g_attn_dim', default=64, type=int)
+    parser.add_argument('--g_dropout', default=0.1, type=float)
     parser.add_argument('--g_activation', default='relu', type=str)
-    parser.add_argument('--g_scorer_hidden_dim', default=64, type=int)
+    parser.add_argument('--g_layer_norm', default=False, type=str2bool)
     parser.add_argument('--scheduler', default='plateau', type=str, choices=['none', 'plateau'])
     parser.add_argument('--scheduler_patience', default=2, type=int)
     parser.add_argument('--scheduler_factor', default=0.5, type=float)
@@ -148,11 +160,12 @@ def main():
         args.data_path,
         reasoner_type=args.reasoner_type,
         g_num_layers=args.g_num_layers,
-        g_dropout_rule=args.g_dropout_rule,
-        g_dropout_sem=args.g_dropout_sem,
-        g_dropout_fusion=args.g_dropout_fusion,
+        g_hidden_dim=args.g_hidden_dim,
+        g_message_hidden_dim=args.g_message_hidden_dim,
+        g_attn_dim=args.g_attn_dim,
+        g_dropout=args.g_dropout,
         g_activation=args.g_activation,
-        g_scorer_hidden_dim=args.g_scorer_hidden_dim,
+        g_layer_norm=args.g_layer_norm,
     )
     RulE_model.set_rules(rules)
 
@@ -189,7 +202,7 @@ def main():
     # load rule embedding and KGE embedding
 
     checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
-    RulE_model.load_state_dict(checkpoint['model'])
+    RulE_model.load_state_dict(checkpoint['model'],strict=False)
     
     
     logging.info('Test the results of pre-training')

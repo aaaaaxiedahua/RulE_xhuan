@@ -25,7 +25,7 @@ REPO_ROOT = os.path.dirname(SRC_DIR)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Optuna search for stage-2 dual_pathway")
+    parser = argparse.ArgumentParser(description="Optuna search for stage-2 single-channel rule-conditioned GNN")
     parser.add_argument("--stage1_dir", required=True, type=str,
                         help="Directory containing the fixed stage-1 checkpoint and config.json")
     parser.add_argument("--study_name", default="dual_pathway_search", type=str)
@@ -72,7 +72,7 @@ def load_stage1_args(cli_args):
     args.data_path = resolve_src_relative(args.data_path)
     args.rule_file = resolve_src_relative(args.rule_file)
     args.init_checkpoint_config = ""
-    args.reasoner_type = "dual_pathway"
+    args.reasoner_type = "single_pathway"
     args.save_path = cli_args.stage1_dir
     return args
 
@@ -90,13 +90,14 @@ def build_default_storage_url(save_root, dataset_name, study_name):
 
 def sample_stage2_params(trial, base_args):
     trial_args = copy.deepcopy(base_args)
-    trial_args.reasoner_type = "dual_pathway"
+    trial_args.reasoner_type = "single_pathway"
     trial_args.g_num_layers = trial.suggest_int("g_num_layers", 2, 8)
-    trial_args.g_dropout_rule = trial.suggest_float("g_dropout_rule", 0.0, 0.5, step=0.05)
-    trial_args.g_dropout_sem = trial.suggest_float("g_dropout_sem", 0.0, 0.5, step=0.05)
-    trial_args.g_dropout_fusion = trial.suggest_float("g_dropout_fusion", 0.0, 0.5, step=0.05)
+    trial_args.g_hidden_dim = trial.suggest_categorical("g_hidden_dim", [64, 128, 256, 512])
+    trial_args.g_message_hidden_dim = trial.suggest_categorical("g_message_hidden_dim", [64, 128, 256, 512])
+    trial_args.g_attn_dim = trial.suggest_categorical("g_attn_dim", [32, 64, 128, 256])
+    trial_args.g_dropout = trial.suggest_float("g_dropout", 0.0, 0.5, step=0.05)
     trial_args.g_activation = trial.suggest_categorical("g_activation", ["relu", "gelu", "tanh"])
-    trial_args.g_scorer_hidden_dim = trial.suggest_categorical("g_scorer_hidden_dim", [64, 128, 256, 512, 1024])
+    trial_args.g_layer_norm = trial.suggest_categorical("g_layer_norm", [False, True])
     trial_args.g_lr = trial.suggest_categorical("g_lr", [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1])
     trial_args.weight_decay = trial.suggest_categorical("weight_decay", [0.0, 1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3])
     trial_args.smoothing = trial.suggest_float("smoothing", 0.0, 0.5, step=0.05)
@@ -123,11 +124,12 @@ def build_stage2_components(args, device):
         args.data_path,
         reasoner_type=args.reasoner_type,
         g_num_layers=args.g_num_layers,
-        g_dropout_rule=args.g_dropout_rule,
-        g_dropout_sem=args.g_dropout_sem,
-        g_dropout_fusion=args.g_dropout_fusion,
+        g_hidden_dim=args.g_hidden_dim,
+        g_message_hidden_dim=args.g_message_hidden_dim,
+        g_attn_dim=args.g_attn_dim,
+        g_dropout=args.g_dropout,
         g_activation=args.g_activation,
-        g_scorer_hidden_dim=args.g_scorer_hidden_dim,
+        g_layer_norm=args.g_layer_norm,
     )
     model.set_rules(rules)
 
@@ -179,11 +181,12 @@ def save_trial_summary(trial_args, trial_save_path, best_valid_mrr, best_iter, s
         "early_stopped": early_stopped,
         "stage2_params": {
             "g_num_layers": trial_args.g_num_layers,
-            "g_dropout_rule": trial_args.g_dropout_rule,
-            "g_dropout_sem": trial_args.g_dropout_sem,
-            "g_dropout_fusion": trial_args.g_dropout_fusion,
+            "g_hidden_dim": trial_args.g_hidden_dim,
+            "g_message_hidden_dim": trial_args.g_message_hidden_dim,
+            "g_attn_dim": trial_args.g_attn_dim,
+            "g_dropout": trial_args.g_dropout,
             "g_activation": trial_args.g_activation,
-            "g_scorer_hidden_dim": trial_args.g_scorer_hidden_dim,
+            "g_layer_norm": trial_args.g_layer_norm,
             "g_lr": trial_args.g_lr,
             "weight_decay": trial_args.weight_decay,
             "smoothing": trial_args.smoothing,

@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging, math
 from layers import MLP, FuncToNodeSum
+from torch_scatter import scatter
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -23,11 +24,12 @@ class RulE(torch.nn.Module):
         dataset,
         reasoner_type='dual_pathway',
         g_num_layers=2,
-        g_dropout_rule=0.1,
-        g_dropout_sem=0.1,
-        g_dropout_fusion=0.1,
+        g_hidden_dim=128,
+        g_message_hidden_dim=128,
+        g_attn_dim=64,
+        g_dropout=0.1,
         g_activation='relu',
-        g_scorer_hidden_dim=64,
+        g_layer_norm=False,
     ):
         super(RulE, self).__init__()
         self.graph = graph
@@ -103,25 +105,42 @@ class RulE(torch.nn.Module):
 
         self.reasoner_type = reasoner_type
         self.g_num_layers = g_num_layers
+        self.g_hidden_dim = g_hidden_dim
+        self.g_message_hidden_dim = g_message_hidden_dim
+        self.g_attn_dim = g_attn_dim
         self.g_activation = getattr(F, g_activation)
+        self.g_layer_norm = g_layer_norm
         self.rule_confidence = None
 
         self.rule_memory_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
-
-        self.semantic_relation_mlps = nn.ModuleList(
-            [MLP(self.hidden_dim * 2, [self.hidden_dim, 1], activation=g_activation, dropout=g_dropout_sem) for _ in range(self.g_num_layers)]
+        self.query_seed_proj = nn.Linear(self.hidden_dim, self.g_hidden_dim, bias=False)
+        self.message_node_projs = nn.ModuleList(
+            [nn.Linear(self.g_hidden_dim, self.g_message_hidden_dim, bias=False) for _ in range(self.g_num_layers)]
         )
-        self.rule_relation_mlps = nn.ModuleList(
-            [MLP(self.hidden_dim * 2, [self.hidden_dim, 1], activation=g_activation, dropout=g_dropout_rule) for _ in range(self.g_num_layers)]
+        self.message_relation_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.g_message_hidden_dim, bias=False) for _ in range(self.g_num_layers)]
         )
-        self.fusion_gate_layers = nn.ModuleList([nn.Linear(3, 1) for _ in range(self.g_num_layers)])
-        self.fusion_query_layers = nn.ModuleList([nn.Linear(self.hidden_dim, 1) for _ in range(self.g_num_layers)])
-
-        scorer_dims = [g_scorer_hidden_dim, 1] if g_scorer_hidden_dim > 0 else [1]
-        self.reasoner_support_scorer = MLP(3, scorer_dims, activation=g_activation, dropout=g_dropout_fusion)
-        self.reasoner_sem_dropout = nn.Dropout(g_dropout_sem) if g_dropout_sem > 0 else None
-        self.reasoner_rule_dropout = nn.Dropout(g_dropout_rule) if g_dropout_rule > 0 else None
-        self.reasoner_fusion_dropout = nn.Dropout(g_dropout_fusion) if g_dropout_fusion > 0 else None
+        self.attn_source_projs = nn.ModuleList(
+            [nn.Linear(self.g_hidden_dim, self.g_attn_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.attn_relation_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.g_attn_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.attn_query_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.g_attn_dim) for _ in range(self.g_num_layers)]
+        )
+        self.attn_score_layers = nn.ModuleList(
+            [nn.Linear(self.g_attn_dim, 1) for _ in range(self.g_num_layers)]
+        )
+        self.message_output_projs = nn.ModuleList(
+            [nn.Linear(self.g_message_hidden_dim, self.g_hidden_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.reasoner_gru = nn.GRU(self.g_hidden_dim, self.g_hidden_dim)
+        self.reasoner_support_scorer = MLP(self.g_hidden_dim, [1], activation=g_activation, dropout=g_dropout)
+        self.reasoner_dropout = nn.Dropout(g_dropout) if g_dropout > 0 else None
+        self.reasoner_layer_norms = None
+        if self.g_layer_norm:
+            self.reasoner_layer_norms = nn.ModuleList([nn.LayerNorm(self.g_hidden_dim) for _ in range(self.g_num_layers)])
         self.reasoner_kge_scale = nn.Parameter(torch.tensor(1.0))
         self.reasoner_support_scale = nn.Parameter(torch.tensor(1.0))
         self.kge_cache_scores = None
@@ -321,7 +340,7 @@ class RulE(torch.nn.Module):
         # cal_mask = (~mask).unsqueeze(1).unsqueeze(-1)
         rule_len = mask.sum(-1).unsqueeze(1).unsqueeze(-1)
         cal_mask = mask.unsqueeze(1).unsqueeze(-1)
-        relations_flag = torch.pow(-1,inputs // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(inputs, self.num_relations, rounding_mode='floor')).unsqueeze(-1)
         inputs_com = inputs % self.num_relations
 
         inputs_com = torch.where(inputs==self.num_relations * 2, self.padding_index, inputs_com)
@@ -333,7 +352,7 @@ class RulE(torch.nn.Module):
         
         # rule_head
         embedding_r = self.relation_embedding(rules[:,:,1]%self.num_relations)
-        relations_flag = torch.pow(-1,rules[:,:,1] // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(rules[:,:,1], self.num_relations, rounding_mode='floor')).unsqueeze(-1)
         embedding_r *= relations_flag
 
         rule_body = embedding * cal_mask
@@ -356,7 +375,7 @@ class RulE(torch.nn.Module):
         # cal_mask = (~mask).unsqueeze(1).unsqueeze(-1)
         rule_len = mask.sum(-1).unsqueeze(1).unsqueeze(-1)
         cal_mask = mask.unsqueeze(1).unsqueeze(-1)
-        relations_flag = torch.pow(-1,inputs // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(inputs, self.num_relations, rounding_mode='floor')).unsqueeze(-1)
         inputs_com = inputs % self.num_relations
 
         inputs_com = torch.where(inputs==self.num_relations * 2, self.padding_index, inputs_com)
@@ -368,7 +387,7 @@ class RulE(torch.nn.Module):
         
         # rule_head
         embedding_r = self.relation_embedding(rules[:,:,1]%self.num_relations)
-        relations_flag = torch.pow(-1,rules[:,:,1] // (self.num_relations)).unsqueeze(-1)
+        relations_flag = torch.pow(-1, torch.div(rules[:,:,1], self.num_relations, rounding_mode='floor')).unsqueeze(-1)
         embedding_r *= relations_flag
 
         rule_body = embedding * cal_mask
@@ -390,8 +409,11 @@ class RulE(torch.nn.Module):
         return relation * sign.unsqueeze(-1)
 
     def normalize_support(self, support):
-        scale = support.abs().amax(dim=0, keepdim=True).clamp(min=1.0)
+        scale = support.norm(p=2, dim=-1, keepdim=True).amax(dim=0, keepdim=True).clamp(min=1.0)
         return support / scale
+
+    def apply_support_layer_norm(self, support, layer_norm):
+        return layer_norm(support)
 
     def precompute_rule_confidence(self, device):
         self.rule_masks = self.rule_masks.to(device)
@@ -528,13 +550,14 @@ class RulE(torch.nn.Module):
             if cache_dir is not None:
                 self.prepare_kge_cache(cache_dir, checkpoint_path, device, kge_batch_size)
 
-    def build_query_rule_memory(self, query_r, device):
+    def build_query_rule_states(self, query_r, device):
         relation_ids = torch.arange(self.total_relations, device=device)
-        relation_memory = self.get_signed_relation_embedding(relation_ids)
+        base_relation_repr = self.get_signed_relation_embedding(relation_ids)
+        rule_states = base_relation_repr.unsqueeze(0).repeat(self.g_num_layers, 1, 1)
         query_rules = self.relation2rules[query_r]
 
         if len(query_rules) == 0:
-            return relation_memory
+            return rule_states
 
         rule_ids = torch.tensor([index for index, _ in query_rules], dtype=torch.long, device=device)
         if self.rule_confidence is None or self.rule_confidence.device != device:
@@ -543,85 +566,124 @@ class RulE(torch.nn.Module):
         confidence = self.rule_confidence[rule_ids]
         confidence = confidence / confidence.sum().clamp(min=1e-8)
         projected_rule_emb = self.rule_memory_proj(self.rule_emb(rule_ids))
-        updates = torch.zeros_like(relation_memory)
 
-        for weight, rule_feature, (_, body) in zip(confidence, projected_rule_emb, query_rules):
-            for relation in set(body[1]):
-                updates[relation] = updates[relation] + weight * rule_feature
+        for weight, rule_feature, (_, (rule_head, rule_body)) in zip(confidence, projected_rule_emb, query_rules):
+            del rule_head
+            for hop_id, relation_id in enumerate(rule_body[:self.g_num_layers]):
+                rule_states[hop_id, relation_id] = rule_states[hop_id, relation_id] + weight * rule_feature
 
-        return relation_memory + updates
+        return rule_states
 
-    def compute_channel_weights(self, query_emb, relation_repr, layer_id, channel='semantic'):
-        query_expand = query_emb.unsqueeze(0).expand(relation_repr.size(0), -1)
-        feature = torch.cat([relation_repr, query_expand], dim=-1)
+    def init_query_hidden(self, all_h, all_r):
+        device = all_h.device
+        batch_size = all_h.size(0)
+        query_emb = self.get_signed_relation_embedding(all_r)
+        seed_hidden = self.query_seed_proj(query_emb)
+        hidden = torch.zeros(self.num_entities, batch_size, self.g_hidden_dim, device=device)
+        batch_index = torch.arange(batch_size, device=device)
+        hidden[all_h, batch_index] = seed_hidden
+        return hidden, query_emb
 
-        if channel == 'semantic':
-            logits = self.semantic_relation_mlps[layer_id](feature).squeeze(-1)
-        else:
-            logits = self.rule_relation_mlps[layer_id](feature).squeeze(-1)
+    def get_relation_edges(self, relation_id, device):
+        if self.graph.cached_adjacency is not None and self.graph.cached_adjacency_device == device:
+            return self.graph.cached_adjacency[relation_id]
 
-        return torch.softmax(logits, dim=0)
+        adjacency = self.graph.relation2adjacency[relation_id][0]
+        node_in = adjacency[1]
+        node_out = adjacency[0]
+        if device.type == "cuda":
+            node_in = node_in.cuda(device)
+            node_out = node_out.cuda(device)
+        return node_in, node_out
 
-    def propagate_channel(self, support, relation_weights, query_r, edges_to_remove):
-        updated = torch.zeros_like(support)
+    def apply_edge_removal_mask(self, edge_message, relation_id, query_r, edges_to_remove):
+        if relation_id != query_r or edges_to_remove is None:
+            return edge_message
+
+        if edges_to_remove.dim() == 0:
+            edges_to_remove = edges_to_remove.unsqueeze(0)
+
+        masked_message = edge_message
+        batch_index = torch.arange(masked_message.size(1), device=masked_message.device)
+        valid = (edges_to_remove >= 0) & (edges_to_remove < masked_message.size(0))
+        if valid.any():
+            masked_message[edges_to_remove[valid], batch_index[valid]] = 0
+        return masked_message
+
+    def propagate_single_path_layer(self, hidden, query_emb, relation_states, layer_id, query_r, edges_to_remove):
+        device = hidden.device
+        batch_size = hidden.size(1)
+        aggregated = torch.zeros(self.num_entities, batch_size, self.g_message_hidden_dim, device=device)
+
+        message_node_proj = self.message_node_projs[layer_id]
+        message_relation_proj = self.message_relation_projs[layer_id]
+        attn_source_proj = self.attn_source_projs[layer_id]
+        attn_relation_proj = self.attn_relation_projs[layer_id]
+        attn_query = self.attn_query_projs[layer_id](query_emb).unsqueeze(0)
+        attn_score_layer = self.attn_score_layers[layer_id]
+
         for relation_id in range(self.total_relations):
-            edge_mask = edges_to_remove if (edges_to_remove is not None and relation_id == query_r) else None
-            propagated = self.graph.propagate(support, relation_id, edge_mask)
-            updated = updated + relation_weights[relation_id] * propagated
-        return updated
+            node_in, node_out = self.get_relation_edges(relation_id, device)
+            if node_in.numel() == 0:
+                continue
+
+            source_hidden = hidden[node_in]
+            relation_state = relation_states[relation_id]
+
+            edge_message = message_node_proj(source_hidden)
+            edge_message = edge_message * message_relation_proj(relation_state).view(1, 1, -1)
+
+            attn_input = (
+                attn_source_proj(source_hidden)
+                + attn_relation_proj(relation_state).view(1, 1, -1)
+                + attn_query
+            )
+            edge_alpha = torch.sigmoid(attn_score_layer(self.g_activation(attn_input)))
+            edge_message = edge_alpha * edge_message
+            edge_message = self.apply_edge_removal_mask(edge_message, relation_id, query_r, edges_to_remove)
+
+            aggregated = aggregated + scatter(edge_message, node_out, dim=0, dim_size=self.num_entities, reduce='sum')
+
+        active_mask = (aggregated.abs().sum(dim=-1, keepdim=True) > 0).float()
+
+        updated = self.message_output_projs[layer_id](aggregated)
+        updated = self.g_activation(updated)
+        if self.reasoner_dropout is not None:
+            updated = self.reasoner_dropout(updated)
+
+        updated_flat = updated.reshape(1, -1, self.g_hidden_dim)
+        hidden_flat = hidden.reshape(1, -1, self.g_hidden_dim)
+        updated_hidden, _ = self.reasoner_gru(updated_flat, hidden_flat)
+        updated_hidden = updated_hidden.reshape(self.num_entities, batch_size, self.g_hidden_dim)
+        updated_hidden = updated_hidden * active_mask
+
+        if self.reasoner_layer_norms is not None:
+            updated_hidden = self.apply_support_layer_norm(updated_hidden, self.reasoner_layer_norms[layer_id])
+
+        return self.normalize_support(updated_hidden)
 
     def forward_dual_pathway(self, all_h, all_r, edges_to_remove):
+        if (all_r != all_r[0]).any():
+            raise ValueError('dual_pathway expects one query relation per batch')
+
         query_r = all_r[0].item()
         device = all_r.device
         batch_size = all_h.size(0)
 
-        query_emb = self.get_signed_relation_embedding(all_r[:1]).squeeze(0)
-        base_relation_repr = self.get_signed_relation_embedding(torch.arange(self.total_relations, device=device))
-        query_rule_memory = self.build_query_rule_memory(query_r, device)
-
-        fused_support = torch.nn.functional.one_hot(all_h, self.graph.entity_size).transpose(0, 1).unsqueeze(-1).float()
-        if device.type == "cuda":
-            fused_support = fused_support.cuda(device)
-
-        semantic_support = fused_support.clone()
-        rule_support = fused_support.clone()
+        hidden, query_emb = self.init_query_hidden(all_h, all_r)
+        query_rule_states = self.build_query_rule_states(query_r, device)
 
         for layer_id in range(self.g_num_layers):
-            semantic_weights = self.compute_channel_weights(query_emb, base_relation_repr, layer_id, channel='semantic')
-            rule_weights = self.compute_channel_weights(query_emb, query_rule_memory, layer_id, channel='rule')
+            hidden = self.propagate_single_path_layer(
+                hidden,
+                query_emb,
+                query_rule_states[layer_id],
+                layer_id,
+                query_r,
+                edges_to_remove,
+            )
 
-            semantic_support = self.propagate_channel(fused_support, semantic_weights, query_r, edges_to_remove)
-            rule_support = self.propagate_channel(fused_support, rule_weights, query_r, edges_to_remove)
-
-            semantic_support = self.g_activation(semantic_support + fused_support)
-            rule_support = self.g_activation(rule_support + fused_support)
-
-            if self.reasoner_sem_dropout is not None:
-                semantic_support = self.reasoner_sem_dropout(semantic_support)
-            if self.reasoner_rule_dropout is not None:
-                rule_support = self.reasoner_rule_dropout(rule_support)
-
-            gate_feature = torch.cat([semantic_support, rule_support, semantic_support - rule_support], dim=-1)
-            gate_bias = self.fusion_query_layers[layer_id](query_emb).view(1, 1, 1)
-            gate = torch.sigmoid(self.fusion_gate_layers[layer_id](gate_feature) + gate_bias)
-            fused_support = gate * semantic_support + (1.0 - gate) * rule_support
-
-            if self.reasoner_fusion_dropout is not None:
-                fused_support = self.reasoner_fusion_dropout(fused_support)
-
-            semantic_support = self.normalize_support(semantic_support)
-            rule_support = self.normalize_support(rule_support)
-            fused_support = self.normalize_support(fused_support)
-
-        support_feature = torch.cat(
-            [
-                semantic_support.permute(1, 0, 2),
-                rule_support.permute(1, 0, 2),
-                fused_support.permute(1, 0, 2),
-            ],
-            dim=-1,
-        )
-        support_score = self.reasoner_support_scorer(support_feature).squeeze(-1)
+        support_score = self.reasoner_support_scorer(hidden.permute(1, 0, 2)).squeeze(-1)
         kge_score = self.get_query_kge_score(all_h, all_r)
         score = self.reasoner_kge_scale * kge_score + self.reasoner_support_scale * support_score + self.bias.unsqueeze(0)
         mask = torch.ones(batch_size, self.graph.entity_size, device=device).bool()
@@ -630,10 +692,10 @@ class RulE(torch.nn.Module):
     
 
     def forward(self, all_h, all_r, edges_to_remove):
-        if self.reasoner_type == 'dual_pathway':
-            return self.forward_dual_pathway(all_h, all_r, edges_to_remove)
+        if self.reasoner_type == 'grounding':
+            return self.forward_grounding(all_h, all_r, edges_to_remove)
 
-        return self.forward_grounding(all_h, all_r, edges_to_remove)
+        return self.forward_dual_pathway(all_h, all_r, edges_to_remove)
 
     def forward_grounding(self, all_h, all_r, edges_to_remove):
         query_r = all_r[0].item()
