@@ -104,6 +104,10 @@ def build_parser():
     parser.add_argument('--g_activation', default='relu', type=str)
     parser.add_argument('--g_layer_norm', default=False, type=str2bool)
     parser.add_argument('--g_readout', default='multiply', type=str, choices=['linear', 'multiply'])
+    parser.add_argument('--rule_tf_layers', default=1, type=int)
+    parser.add_argument('--rule_num_heads', default=4, type=int)
+    parser.add_argument('--rule_dropout', default=0.1, type=float)
+    parser.add_argument('--rule_ffn_dim', default=512, type=int)
     parser.add_argument('--scheduler', default='plateau', type=str, choices=['none', 'plateau'])
     parser.add_argument('--scheduler_patience', default=2, type=int)
     parser.add_argument('--scheduler_factor', default=0.5, type=float)
@@ -195,7 +199,10 @@ def main():
         g_activation=args.g_activation,
         g_layer_norm=args.g_layer_norm,
         g_readout=args.g_readout,
-        reasoner_alpha=args.alpha,
+        rule_tf_layers=args.rule_tf_layers,
+        rule_num_heads=args.rule_num_heads,
+        rule_dropout=args.rule_dropout,
+        rule_ffn_dim=args.rule_ffn_dim,
     )
     RulE_model.set_rules(rules)
 

@@ -472,9 +472,6 @@ class GroundTrainer(object):
         test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
         if self.model.reasoner_type == 'grounding':
             test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
-        else:
-            logging.info('Skip test_kge evaluation for %s reasoner because KGE is already fused in the model score.',
-                         self.model.reasoner_type)
 
 
        

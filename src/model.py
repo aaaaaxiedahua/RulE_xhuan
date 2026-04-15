@@ -31,7 +31,10 @@ class RulE(torch.nn.Module):
         g_activation='relu',
         g_layer_norm=False,
         g_readout='multiply',
-        reasoner_alpha=5.0,
+        rule_tf_layers=1,
+        rule_num_heads=4,
+        rule_dropout=0.1,
+        rule_ffn_dim=512,
     ):
         super(RulE, self).__init__()
         self.graph = graph
@@ -113,25 +116,34 @@ class RulE(torch.nn.Module):
         self.g_activation = getattr(F, g_activation)
         self.g_layer_norm = g_layer_norm
         self.g_readout = g_readout
-        self.reasoner_alpha = float(reasoner_alpha)
+        self.rule_tf_layers = int(rule_tf_layers)
+        self.rule_num_heads = int(rule_num_heads)
+        self.rule_dropout = float(rule_dropout)
+        self.rule_ffn_dim = int(rule_ffn_dim)
+        if self.g_hidden_dim % self.rule_num_heads != 0:
+            raise ValueError('g_hidden_dim must be divisible by rule_num_heads')
         self.rule_confidence = None
 
-        self.rule_memory_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
         self.query_seed_proj = nn.Linear(self.hidden_dim, self.g_hidden_dim, bias=False)
         self.head_context_proj = nn.Linear(self.hidden_dim * 2, self.hidden_dim, bias=False)
-        self.rule_score_rule_projs = nn.ModuleList(
-            [nn.Linear(self.hidden_dim, self.g_attn_dim, bias=False) for _ in range(self.g_num_layers)]
-        )
-        self.rule_score_query_projs = nn.ModuleList(
-            [nn.Linear(self.hidden_dim, self.g_attn_dim, bias=False) for _ in range(self.g_num_layers)]
-        )
-        self.rule_score_head_projs = nn.ModuleList(
-            [nn.Linear(self.hidden_dim, self.g_attn_dim, bias=False) for _ in range(self.g_num_layers)]
-        )
-        self.rule_score_layers = nn.ModuleList(
-            [nn.Linear(self.g_attn_dim, 1) for _ in range(self.g_num_layers)]
-        )
+        self.rule_input_proj = nn.Linear(self.hidden_dim, self.g_hidden_dim, bias=False)
+        self.rule_query_proj = nn.Linear(self.hidden_dim, self.g_hidden_dim, bias=False)
+        self.rule_head_proj = nn.Linear(self.hidden_dim, self.g_hidden_dim, bias=False)
+        self.rule_context_proj = nn.Linear(self.g_hidden_dim, self.hidden_dim, bias=False)
+        self.rule_selector = MLP(self.g_hidden_dim * 3, [self.g_attn_dim, 1], activation=g_activation, dropout=rule_dropout)
         self.rule_confidence_scale = nn.Parameter(torch.tensor(1.0))
+        self.rule_relation_gate_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.hidden_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.rule_query_gate_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.hidden_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.rule_head_gate_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.hidden_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
+        self.rule_context_gate_projs = nn.ModuleList(
+            [nn.Linear(self.hidden_dim, self.hidden_dim, bias=False) for _ in range(self.g_num_layers)]
+        )
         self.message_node_projs = nn.ModuleList(
             [nn.Linear(self.g_hidden_dim, self.g_message_hidden_dim, bias=False) for _ in range(self.g_num_layers)]
         )
@@ -162,6 +174,9 @@ class RulE(torch.nn.Module):
         self.kge_cache_scores = None
         self.kge_cache_row_index = None
         self.kge_cache_meta = None
+        self.rule_position_embedding = None
+        self.rule_transformer = None
+        self.rule_cross_attn = None
 
         # # Initialize to 1
         # nn.init.zeros_(
@@ -239,6 +254,23 @@ class RulE(torch.nn.Module):
         #     a=-self.embedding_range_rule.item(), 
         #     b=self.embedding_range_rule.item()
         # )
+        self.rule_position_embedding = nn.Embedding(self.max_length, self.g_hidden_dim)
+        transformer_activation = 'gelu' if self.g_activation == F.gelu else 'relu'
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.g_hidden_dim,
+            nhead=self.rule_num_heads,
+            dim_feedforward=self.rule_ffn_dim,
+            dropout=self.rule_dropout,
+            activation=transformer_activation,
+            batch_first=True,
+        )
+        self.rule_transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.rule_tf_layers)
+        self.rule_cross_attn = nn.MultiheadAttention(
+            embed_dim=self.g_hidden_dim,
+            num_heads=self.rule_num_heads,
+            dropout=self.rule_dropout,
+            batch_first=True,
+        )
         
        
     def compute_ruleE(self, sample, mode='single'):
@@ -451,6 +483,49 @@ class RulE(torch.nn.Module):
             score, _ = self.add_ruleE(self.rule_features.unsqueeze(1), self.rule_masks)
             self.rule_confidence = torch.sigmoid(score.squeeze(1)).detach()
 
+    def encode_query_rules(self, rule_ids, query_emb, head_context, confidence, device):
+        if self.rule_transformer is None or self.rule_cross_attn is None:
+            raise RuntimeError('set_rules must be called before encoding query rules')
+        batch_size = query_emb.size(0)
+        num_rules = rule_ids.size(0)
+
+        rule_bodies = self.rule_features[rule_ids][:, 2:]
+        rule_mask = self.rule_masks[rule_ids]
+        rule_body_emb = self.get_signed_relation_embedding(rule_bodies)
+
+        positions = torch.arange(self.max_length, device=device)
+        position_emb = self.rule_position_embedding(positions).unsqueeze(0)
+        rule_inputs = self.rule_input_proj(rule_body_emb) + position_emb
+        encoded_rules = self.rule_transformer(rule_inputs, src_key_padding_mask=~rule_mask)
+
+        expanded_rules = encoded_rules.unsqueeze(0).expand(batch_size, num_rules, self.max_length, self.g_hidden_dim)
+        expanded_rules = expanded_rules.reshape(batch_size * num_rules, self.max_length, self.g_hidden_dim)
+        query_tokens = self.rule_query_proj(query_emb).unsqueeze(1).expand(batch_size, num_rules, self.g_hidden_dim)
+        query_tokens = query_tokens.reshape(batch_size * num_rules, 1, self.g_hidden_dim)
+        key_padding_mask = (~rule_mask).unsqueeze(0).expand(batch_size, num_rules, self.max_length)
+        key_padding_mask = key_padding_mask.reshape(batch_size * num_rules, self.max_length)
+
+        cross_output, _ = self.rule_cross_attn(
+            query_tokens,
+            expanded_rules,
+            expanded_rules,
+            key_padding_mask=key_padding_mask,
+        )
+        rule_summary = cross_output.squeeze(1).reshape(batch_size, num_rules, self.g_hidden_dim)
+
+        selector_input = torch.cat(
+            [
+                rule_summary,
+                self.rule_query_proj(query_emb).unsqueeze(1).expand(batch_size, num_rules, self.g_hidden_dim),
+                self.rule_head_proj(head_context).unsqueeze(1).expand(batch_size, num_rules, self.g_hidden_dim),
+            ],
+            dim=-1,
+        )
+        compat = self.rule_selector(selector_input).squeeze(-1)
+        rule_weight = self.sparsemax(compat + self.rule_confidence_scale * confidence, dim=-1)
+
+        return rule_summary, rule_weight
+
     def get_kge_cache_paths(self, cache_dir):
         return {
             "score": os.path.join(cache_dir, "query_kge_scores.fp16"),
@@ -594,24 +669,27 @@ class RulE(torch.nn.Module):
             self.precompute_rule_confidence(device)
 
         confidence = self.rule_confidence[rule_ids].unsqueeze(0).expand(batch_size, -1)
-        rule_emb = self.rule_emb(rule_ids)
-        projected_rule_emb = self.rule_memory_proj(self.rule_emb(rule_ids))
+        rule_summary, rule_weight = self.encode_query_rules(rule_ids, query_emb, head_context, confidence, device)
 
-        compat = self.rule_score_layers[layer_id](
-            self.g_activation(
-                self.rule_score_rule_projs[layer_id](rule_emb).unsqueeze(0)
-                + self.rule_score_query_projs[layer_id](query_emb).unsqueeze(1)
-                + self.rule_score_head_projs[layer_id](head_context).unsqueeze(1)
-            )
-        ).squeeze(-1)
-        rule_weight = self.sparsemax(compat + self.rule_confidence_scale * confidence, dim=-1)
+        query_rule_context = torch.bmm(rule_weight.unsqueeze(1), rule_summary).squeeze(1)
+        projected_context = self.rule_context_proj(query_rule_context)
+        relation_mass = torch.zeros(batch_size, self.total_relations, device=device)
 
-        for rule_offset, (rule_feature, (_, (rule_head, rule_body))) in enumerate(zip(projected_rule_emb, query_rules)):
+        for rule_offset, (_, (rule_head, rule_body)) in enumerate(query_rules):
             del rule_head
-            if layer_id >= len(rule_body):
+            if len(rule_body) == 0:
                 continue
-            relation_id = rule_body[layer_id]
-            rule_states[relation_id] = rule_states[relation_id] + rule_weight[:, rule_offset].unsqueeze(-1) * rule_feature.unsqueeze(0)
+            step_weight = rule_weight[:, rule_offset] / float(len(rule_body))
+            for relation_id in rule_body:
+                relation_mass[:, relation_id] += step_weight
+
+        gate = torch.sigmoid(
+            self.rule_relation_gate_projs[layer_id](base_relation_repr).unsqueeze(1)
+            + self.rule_query_gate_projs[layer_id](query_emb).unsqueeze(0)
+            + self.rule_head_gate_projs[layer_id](head_context).unsqueeze(0)
+            + self.rule_context_gate_projs[layer_id](projected_context).unsqueeze(0)
+        )
+        rule_states = rule_states + relation_mass.transpose(0, 1).unsqueeze(-1) * gate * projected_context.unsqueeze(0)
 
         return rule_states
 
@@ -732,8 +810,7 @@ class RulE(torch.nn.Module):
             support_score = (hidden_batch * anchor_hidden.unsqueeze(1)).sum(dim=-1)
         else:
             support_score = self.reasoner_support_scorer(hidden_batch).squeeze(-1)
-        kge_score = self.get_query_kge_score(all_h, all_r)
-        score = support_score + self.reasoner_alpha * kge_score + self.bias.unsqueeze(0)
+        score = support_score + self.bias.unsqueeze(0)
         mask = torch.ones(batch_size, self.graph.entity_size, device=device).bool()
 
         return score, mask
