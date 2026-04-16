@@ -95,19 +95,18 @@ def build_parser():
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
-    parser.add_argument('--reasoner_type', default='dual_pathway', type=str, choices=['grounding', 'dual_pathway', 'single_pathway'])
+    parser.add_argument('--reasoner_type', default='gnn', type=str, choices=['grounding', 'gnn'])
     parser.add_argument('--g_num_layers', default=2, type=int)
     parser.add_argument('--g_hidden_dim', default=128, type=int)
-    parser.add_argument('--g_message_hidden_dim', default=128, type=int)
-    parser.add_argument('--g_attn_dim', default=64, type=int)
     parser.add_argument('--g_dropout', default=0.1, type=float)
     parser.add_argument('--g_activation', default='relu', type=str)
-    parser.add_argument('--g_layer_norm', default=False, type=str2bool)
-    parser.add_argument('--g_readout', default='multiply', type=str, choices=['linear', 'multiply'])
     parser.add_argument('--rule_tf_layers', default=1, type=int)
     parser.add_argument('--rule_num_heads', default=4, type=int)
     parser.add_argument('--rule_dropout', default=0.1, type=float)
     parser.add_argument('--rule_ffn_dim', default=512, type=int)
+    parser.add_argument('--conve_num_filters', default=32, type=int)
+    parser.add_argument('--conve_kernel_size', default=3, type=int)
+    parser.add_argument('--conve_dropout', default=0.2, type=float)
     parser.add_argument('--scheduler', default='plateau', type=str, choices=['none', 'plateau'])
     parser.add_argument('--scheduler_patience', default=2, type=int)
     parser.add_argument('--scheduler_factor', default=0.5, type=float)
@@ -148,6 +147,10 @@ def main():
         for key, value in loaded_args.items():
             if key not in explicit_cli_dests:
                 setattr(args, key, value)
+    if hasattr(args, 'rule_conf_lambda'):
+        delattr(args, 'rule_conf_lambda')
+    if getattr(args, 'reasoner_type', None) in {'dual_pathway', 'single_pathway'}:
+        args.reasoner_type = 'gnn'
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -193,16 +196,15 @@ def main():
         reasoner_type=args.reasoner_type,
         g_num_layers=args.g_num_layers,
         g_hidden_dim=args.g_hidden_dim,
-        g_message_hidden_dim=args.g_message_hidden_dim,
-        g_attn_dim=args.g_attn_dim,
         g_dropout=args.g_dropout,
         g_activation=args.g_activation,
-        g_layer_norm=args.g_layer_norm,
-        g_readout=args.g_readout,
         rule_tf_layers=args.rule_tf_layers,
         rule_num_heads=args.rule_num_heads,
         rule_dropout=args.rule_dropout,
         rule_ffn_dim=args.rule_ffn_dim,
+        conve_num_filters=args.conve_num_filters,
+        conve_kernel_size=args.conve_kernel_size,
+        conve_dropout=args.conve_dropout,
     )
     RulE_model.set_rules(rules)
 

@@ -388,8 +388,8 @@ class GroundTrainer(object):
         
         # fix the parameters of pre-training
 
-        self.model.entity_embedding.weight.requires_grad = False
-        self.model.relation_embedding.weight.requires_grad = False
+        self.model.entity_embedding.weight.requires_grad = self.model.reasoner_type != 'grounding'
+        self.model.relation_embedding.weight.requires_grad = self.model.reasoner_type != 'grounding'
         self.model.rule_emb.weight.requires_grad = False
 
 
@@ -470,8 +470,7 @@ class GroundTrainer(object):
         
         test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
         test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
-        if self.model.reasoner_type == 'grounding':
-            test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
+        test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
 
 
        
@@ -510,14 +509,17 @@ class GroundTrainer(object):
                 edges_to_remove = edges_to_remove.cuda(device=self.device)
                 target_t = target_t.cuda(device=self.device)
 
-            target = target * smoothing + target_t * (1 - smoothing)
-            
             grounding_rule_score, mask = model(all_h, all_r, edges_to_remove)
             
             if mask.sum().item() != 0:
-                rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
-                
-                loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
+                if model.reasoner_type == 'grounding':
+                    target = target * smoothing + target_t * (1 - smoothing)
+                    rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
+                    loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
+                else:
+                    if smoothing > 0:
+                        target = target * (1 - smoothing) + 0.5 * smoothing
+                    loss = F.binary_cross_entropy_with_logits(grounding_rule_score[mask], target[mask])
                 loss.backward()
 
                 optimizer.step()

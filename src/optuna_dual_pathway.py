@@ -25,7 +25,7 @@ REPO_ROOT = os.path.dirname(SRC_DIR)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Optuna search for stage-2 single-channel rule-conditioned GNN")
+    parser = argparse.ArgumentParser(description="Optuna search for stage-2 TCRA-style GNN")
     parser.add_argument("--stage1_dir", required=True, type=str,
                         help="Directory containing the fixed stage-1 checkpoint and config.json")
     parser.add_argument("--study_name", default="dual_pathway_search", type=str)
@@ -68,11 +68,15 @@ def load_stage1_args(cli_args):
     loaded_args = load_config(config_path)[0]
     for key, value in loaded_args.items():
         setattr(args, key, value)
+    if hasattr(args, "rule_conf_lambda"):
+        delattr(args, "rule_conf_lambda")
 
     args.data_path = resolve_src_relative(args.data_path)
     args.rule_file = resolve_src_relative(args.rule_file)
     args.init_checkpoint_config = ""
-    args.reasoner_type = "single_pathway"
+    if getattr(args, "reasoner_type", None) in {"dual_pathway", "single_pathway"}:
+        args.reasoner_type = "gnn"
+    args.reasoner_type = "gnn"
     args.save_path = cli_args.stage1_dir
     return args
 
@@ -90,19 +94,18 @@ def build_default_storage_url(save_root, dataset_name, study_name):
 
 def sample_stage2_params(trial, base_args):
     trial_args = copy.deepcopy(base_args)
-    trial_args.reasoner_type = "single_pathway"
+    trial_args.reasoner_type = "gnn"
     trial_args.g_num_layers = trial.suggest_int("g_num_layers", 2, 8)
     trial_args.g_hidden_dim = trial.suggest_categorical("g_hidden_dim", [64, 128, 256, 512])
-    trial_args.g_message_hidden_dim = trial.suggest_categorical("g_message_hidden_dim", [64, 128, 256, 512])
-    trial_args.g_attn_dim = trial.suggest_categorical("g_attn_dim", [32, 64, 128, 256])
     trial_args.g_dropout = trial.suggest_float("g_dropout", 0.0, 0.5, step=0.05)
     trial_args.g_activation = trial.suggest_categorical("g_activation", ["relu", "gelu", "tanh"])
-    trial_args.g_layer_norm = trial.suggest_categorical("g_layer_norm", [False, True])
-    trial_args.g_readout = trial.suggest_categorical("g_readout", ["multiply", "linear"])
     trial_args.rule_tf_layers = trial.suggest_categorical("rule_tf_layers", [1, 2, 3])
     trial_args.rule_num_heads = trial.suggest_categorical("rule_num_heads", [2, 4, 8])
     trial_args.rule_dropout = trial.suggest_float("rule_dropout", 0.0, 0.2, step=0.05)
     trial_args.rule_ffn_dim = trial.suggest_categorical("rule_ffn_dim", [128, 256, 512, 1024])
+    trial_args.conve_num_filters = trial.suggest_categorical("conve_num_filters", [16, 32, 64, 128])
+    trial_args.conve_kernel_size = trial.suggest_categorical("conve_kernel_size", [2, 3, 5])
+    trial_args.conve_dropout = trial.suggest_float("conve_dropout", 0.0, 0.5, step=0.05)
     trial_args.g_lr = trial.suggest_categorical("g_lr", [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1])
     trial_args.weight_decay = trial.suggest_categorical("weight_decay", [0.0, 1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3])
     trial_args.smoothing = trial.suggest_float("smoothing", 0.0, 0.5, step=0.05)
@@ -130,16 +133,15 @@ def build_stage2_components(args, device):
         reasoner_type=args.reasoner_type,
         g_num_layers=args.g_num_layers,
         g_hidden_dim=args.g_hidden_dim,
-        g_message_hidden_dim=args.g_message_hidden_dim,
-        g_attn_dim=args.g_attn_dim,
         g_dropout=args.g_dropout,
         g_activation=args.g_activation,
-        g_layer_norm=args.g_layer_norm,
-        g_readout=args.g_readout,
         rule_tf_layers=args.rule_tf_layers,
         rule_num_heads=args.rule_num_heads,
         rule_dropout=args.rule_dropout,
         rule_ffn_dim=args.rule_ffn_dim,
+        conve_num_filters=args.conve_num_filters,
+        conve_kernel_size=args.conve_kernel_size,
+        conve_dropout=args.conve_dropout,
     )
     model.set_rules(rules)
 
@@ -192,16 +194,15 @@ def save_trial_summary(trial_args, trial_save_path, best_valid_mrr, best_iter, s
         "stage2_params": {
             "g_num_layers": trial_args.g_num_layers,
             "g_hidden_dim": trial_args.g_hidden_dim,
-            "g_message_hidden_dim": trial_args.g_message_hidden_dim,
-            "g_attn_dim": trial_args.g_attn_dim,
             "g_dropout": trial_args.g_dropout,
             "g_activation": trial_args.g_activation,
-            "g_layer_norm": trial_args.g_layer_norm,
-            "g_readout": trial_args.g_readout,
             "rule_tf_layers": trial_args.rule_tf_layers,
             "rule_num_heads": trial_args.rule_num_heads,
             "rule_dropout": trial_args.rule_dropout,
             "rule_ffn_dim": trial_args.rule_ffn_dim,
+            "conve_num_filters": trial_args.conve_num_filters,
+            "conve_kernel_size": trial_args.conve_kernel_size,
+            "conve_dropout": trial_args.conve_dropout,
             "g_lr": trial_args.g_lr,
             "weight_decay": trial_args.weight_decay,
             "smoothing": trial_args.smoothing,
@@ -235,8 +236,8 @@ def build_objective(cli_args, base_args):
         model, ground_trainer = build_stage2_components(trial_args, device)
         load_stage1_checkpoint(model, stage1_checkpoint, device)
 
-        ground_trainer.model.entity_embedding.weight.requires_grad = False
-        ground_trainer.model.relation_embedding.weight.requires_grad = False
+        ground_trainer.model.entity_embedding.weight.requires_grad = True
+        ground_trainer.model.relation_embedding.weight.requires_grad = True
         ground_trainer.model.rule_emb.weight.requires_grad = False
 
         optimizer = torch.optim.Adam(
