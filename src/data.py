@@ -222,8 +222,6 @@ class RuleETestDataset(Dataset):
 class KnowledgeGraph(object):
     def __init__(self, data_path):
         self.data_path = data_path
-        self.cached_adjacency = None
-        self.cached_adjacency_device = None
 
         self.entity2id = dict()
         self.relation2id = dict()
@@ -383,23 +381,6 @@ class KnowledgeGraph(object):
 
         print("Data loading | DONE!")
 
-    def cache_adjacency(self, device):
-        if device.type != "cuda":
-            self.cached_adjacency = None
-            self.cached_adjacency_device = None
-            return
-
-        if self.cached_adjacency is not None and self.cached_adjacency_device == device:
-            return
-
-        cached_adjacency = []
-        for adjacency, _ in self.relation2adjacency:
-            adjacency = adjacency.to(device)
-            cached_adjacency.append((adjacency[1], adjacency[0]))
-
-        self.cached_adjacency = cached_adjacency
-        self.cached_adjacency_device = device
-
     def encode_hr(self, h, r):
         return r * self.entity_size + h
 
@@ -441,14 +422,11 @@ class KnowledgeGraph(object):
 
     def propagate(self, x, relation, edges_to_remove=None):
         device = x.device
-        if self.cached_adjacency is not None and self.cached_adjacency_device == device:
-            node_in, node_out = self.cached_adjacency[relation]
-        else:
-            node_in = self.relation2adjacency[relation][0][1] # h
-            node_out = self.relation2adjacency[relation][0][0] # t
-            if device.type == "cuda":
-                node_in = node_in.cuda(device)
-                node_out = node_out.cuda(device)
+        node_in = self.relation2adjacency[relation][0][1] # h
+        node_out = self.relation2adjacency[relation][0][0] # t
+        if device.type == "cuda":
+            node_in = node_in.cuda(device)
+            node_out = node_out.cuda(device)
 
         message = x[node_in]
         E, B, D = message.size()
@@ -615,3 +593,4 @@ class BidirectionalOneShotIterator(object):
         while True:
             for data in dataloader:
                 yield data
+

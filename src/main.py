@@ -1,7 +1,6 @@
 
 import logging, os, datetime
 import argparse
-import sys
 import torch
 from data import KnowledgeGraph, TrainDataset, ValidDataset, TestDataset, RuleDataset, KGETrainDataset
 from model import RulE
@@ -27,18 +26,8 @@ def formatted_rules(_rules):
         rules.append(rule)
     return rules
 
+def parse_args(args=None):
 
-def str2bool(value):
-    if isinstance(value, bool):
-        return value
-    value = value.lower()
-    if value in {"true", "1", "yes", "y"}:
-        return True
-    if value in {"false", "0", "no", "n"}:
-        return False
-    raise argparse.ArgumentTypeError("Boolean value expected.")
-
-def build_parser():
     parser = argparse.ArgumentParser(
         description='RNNLogic',
         usage='train.py [<args>] [-h | --help]'
@@ -87,7 +76,7 @@ def build_parser():
     # grounding training process
   
     parser.add_argument('--mlp_rule_dim', default=100, type=int)
-    parser.add_argument('--alpha', default=5.0, type=float, help='weight the KGE score')
+    parser.add_argument('--alpha', default=5.0, type=int, help='weight the KGE score')
     parser.add_argument('--smoothing', default=0.5, type=float)
     parser.add_argument('--batch_per_epoch', default=1000000, type=int)
     parser.add_argument('--print_every', default=1000, type=int)
@@ -95,62 +84,15 @@ def build_parser():
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
-    parser.add_argument('--reasoner_type', default='gnn', type=str, choices=['grounding', 'gnn'])
-    parser.add_argument('--g_num_layers', default=2, type=int)
-    parser.add_argument('--g_hidden_dim', default=128, type=int)
-    parser.add_argument('--g_dropout', default=0.1, type=float)
-    parser.add_argument('--g_activation', default='relu', type=str)
-    parser.add_argument('--rule_tf_layers', default=1, type=int)
-    parser.add_argument('--rule_num_heads', default=4, type=int)
-    parser.add_argument('--rule_dropout', default=0.1, type=float)
-    parser.add_argument('--rule_ffn_dim', default=512, type=int)
-    parser.add_argument('--conve_num_filters', default=32, type=int)
-    parser.add_argument('--conve_kernel_size', default=3, type=int)
-    parser.add_argument('--conve_dropout', default=0.2, type=float)
-    parser.add_argument('--scheduler', default='plateau', type=str, choices=['none', 'plateau'])
-    parser.add_argument('--scheduler_patience', default=2, type=int)
-    parser.add_argument('--scheduler_factor', default=0.5, type=float)
-    return parser
-
-
-def parse_args(args=None):
-    parser = build_parser()
     return parser.parse_args(args)
 
-
-def get_explicit_cli_dests(parser, argv):
-    option_to_dest = {}
-    for action in parser._actions:
-        for option in action.option_strings:
-            option_to_dest[option] = action.dest
-
-    explicit = set()
-    for token in argv:
-        if token == '--':
-            break
-        if token.startswith('--'):
-            option = token.split('=', 1)[0]
-            if option in option_to_dest:
-                explicit.add(option_to_dest[option])
-        elif token.startswith('-') and token in option_to_dest:
-            explicit.add(option_to_dest[token])
-    return explicit
-
 def main():
-    parser = build_parser()
-    args = parser.parse_args()
-    explicit_cli_dests = get_explicit_cli_dests(parser, sys.argv[1:])
+    args = parse_args()
 
     # read the given config
     if args.init_checkpoint_config:
-        loaded_args = load_config(args.init_checkpoint_config)[0]
-        for key, value in loaded_args.items():
-            if key not in explicit_cli_dests:
-                setattr(args, key, value)
-    if hasattr(args, 'rule_conf_lambda'):
-        delattr(args, 'rule_conf_lambda')
-    if getattr(args, 'reasoner_type', None) in {'dual_pathway', 'single_pathway'}:
-        args.reasoner_type = 'gnn'
+        args = load_config(args.init_checkpoint_config)
+        args = args[0]
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -184,28 +126,7 @@ def main():
     else:
         device = torch.device('cpu')
 
-    RulE_model = RulE(
-        graph,
-        args.p_norm,
-        args.mlp_rule_dim,
-        args.gamma_fact,
-        args.gamma_rule,
-        args.hidden_dim,
-        device,
-        args.data_path,
-        reasoner_type=args.reasoner_type,
-        g_num_layers=args.g_num_layers,
-        g_hidden_dim=args.g_hidden_dim,
-        g_dropout=args.g_dropout,
-        g_activation=args.g_activation,
-        rule_tf_layers=args.rule_tf_layers,
-        rule_num_heads=args.rule_num_heads,
-        rule_dropout=args.rule_dropout,
-        rule_ffn_dim=args.rule_ffn_dim,
-        conve_num_filters=args.conve_num_filters,
-        conve_kernel_size=args.conve_kernel_size,
-        conve_dropout=args.conve_dropout,
-    )
+    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
     RulE_model.set_rules(rules)
 
     
@@ -241,7 +162,7 @@ def main():
     # load rule embedding and KGE embedding
 
     checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
-    RulE_model.load_state_dict(checkpoint['model'],strict=False)
+    RulE_model.load_state_dict(checkpoint['model'])
     
     
     logging.info('Test the results of pre-training')

@@ -1,46 +1,18 @@
-import json
-import os
 
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import logging, math
 from layers import MLP, FuncToNodeSum
-from torch_scatter import scatter
 
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(
-        self,
-        graph,
-        p_norm,
-        mlp_rule_dim,
-        gamma_fact,
-        gamma_rule,
-        hidden_dim,
-        device,
-        dataset,
-        reasoner_type='gnn',
-        g_num_layers=2,
-        g_hidden_dim=128,
-        g_dropout=0.1,
-        g_activation='relu',
-        rule_tf_layers=1,
-        rule_num_heads=4,
-        rule_dropout=0.1,
-        rule_ffn_dim=512,
-        conve_num_filters=32,
-        conve_kernel_size=3,
-        conve_dropout=0.2,
-    ):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
         self.num_entities = graph.entity_size
         self.num_relations = graph.relation_size 
-        self.total_relations = graph.relation_size * 2
         self.padding_index = graph.relation_size 
 
         self.hidden_dim = hidden_dim
@@ -107,66 +79,6 @@ class RulE(torch.nn.Module):
             b=self.embedding_range_fact.item()
         )
 
-        self.reasoner_type = reasoner_type
-        self.g_num_layers = g_num_layers
-        self.g_hidden_dim = g_hidden_dim
-        self.g_activation = getattr(F, g_activation)
-        self.rule_tf_layers = int(rule_tf_layers)
-        self.rule_num_heads = int(rule_num_heads)
-        self.rule_dropout = float(rule_dropout)
-        self.rule_ffn_dim = int(rule_ffn_dim)
-        self.conve_num_filters = int(conve_num_filters)
-        self.conve_kernel_size = int(conve_kernel_size)
-        self.conve_dropout = float(conve_dropout)
-        if self.g_hidden_dim % self.rule_num_heads != 0:
-            raise ValueError('g_hidden_dim must be divisible by rule_num_heads')
-        self.gnn_cache_device = None
-        self.cached_edge_src = None
-        self.cached_edge_dst = None
-        self.cached_edge_rel = None
-        self.cached_cluster_incidence = None
-        self.cached_cluster_counts = None
-        self.cached_entity_cluster_counts = None
-
-        self.entity_init_proj = nn.Linear(self.hidden_dim * 2, self.g_hidden_dim, bias=False)
-        self.relation_init_proj = nn.Linear(self.hidden_dim, self.g_hidden_dim, bias=False)
-        self.rule_input_proj = nn.Linear(self.hidden_dim, self.g_hidden_dim, bias=False)
-        self.rule_context_proj = nn.Linear(self.g_hidden_dim, self.g_hidden_dim, bias=False)
-        self.local_entity_message_projs = nn.ModuleList(
-            [nn.Linear(self.g_hidden_dim, self.g_hidden_dim, bias=False) for _ in range(self.g_num_layers)]
-        )
-        self.local_relation_message_projs = nn.ModuleList(
-            [nn.Linear(self.g_hidden_dim, self.g_hidden_dim, bias=False) for _ in range(self.g_num_layers)]
-        )
-        self.local_triple_message_projs = nn.ModuleList(
-            [nn.Linear(self.g_hidden_dim, self.g_hidden_dim, bias=False) for _ in range(self.g_num_layers)]
-        )
-        self.cluster_proj = nn.Linear(self.g_hidden_dim, self.g_hidden_dim, bias=False)
-        self.global_entity_proj = nn.Linear(self.g_hidden_dim, self.g_hidden_dim, bias=False)
-        self.reasoner_dropout = nn.Dropout(g_dropout) if g_dropout > 0 else None
-        self.kge_cache_scores = None
-        self.kge_cache_row_index = None
-        self.kge_cache_meta = None
-        self.rule_position_embedding = None
-        self.rule_transformer = None
-        self.rule_cross_attn = None
-
-        self.conve_emb_h, self.conve_emb_w = self.get_embedding_grid_shape(self.g_hidden_dim)
-        conv_h = self.conve_emb_h * 2 - self.conve_kernel_size + 1
-        conv_w = self.conve_emb_w - self.conve_kernel_size + 1
-        if conv_h <= 0 or conv_w <= 0:
-            raise ValueError('conve_kernel_size is too large for g_hidden_dim')
-        self.conve_conv = nn.Conv2d(
-            1,
-            self.conve_num_filters,
-            kernel_size=(self.conve_kernel_size, self.conve_kernel_size),
-            bias=True,
-        )
-        self.conve_fc = nn.Linear(self.conve_num_filters * conv_h * conv_w, self.g_hidden_dim)
-        self.conve_input_dropout = nn.Dropout(self.conve_dropout)
-        self.conve_feature_dropout = nn.Dropout2d(self.conve_dropout)
-        self.conve_hidden_dropout = nn.Dropout(self.conve_dropout)
-
         # # Initialize to 1
         # nn.init.zeros_(
         #     tensor=self.relation_embedding.weight[self.padding_index]
@@ -179,13 +91,6 @@ class RulE(torch.nn.Module):
         # self.linear = torch.nn.Linear(self.rnn_hidden_dim, self.relation_dim)
         
         self.pi = 3.14159262358979323846
-
-    def get_embedding_grid_shape(self, dim):
-        height = int(math.sqrt(dim))
-        while height > 1 and dim % height != 0:
-            height -= 1
-        width = dim // height
-        return height, width
 
     # def add_param(self):
 
@@ -250,23 +155,6 @@ class RulE(torch.nn.Module):
         #     a=-self.embedding_range_rule.item(), 
         #     b=self.embedding_range_rule.item()
         # )
-        self.rule_position_embedding = nn.Embedding(self.max_length, self.g_hidden_dim)
-        transformer_activation = 'gelu' if self.g_activation == F.gelu else 'relu'
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.g_hidden_dim,
-            nhead=self.rule_num_heads,
-            dim_feedforward=self.rule_ffn_dim,
-            dropout=self.rule_dropout,
-            activation=transformer_activation,
-            batch_first=True,
-        )
-        self.rule_transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.rule_tf_layers)
-        self.rule_cross_attn = nn.MultiheadAttention(
-            embed_dim=self.g_hidden_dim,
-            num_heads=self.rule_num_heads,
-            dropout=self.rule_dropout,
-            batch_first=True,
-        )
         
        
     def compute_ruleE(self, sample, mode='single'):
@@ -384,7 +272,7 @@ class RulE(torch.nn.Module):
         # cal_mask = (~mask).unsqueeze(1).unsqueeze(-1)
         rule_len = mask.sum(-1).unsqueeze(1).unsqueeze(-1)
         cal_mask = mask.unsqueeze(1).unsqueeze(-1)
-        relations_flag = torch.pow(-1, torch.div(inputs, self.num_relations, rounding_mode='floor')).unsqueeze(-1)
+        relations_flag = torch.pow(-1,inputs // (self.num_relations)).unsqueeze(-1)
         inputs_com = inputs % self.num_relations
 
         inputs_com = torch.where(inputs==self.num_relations * 2, self.padding_index, inputs_com)
@@ -396,7 +284,7 @@ class RulE(torch.nn.Module):
         
         # rule_head
         embedding_r = self.relation_embedding(rules[:,:,1]%self.num_relations)
-        relations_flag = torch.pow(-1, torch.div(rules[:,:,1], self.num_relations, rounding_mode='floor')).unsqueeze(-1)
+        relations_flag = torch.pow(-1,rules[:,:,1] // (self.num_relations)).unsqueeze(-1)
         embedding_r *= relations_flag
 
         rule_body = embedding * cal_mask
@@ -419,7 +307,7 @@ class RulE(torch.nn.Module):
         # cal_mask = (~mask).unsqueeze(1).unsqueeze(-1)
         rule_len = mask.sum(-1).unsqueeze(1).unsqueeze(-1)
         cal_mask = mask.unsqueeze(1).unsqueeze(-1)
-        relations_flag = torch.pow(-1, torch.div(inputs, self.num_relations, rounding_mode='floor')).unsqueeze(-1)
+        relations_flag = torch.pow(-1,inputs // (self.num_relations)).unsqueeze(-1)
         inputs_com = inputs % self.num_relations
 
         inputs_com = torch.where(inputs==self.num_relations * 2, self.padding_index, inputs_com)
@@ -431,7 +319,7 @@ class RulE(torch.nn.Module):
         
         # rule_head
         embedding_r = self.relation_embedding(rules[:,:,1]%self.num_relations)
-        relations_flag = torch.pow(-1, torch.div(rules[:,:,1], self.num_relations, rounding_mode='floor')).unsqueeze(-1)
+        relations_flag = torch.pow(-1,rules[:,:,1] // (self.num_relations)).unsqueeze(-1)
         embedding_r *= relations_flag
 
         rule_body = embedding * cal_mask
@@ -444,377 +332,9 @@ class RulE(torch.nn.Module):
         # dist = self.gamma_rule.item() - torch.norm((outputs - embedding_r), p = self.p, dim=-1)
 
         return dist
-
-    def get_signed_relation_embedding(self, relation_ids):
-        relation_ids = relation_ids.long()
-        base_ids = relation_ids % self.num_relations
-        relation = self.relation_embedding(base_ids)
-        sign = 1.0 - 2.0 * (relation_ids >= self.num_relations).float()
-        return relation * sign.unsqueeze(-1)
-
-    def normalize_support(self, support):
-        scale = support.norm(p=2, dim=-1, keepdim=True).amax(dim=0, keepdim=True).clamp(min=1.0)
-        return support / scale
-
-    def apply_support_layer_norm(self, support, layer_norm):
-        return layer_norm(support)
-
-    def sparsemax(self, input, dim=-1):
-        input = input - input.max(dim=dim, keepdim=True)[0]
-        zs = torch.sort(input, dim=dim, descending=True)[0]
-        steps = torch.arange(1, zs.size(dim) + 1, device=input.device, dtype=input.dtype)
-        view = [1] * zs.dim()
-        view[dim] = -1
-        steps = steps.view(view)
-        cumsum_zs = zs.cumsum(dim)
-        support = (1 + steps * zs) > cumsum_zs
-        k = support.sum(dim=dim, keepdim=True).clamp(min=1)
-        taus = (cumsum_zs.gather(dim, k.long() - 1) - 1) / k
-        return torch.clamp(input - taus, min=0.0)
-
-    def encode_all_rules(self, device):
-        if self.rule_transformer is None:
-            raise RuntimeError('set_rules must be called before encoding rules')
-        if self.rule_features.device != device:
-            self.rule_features = self.rule_features.to(device)
-        if self.rule_masks.device != device:
-            self.rule_masks = self.rule_masks.to(device)
-
-        rule_bodies = self.rule_features[:, 2:]
-        rule_mask = self.rule_masks
-        safe_rule_bodies = torch.where(rule_mask, rule_bodies, torch.zeros_like(rule_bodies))
-        rule_body_emb = self.get_signed_relation_embedding(safe_rule_bodies) * rule_mask.unsqueeze(-1).float()
-
-        positions = torch.arange(self.max_length, device=device)
-        position_emb = self.rule_position_embedding(positions).unsqueeze(0)
-        rule_inputs = self.rule_input_proj(rule_body_emb) + position_emb
-        encoded_rules = self.rule_transformer(rule_inputs, src_key_padding_mask=~rule_mask)
-        return encoded_rules, rule_mask
-
-    def get_kge_cache_paths(self, cache_dir):
-        return {
-            "score": os.path.join(cache_dir, "query_kge_scores.fp16"),
-            "row_index": os.path.join(cache_dir, "query_row_index.npy"),
-            "meta": os.path.join(cache_dir, "query_kge_meta.json"),
-        }
-
-    def collect_kge_cache_queries(self):
-        query_keys = set()
-        for facts in (self.graph.ground_train_facts, self.graph.valid_facts, self.graph.test_facts):
-            for h, r, _ in facts:
-                query_keys.add(self.graph.encode_hr(h, r))
-        return np.asarray(sorted(query_keys), dtype=np.int64)
-
-    def has_valid_kge_cache(self, paths, checkpoint_path):
-        if not all(os.path.exists(path) for path in paths.values()):
-            return False
-
-        if checkpoint_path and os.path.exists(checkpoint_path):
-            checkpoint_mtime = os.path.getmtime(checkpoint_path)
-            cache_mtime = min(os.path.getmtime(path) for path in paths.values())
-            if checkpoint_mtime > cache_mtime:
-                return False
-
-        with open(paths["meta"], "r") as fi:
-            meta = json.load(fi)
-
-        if not meta.get("complete", False):
-            return False
-        if meta.get("num_entities") != self.num_entities:
-            return False
-        if meta.get("total_relations") != self.total_relations:
-            return False
-
-        return True
-
-    @torch.no_grad()
-    def build_kge_cache(self, cache_dir, device, batch_size):
-        os.makedirs(cache_dir, exist_ok=True)
-        paths = self.get_kge_cache_paths(cache_dir)
-        query_keys = self.collect_kge_cache_queries()
-        num_queries = len(query_keys)
-        batch_size = max(1, int(batch_size))
-
-        logging.info('Building query KGE cache: %d queries x %d entities', num_queries, self.num_entities)
-
-        row_index = np.full(self.total_relations * self.num_entities, -1, dtype=np.int32)
-        row_index[query_keys] = np.arange(num_queries, dtype=np.int32)
-        np.save(paths["row_index"], row_index)
-
-        score_memmap = np.memmap(
-            paths["score"],
-            dtype=np.float16,
-            mode="w+",
-            shape=(num_queries, self.num_entities),
-        )
-
-        for start in range(0, num_queries, batch_size):
-            end = min(start + batch_size, num_queries)
-            hr_batch = torch.from_numpy(query_keys[start:end])
-            all_h = torch.remainder(hr_batch, self.num_entities).long().to(device)
-            all_r = torch.div(hr_batch, self.num_entities, rounding_mode='floor').long().to(device)
-
-            batch_scores = self.compute_g_KGE(all_h, all_r).detach().cpu().numpy().astype(np.float16)
-            score_memmap[start:end] = batch_scores
-
-            if end % max(batch_size * 100, 1) == 0 or end == num_queries:
-                logging.info('KGE cache progress: %d / %d queries', end, num_queries)
-
-        score_memmap.flush()
-
-        with open(paths["meta"], "w") as fo:
-            json.dump(
-                {
-                    "num_queries": int(num_queries),
-                    "num_entities": int(self.num_entities),
-                    "total_relations": int(self.total_relations),
-                    "dtype": "float16",
-                    "complete": True,
-                },
-                fo,
-            )
-
-    def load_kge_cache(self, cache_dir):
-        paths = self.get_kge_cache_paths(cache_dir)
-        with open(paths["meta"], "r") as fi:
-            meta = json.load(fi)
-
-        self.kge_cache_row_index = np.load(paths["row_index"], mmap_mode='r')
-        self.kge_cache_scores = np.memmap(
-            paths["score"],
-            dtype=np.float16,
-            mode='r',
-            shape=(meta["num_queries"], meta["num_entities"]),
-        )
-        self.kge_cache_meta = meta
-        logging.info('Loaded query KGE cache from %s', cache_dir)
-
-    def prepare_kge_cache(self, cache_dir, checkpoint_path, device, batch_size):
-        paths = self.get_kge_cache_paths(cache_dir)
-        if self.has_valid_kge_cache(paths, checkpoint_path):
-            self.load_kge_cache(cache_dir)
-            return
-
-        self.build_kge_cache(cache_dir, device, batch_size)
-        self.load_kge_cache(cache_dir)
-
-    def get_query_kge_score(self, all_h, all_r):
-        if self.kge_cache_scores is None or self.kge_cache_row_index is None:
-            return self.compute_g_KGE(all_h, all_r)
-
-        query_ids = (all_r.long() * self.num_entities + all_h.long()).detach().cpu().numpy()
-        row_ids = self.kge_cache_row_index[query_ids]
-        if (row_ids < 0).any():
-            return self.compute_g_KGE(all_h, all_r)
-
-        score = np.asarray(self.kge_cache_scores[row_ids], dtype=np.float32)
-        return torch.from_numpy(score).to(all_h.device)
-
-    def prepare_reasoner(self, device, cache_dir=None, checkpoint_path=None, kge_batch_size=1):
-        self.graph.cache_adjacency(device)
-        if self.reasoner_type == 'grounding':
-            self.eval_compute_rule_weight(device)
-        else:
-            self.cache_gnn_structure(device)
-            if cache_dir is not None:
-                self.prepare_kge_cache(cache_dir, checkpoint_path, device, kge_batch_size)
-
-    def scatter_softmax(self, score, index, dim_size):
-        max_score = scatter(score, index, dim=0, dim_size=dim_size, reduce='max')
-        stabilized = torch.exp(score - max_score[index])
-        denom = scatter(stabilized, index, dim=0, dim_size=dim_size, reduce='sum')
-        return stabilized / denom[index].clamp(min=1e-12)
-
-    def cache_gnn_structure(self, device):
-        if self.gnn_cache_device == device and self.cached_edge_src is not None:
-            return
-
-        edge_src = []
-        edge_dst = []
-        edge_rel = []
-        cluster_rows = []
-        cluster_cols = []
-        for relation_id in range(self.total_relations):
-            adjacency = self.graph.relation2adjacency[relation_id][0]
-            src = adjacency[1].long()
-            dst = adjacency[0].long()
-            if src.numel() == 0:
-                continue
-            edge_src.append(src)
-            edge_dst.append(dst)
-            edge_rel.append(torch.full((src.numel(),), relation_id, dtype=torch.long))
-
-            unique_src = torch.unique(src)
-            unique_dst = torch.unique(dst)
-            cluster_rows.append(unique_src)
-            cluster_cols.append(torch.full((unique_src.numel(),), relation_id, dtype=torch.long))
-            cluster_rows.append(unique_dst)
-            cluster_cols.append(torch.full((unique_dst.numel(),), relation_id + self.total_relations, dtype=torch.long))
-
-        if edge_src:
-            edge_src = torch.cat(edge_src).to(device)
-            edge_dst = torch.cat(edge_dst).to(device)
-            edge_rel = torch.cat(edge_rel).to(device)
-        else:
-            edge_src = torch.empty(0, dtype=torch.long, device=device)
-            edge_dst = torch.empty(0, dtype=torch.long, device=device)
-            edge_rel = torch.empty(0, dtype=torch.long, device=device)
-
-        if cluster_rows:
-            cluster_rows = torch.cat(cluster_rows)
-            cluster_cols = torch.cat(cluster_cols)
-            cluster_indices = torch.stack([cluster_rows, cluster_cols], dim=0).to(device)
-            cluster_values = torch.ones(cluster_indices.size(1), device=device)
-        else:
-            cluster_indices = torch.empty((2, 0), dtype=torch.long, device=device)
-            cluster_values = torch.empty(0, device=device)
-
-        cluster_incidence = torch.sparse_coo_tensor(
-            cluster_indices,
-            cluster_values,
-            size=(self.num_entities, self.total_relations * 2),
-            device=device,
-        ).coalesce()
-
-        self.cached_edge_src = edge_src
-        self.cached_edge_dst = edge_dst
-        self.cached_edge_rel = edge_rel
-        self.cached_cluster_incidence = cluster_incidence
-        self.cached_cluster_counts = torch.sparse.sum(cluster_incidence, dim=0).to_dense().clamp(min=1.0).unsqueeze(-1)
-        self.cached_entity_cluster_counts = torch.sparse.sum(cluster_incidence, dim=1).to_dense().clamp(min=1.0).unsqueeze(-1)
-        self.gnn_cache_device = device
-
-    def build_rule_enhanced_relations(self, device):
-        relation_ids = torch.arange(self.total_relations, device=device)
-        base_relation = self.relation_init_proj(self.get_signed_relation_embedding(relation_ids))
-        if self.num_rules == 0:
-            return base_relation
-
-        encoded_rules, rule_mask = self.encode_all_rules(device)
-        enhanced_relation = base_relation.clone()
-        scale = math.sqrt(float(self.g_hidden_dim))
-
-        for relation_id, relation_rules in enumerate(self.relation2rules):
-            if len(relation_rules) == 0:
-                continue
-            rule_ids = torch.tensor([index for index, _ in relation_rules], dtype=torch.long, device=device)
-            selected_rule_tokens = encoded_rules[rule_ids]
-            selected_rule_mask = rule_mask[rule_ids]
-            relation_query = base_relation[relation_id].view(1, 1, -1).expand(rule_ids.size(0), 1, self.g_hidden_dim)
-            rule_summary, _ = self.rule_cross_attn(
-                relation_query,
-                selected_rule_tokens,
-                selected_rule_tokens,
-                key_padding_mask=~selected_rule_mask,
-            )
-            rule_summary = rule_summary.squeeze(1)
-            compat = (rule_summary * base_relation[relation_id].unsqueeze(0)).sum(dim=-1) / scale
-            rule_weight = torch.softmax(compat, dim=0)
-            relation_context = torch.sum(rule_weight.unsqueeze(-1) * rule_summary, dim=0)
-            enhanced_relation[relation_id] = self.g_activation(
-                base_relation[relation_id] + self.rule_context_proj(relation_context)
-            )
-
-        return enhanced_relation
-
-    def compute_local_context(self, entity_state, relation_state, layer_id):
-        src = self.cached_edge_src
-        dst = self.cached_edge_dst
-        rel = self.cached_edge_rel
-        if src.numel() == 0:
-            return entity_state
-
-        source_hidden = entity_state[src]
-        target_hidden = entity_state[dst]
-        relation_hidden = relation_state[rel]
-
-        entity_message = self.local_entity_message_projs[layer_id](source_hidden)
-        relation_message = self.local_relation_message_projs[layer_id](relation_hidden)
-        triple_message = self.local_triple_message_projs[layer_id](source_hidden * relation_hidden)
-
-        entity_alpha = self.scatter_softmax(
-            (entity_message * target_hidden).sum(dim=-1, keepdim=True),
-            dst,
-            self.num_entities,
-        )
-        relation_alpha = self.scatter_softmax(
-            (relation_message * target_hidden).sum(dim=-1, keepdim=True),
-            dst,
-            self.num_entities,
-        )
-        triple_alpha = self.scatter_softmax(
-            (triple_message * target_hidden).sum(dim=-1, keepdim=True),
-            dst,
-            self.num_entities,
-        )
-
-        entity_context = scatter(entity_alpha * entity_message, dst, dim=0, dim_size=self.num_entities, reduce='sum')
-        relation_context = scatter(relation_alpha * relation_message, dst, dim=0, dim_size=self.num_entities, reduce='sum')
-        triple_context = scatter(triple_alpha * triple_message, dst, dim=0, dim_size=self.num_entities, reduce='sum')
-
-        updated = entity_state + entity_context + relation_context + triple_context
-        updated = self.g_activation(updated)
-        if self.reasoner_dropout is not None:
-            updated = self.reasoner_dropout(updated)
-        return self.normalize_support(updated)
-
-    def compute_global_cluster_context(self, entity_state):
-        cluster_hidden = torch.sparse.mm(self.cached_cluster_incidence.transpose(0, 1), entity_state)
-        cluster_hidden = cluster_hidden / self.cached_cluster_counts
-        cluster_hidden = self.g_activation(self.cluster_proj(cluster_hidden))
-
-        global_entity = torch.sparse.mm(self.cached_cluster_incidence, cluster_hidden)
-        global_entity = global_entity / self.cached_entity_cluster_counts
-        global_entity = self.g_activation(self.global_entity_proj(global_entity))
-        if self.reasoner_dropout is not None:
-            global_entity = self.reasoner_dropout(global_entity)
-        return global_entity
-
-    def encode_gnn_graph(self, device):
-        self.cache_gnn_structure(device)
-        relation_state = self.build_rule_enhanced_relations(device)
-        entity_state = self.entity_init_proj(self.entity_embedding.weight)
-
-        for layer_id in range(self.g_num_layers):
-            entity_state = self.compute_local_context(entity_state, relation_state, layer_id)
-
-        global_entity = self.compute_global_cluster_context(entity_state)
-        entity_state = self.normalize_support(entity_state + global_entity)
-        return entity_state, relation_state
-
-    def conve_score(self, head_hidden, relation_hidden, tail_hidden):
-        batch_size = head_hidden.size(0)
-        head_2d = head_hidden.view(batch_size, 1, self.conve_emb_h, self.conve_emb_w)
-        relation_2d = relation_hidden.view(batch_size, 1, self.conve_emb_h, self.conve_emb_w)
-        stacked = torch.cat([head_2d, relation_2d], dim=2)
-        stacked = self.conve_input_dropout(stacked)
-        hidden = self.conve_conv(stacked)
-        hidden = F.relu(hidden)
-        hidden = self.conve_feature_dropout(hidden)
-        hidden = hidden.view(batch_size, -1)
-        hidden = self.conve_fc(hidden)
-        hidden = self.g_activation(hidden)
-        hidden = self.conve_hidden_dropout(hidden)
-        return torch.matmul(hidden, tail_hidden.transpose(0, 1)) + self.bias.unsqueeze(0)
-
-    def forward_gnn(self, all_h, all_r, edges_to_remove):
-        del edges_to_remove
-        device = all_h.device
-        entity_state, relation_state = self.encode_gnn_graph(device)
-        head_hidden = entity_state[all_h]
-        relation_hidden = relation_state[all_r]
-        score = self.conve_score(head_hidden, relation_hidden, entity_state)
-        mask = torch.ones(all_h.size(0), self.graph.entity_size, device=device).bool()
-        return score, mask
     
 
     def forward(self, all_h, all_r, edges_to_remove):
-        if self.reasoner_type == 'grounding':
-            return self.forward_grounding(all_h, all_r, edges_to_remove)
-
-        return self.forward_gnn(all_h, all_r, edges_to_remove)
-
-    def forward_grounding(self, all_h, all_r, edges_to_remove):
         query_r = all_r[0].item()
         assert (all_r != query_r).sum() == 0
         device = all_r.device

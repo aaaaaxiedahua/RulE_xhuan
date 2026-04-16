@@ -234,7 +234,8 @@ def build_objective(cli_args, base_args):
         logging.info("Starting trial %d with params: %s", trial.number, trial.params)
 
         model, ground_trainer = build_stage2_components(trial_args, device)
-        load_stage1_checkpoint(model, stage1_checkpoint, device)
+        if trial_args.reasoner_type == "grounding":
+            load_stage1_checkpoint(model, stage1_checkpoint, device)
 
         ground_trainer.model.entity_embedding.weight.requires_grad = True
         ground_trainer.model.relation_embedding.weight.requires_grad = True
@@ -260,9 +261,9 @@ def build_objective(cli_args, base_args):
 
         ground_trainer.model.prepare_reasoner(
             device,
-            cache_dir=os.path.join(trial_args.save_path, "kge_cache"),
-            checkpoint_path=stage1_checkpoint,
-            kge_batch_size=trial_args.g_batch_size,
+            cache_dir=os.path.join(trial_args.save_path, "kge_cache") if trial_args.reasoner_type == "grounding" else None,
+            checkpoint_path=stage1_checkpoint if trial_args.reasoner_type == "grounding" else None,
+            kge_batch_size=trial_args.g_batch_size if trial_args.reasoner_type == "grounding" else 1,
         )
 
         logging.info(">>>>> RulE: %s-Training (Optuna)", ground_trainer.model.reasoner_type)

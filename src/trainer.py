@@ -388,8 +388,8 @@ class GroundTrainer(object):
         
         # fix the parameters of pre-training
 
-        self.model.entity_embedding.weight.requires_grad = self.model.reasoner_type != 'grounding'
-        self.model.relation_embedding.weight.requires_grad = self.model.reasoner_type != 'grounding'
+        self.model.entity_embedding.weight.requires_grad = False
+        self.model.relation_embedding.weight.requires_grad = False
         self.model.rule_emb.weight.requires_grad = False
 
 
@@ -398,30 +398,16 @@ class GroundTrainer(object):
             lr=float(args.g_lr), 
             weight_decay=float(args.weight_decay))
 
-        scheduler = None
-        if getattr(args, 'scheduler', 'none') == 'plateau':
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode='max',
-                factor=float(args.scheduler_factor),
-                patience=int(args.scheduler_patience)
-            )
-
 
         self.train_set.make_batches()
         
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
         
-        self.model.prepare_reasoner(
-            self.device,
-            cache_dir=os.path.join(args.save_path, 'kge_cache'),
-            checkpoint_path=os.path.join(args.save_path, 'checkpoint'),
-            kge_batch_size=args.g_batch_size,
-        )
+        self.model.eval_compute_rule_weight(self.device)
 
 
         
-        logging.info('>>>>> RulE: {}-Training'.format(self.model.reasoner_type))
+        logging.info('>>>>> RulE: Grounding-Training')
         
 
         best_valid_mrr = 0.0 
@@ -449,15 +435,13 @@ class GroundTrainer(object):
 
             self.train_step( optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args)
             valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
-            if scheduler is not None:
-                scheduler.step(valid_mrr_iter)
             # test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
             # test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
             
 
             if valid_mrr_iter > best_valid_mrr:
                 best_valid_mrr = valid_mrr_iter
-                # test_mrr = test_mrr_iter
+                test_mrr = test_mrr_iter
                 self.save(args, os.path.join(args.save_path, 'grounding.pt'))
         
 
@@ -509,17 +493,14 @@ class GroundTrainer(object):
                 edges_to_remove = edges_to_remove.cuda(device=self.device)
                 target_t = target_t.cuda(device=self.device)
 
+            target = target * smoothing + target_t * (1 - smoothing)
+            
             grounding_rule_score, mask = model(all_h, all_r, edges_to_remove)
             
             if mask.sum().item() != 0:
-                if model.reasoner_type == 'grounding':
-                    target = target * smoothing + target_t * (1 - smoothing)
-                    rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
-                    loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
-                else:
-                    if smoothing > 0:
-                        target = target * (1 - smoothing) + 0.5 * smoothing
-                    loss = F.binary_cross_entropy_with_logits(grounding_rule_score[mask], target[mask])
+                rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
+                
+                loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
                 loss.backward()
 
                 optimizer.step()
@@ -683,7 +664,7 @@ class GroundTrainer(object):
             # logits, mask = model.forward_weight(all_h, all_r, None)
             logits, mask = model(all_h, all_r, None)
 
-            kge_score = model.get_query_kge_score(all_h, all_r)
+            kge_score = model.compute_g_KGE(all_h,all_r)
             
             logits = logits + alpha * kge_score
 
